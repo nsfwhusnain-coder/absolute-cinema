@@ -1,116 +1,94 @@
+import { useId } from "react";
 import { cn } from "@/lib/utils";
-import "./brand-mark.css";
 
-/** Min tile size is 44px. No 40/48 variants. Nav = 56. Compact auto at ≤72. */
 export type BrandMarkSize = "nav" | "header" | "hero" | "lg";
 
-interface Props {
-  size?: BrandMarkSize;
-  className?: string;
-  /** @deprecated kept for call-site compat; always live glass */
-  glass?: boolean;
-}
-
-const SIZE_PX: Record<BrandMarkSize, number> = {
-  nav: 56,
-  lg: 72,
-  header: 140,
-  hero: 512,
+const SIZE_REM: Record<BrandMarkSize, number> = {
+  nav: 2.25,
+  lg: 4.5,
+  header: 8.75,
+  hero: 32,
 };
 
-/**
- * The mark is emitted in rem rather than px so it scales with the root font,
- * which is the only thing that lifts it on a television. `--ab-size` is set
- * inline and everything else in brand-mark.css derives from it, so a
- * stylesheet rule could not reach it — the mark stayed at a literal 56px while
- * the type around it doubled, and on a 4K panel it shrank to a thumbnail.
- *
- * Desktop is unaffected to the pixel: the root font is 16px there, so every
- * value below resolves to exactly what it replaced.
- */
-const ROOT_FONT_PX = 16;
-
-/**
- * Absolute Cinema AB — LIVE transparent glass.
- * Compact physics auto-apply when size ≤ 72px.
- * Must NOT sit inside a parent with backdrop-filter.
- */
-export function BrandMark({ size = "nav", className }: Props) {
-  const px = SIZE_PX[size];
-  const compact = px <= 72;
-
+/** The "A" whose counter is a play button — used alone or inside the tile. */
+export function LogoGlyph({ className }: { className?: string }) {
+  const gradient = useId();
   return (
-    <span
-      role="img"
-      aria-label="Absolute Cinema"
-      className={cn("ab-glass", className)}
-      data-size={size}
-      data-compact={compact ? "true" : "false"}
-      style={{ ["--ab-size" as string]: `${px / ROOT_FONT_PX}rem` }}
-    >
-      <span className="ab-glass__letter-wrap" aria-hidden>
-        <span className="ab-glass__letters">AB</span>
-      </span>
-    </span>
+    <svg viewBox="104 88 304 336" className={className} aria-hidden>
+      <defs>
+        <linearGradient id={gradient} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#ff3b4a" />
+          <stop offset="1" stopColor="#d10f25" />
+        </linearGradient>
+      </defs>
+      <path d="M256 104 L392 408 H330 L256 232 L182 408 H120 Z" fill="currentColor" />
+      <path d="M236 304 L236 372 L294 338 Z" fill={`url(#${gradient})`} />
+    </svg>
   );
 }
 
-/**
- * Nav lockup: [56px glass AB] + 12px + plain "ABSOLUTE CINEMA" wordmark.
- * Kept for settings/footer contexts that still want the full mark.
- */
-export function BrandLockup({ className }: { className?: string }) {
+/** App icon: the glyph on a dark rounded tile. Sized in rem so it scales on TVs. */
+export function BrandMark({ size = "nav", className }: { size?: BrandMarkSize; className?: string }) {
+  const background = useId();
   return (
-    <span className={cn("ab-lockup", className)}>
+    <svg
+      role="img"
+      aria-label="Absolute Cinema"
+      viewBox="0 0 512 512"
+      className={cn("shrink-0", className)}
+      style={{ width: `${SIZE_REM[size]}rem`, height: `${SIZE_REM[size]}rem` }}
+    >
+      <defs>
+        <linearGradient id={background} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#1c1c24" />
+          <stop offset="1" stopColor="#08080b" />
+        </linearGradient>
+      </defs>
+      <rect x="16" y="16" width="480" height="480" rx="112" fill={`url(#${background})`} />
+      <rect x="16.5" y="16.5" width="479" height="479" rx="111.5" fill="none" stroke="#fff" strokeOpacity="0.12" />
+      <g color="#f5f5f7">
+        <svg x="104" y="88" width="304" height="336" viewBox="104 88 304 336">
+          <LogoGlyphPaths />
+        </svg>
+      </g>
+    </svg>
+  );
+}
+
+function LogoGlyphPaths() {
+  const gradient = useId();
+  return (
+    <>
+      <defs>
+        <linearGradient id={gradient} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#ff3b4a" />
+          <stop offset="1" stopColor="#d10f25" />
+        </linearGradient>
+      </defs>
+      <path d="M256 104 L392 408 H330 L256 232 L182 408 H120 Z" fill="currentColor" />
+      <path d="M236 304 L236 372 L294 338 Z" fill={`url(#${gradient})`} />
+    </>
+  );
+}
+
+/** Mark + "Absolute Cinema" wordmark. The wordmark hides on narrow screens. */
+export function BrandLockup({ className, compact = false }: { className?: string; compact?: boolean }) {
+  return (
+    <span className={cn("flex items-center gap-2.5", className)}>
       <BrandMark size="nav" />
-      <span className="ab-lockup__wordmark" aria-hidden>
-        Absolute Cinema
+      <span
+        className={cn(
+          "font-[family-name:var(--font-montserrat)] text-[1.05rem] font-extrabold tracking-tight text-white",
+          compact ? "hidden" : "hidden sm:inline",
+        )}
+      >
+        Absolute <span className="text-white/60">Cinema</span>
       </span>
     </span>
   );
 }
 
-/**
- * minimal lettermark for the main navbar — no glass pill.
- */
+/** Navbar logo. */
 export function NavLettermark({ className }: { className?: string }) {
-  /**
-   * One mark, not two. This rendered a standalone italic "A" while the sign-in
-   * card showed the glass "AB" tile - the same product wearing two different
-   * logos depending on where you looked, and "A" is not an abbreviation a new
-   * user would connect to either name.
-   *
-   * The glass tile wins because it is already the app's visual language:
-   * brand-mark.css supplies the exact backdrop-filter, fill, inset highlight
-   * and shadow that the loading screen's globe is built from. Unifying here
-   * makes the logo, the sign-in card and the thing you watch while a film
-   * loads all the same material.
-   *
-   * Scaled down at the call site rather than adding a size token, because 56px
-   * is correct everywhere else the nav size is used.
-   */
-  return (
-    <BrandMark size="nav" className={cn("origin-left scale-[0.62]", className)} />
-  );
-}
-
-interface WordmarkProps {
-  size?: "sm" | "md" | "lg";
-  className?: string;
-}
-
-/** Glass pill wordmark — same liquid-glass recipe as the AB tile (hero/marketing). */
-export function BrandWordmark({ size = "md", className }: WordmarkProps) {
-  return (
-    <span
-      role="img"
-      aria-label="Absolute Cinema"
-      className={cn("ab-glass-pill", className)}
-      data-size={size}
-    >
-      <span className="ab-glass-pill__wrap" aria-hidden>
-        <span className="ab-glass-pill__text">Absolute Cinema</span>
-      </span>
-    </span>
-  );
+  return <BrandLockup className={className} />;
 }

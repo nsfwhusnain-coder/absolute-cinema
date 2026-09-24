@@ -7,6 +7,7 @@ import { PageTransition } from "@/components/page-transition";
 
 const MobileDock = dynamic(() => import("@/components/mobile-dock").then((m) => m.MobileDock));
 const Footer = dynamic(() => import("@/components/footer").then((m) => m.Footer));
+const SetupWizard = dynamic(() => import("@/components/setup-wizard").then((m) => m.SetupWizard));
 const AmbientBackground = dynamic(() =>
   import("@/components/ambient-background").then((m) => m.AmbientBackground)
 );
@@ -43,6 +44,7 @@ export function MainChrome({ children, bottomNavEnabled, hubsEnabled }: MainChro
         {isLogin ? null : <Footer />}
       </div>
       {showDock ? <MobileDock hubsEnabled={hubsEnabled} /> : null}
+      {isLogin ? null : <SetupWizard />}
     </>
   );
 }

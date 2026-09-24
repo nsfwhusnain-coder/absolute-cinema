@@ -108,6 +108,9 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ path: stri
       if (a === "genre" && (b === "movie" || b === "tv")) {
         return tmdb.genres(b);
       }
+      if (a === "discover" && b === "movie" && c === "new-digital") {
+        return tmdb.newDigitalReleases(Number(params.page) || 1, (params.region as string) || "US");
+      }
       if (a === "discover" && (b === "movie" || b === "tv") && c === "provider" && path[3]) {
         return tmdb.discoverByWatchProvider(
           b,

@@ -21,6 +21,8 @@ import {
 import { useMounted } from "@/hooks/use-mounted";
 import { HeroSkeleton, MovieRowSkeleton } from "@/components/skeletons";
 import { LazyRail } from "@/components/lazy-rail";
+import { CatalogRail, ServiceRail } from "@/components/catalog-rail";
+import { STREAMING_SERVICES } from "@/lib/browse-categories";
 import { BrowseError } from "@/components/empty-states";
 import { cn } from "@/lib/utils";
 import {
@@ -93,7 +95,6 @@ interface HomeCatalog {
 }
 
 async function fetchHomeCatalog(): Promise<HomeCatalog> {
-  // LordFlix home ends after curated rails — no genre rows (Comedy/Crime/…)
   const [
     trendingMovies,
     trendingSeries,
@@ -342,6 +343,14 @@ export function HomeView() {
               </MovieRow>
             ) : null}
 
+            <LazyRail minHeight={360}>
+              <CatalogRail
+                title="New on Digital"
+                viewAllHref="/browse/new-digital"
+                sources={[{ path: "discover/movie/new-digital", mediaType: "movie" }]}
+              />
+            </LazyRail>
+
             {rows?.netflixMovies.length ? (
               <LazyRail minHeight={360}>
                 <MovieRow
@@ -371,6 +380,12 @@ export function HomeView() {
                 </MovieRow>
               </LazyRail>
             ) : null}
+
+            {STREAMING_SERVICES.map((service) => (
+              <LazyRail key={service.slug} minHeight={360}>
+                <ServiceRail service={service} />
+              </LazyRail>
+            ))}
 
             {rows?.topRatedMovies.length ? (
               <LazyRail minHeight={360}>

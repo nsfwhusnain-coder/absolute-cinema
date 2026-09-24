@@ -4,6 +4,8 @@ import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as SonnerToaster } from "@/components/ui/sonner";
 import { Providers } from "@/components/providers";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 import { PWARegister } from "@/components/pwa-register";
 import { TvSpatialNavigation } from "@/components/tv-spatial-navigation";
 import { tvDetectionBootstrapScript } from "@/lib/tv-detect";
@@ -37,20 +39,20 @@ export const metadata: Metadata = {
   },
   description: "Your personal streaming experience — movies and TV in one place.",
   keywords: ["movies", "streaming", "tv", "absolute cinema"],
-  manifest: "/manifest.json?v=2",
+  manifest: "/manifest.json?v=3",
   icons: {
     icon: [
-      { url: "/favicon.svg?v=2", type: "image/svg+xml" },
-      { url: "/favicon-32.png?v=2", sizes: "32x32", type: "image/png" },
-      { url: "/favicon-16.png?v=2", sizes: "16x16", type: "image/png" },
+      { url: "/favicon.svg?v=3", type: "image/svg+xml" },
+      { url: "/favicon-32.png?v=3", sizes: "32x32", type: "image/png" },
+      { url: "/favicon-16.png?v=3", sizes: "16x16", type: "image/png" },
     ],
-    apple: [{ url: "/apple-touch-icon.png?v=2", sizes: "180x180", type: "image/png" }],
+    apple: [{ url: "/apple-touch-icon.png?v=3", sizes: "180x180", type: "image/png" }],
   },
   openGraph: {
     title: "Absolute Cinema",
     description: "Your personal streaming experience — movies and TV in one place.",
     type: "website",
-    images: [{ url: "/og-image.png?v=2", width: 1200, height: 630, alt: "Absolute Cinema" }],
+    images: [{ url: "/og-image.png?v=3", width: 1200, height: 630, alt: "Absolute Cinema" }],
   },
 };
 
@@ -63,11 +65,14 @@ export const viewport = {
   viewportFit: "cover",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Seeding the provider means the navbar and session-aware UI render on the
+  // first paint instead of popping in after a client-side /api/auth/session.
+  const session = await getServerSession(authOptions).catch(() => null);
   return (
     <html lang="en" suppressHydrationWarning>
       <body
@@ -77,7 +82,7 @@ export default function RootLayout({
             See tvDetectionBootstrapScript() for why this cannot wait for React. */}
         <script dangerouslySetInnerHTML={{ __html: legacyStorageMigrationScript() }} />
         <script dangerouslySetInnerHTML={{ __html: tvDetectionBootstrapScript() }} />
-        <Providers>
+        <Providers session={session}>
           {children}
           <PWARegister />
         </Providers>

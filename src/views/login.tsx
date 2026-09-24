@@ -115,6 +115,25 @@ export function LoginView({ callbackUrl, error }: LoginViewProps) {
   const [signupPinConfirm, setSignupPinConfirm] = useState("");
   const [signupInviteCode, setSignupInviteCode] = useState("");
 
+  const [registration, setRegistration] = useState<{ firstRun: boolean; inviteEnabled: boolean } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/register")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((info: { firstRun: boolean; inviteEnabled: boolean } | null) => {
+        if (cancelled || !info) return;
+        setRegistration(info);
+        if (info.firstRun) setMode("signup");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const firstRun = registration?.firstRun === true;
+  // Hide the sign-up path when it cannot succeed (no invite code configured).
+  const canSelfRegister = firstRun || registration?.inviteEnabled !== false;
+
   useEffect(() => {
     const stored = readLastProfile();
     if (!stored) return;
@@ -265,13 +284,16 @@ export function LoginView({ callbackUrl, error }: LoginViewProps) {
             {showReturningTile
               ? "Enter your PIN to continue."
               : mode === "signup"
-                ? "Create a household profile with an invite code."
+                ? firstRun
+                  ? "Create the admin account for this server."
+                  : "Create a household profile with an invite code."
                 : "Pick a profile and enter the PIN."}
           </CardDescription>
         </CardHeader>
         <CardContent>
           {mode === "signup" ? (
             <form onSubmit={handleSignUp} className="space-y-3">
+              {firstRun ? null : (
               <div className="space-y-1.5">
                 <Label htmlFor="su-invite">Invite code</Label>
                 <div className="relative">
@@ -287,6 +309,7 @@ export function LoginView({ callbackUrl, error }: LoginViewProps) {
                   />
                 </div>
               </div>
+              )}
               <div className="space-y-1.5">
                 <Label htmlFor="su-name">Name</Label>
                 <div className="relative">
@@ -339,15 +362,18 @@ export function LoginView({ callbackUrl, error }: LoginViewProps) {
                 </div>
               </div>
               <Button type="submit" disabled={loading} className="w-full rounded-full">
-                {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />} Create account
+                {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}{" "}
+                {firstRun ? "Create admin account" : "Create account"}
               </Button>
-              <button
-                type="button"
-                className="w-full py-2 text-sm text-muted-foreground hover:text-foreground"
-                onClick={() => setMode("signin")}
-              >
-                Back to sign in
-              </button>
+              {firstRun ? null : (
+                <button
+                  type="button"
+                  className="w-full py-2 text-sm text-muted-foreground hover:text-foreground"
+                  onClick={() => setMode("signin")}
+                >
+                  Back to sign in
+                </button>
+              )}
             </form>
           ) : showReturningTile ? (
             <form onSubmit={handleSignIn} className="space-y-4">
@@ -390,13 +416,15 @@ export function LoginView({ callbackUrl, error }: LoginViewProps) {
               >
                 Use a different profile
               </button>
-              <button
-                type="button"
-                className="w-full py-1 text-sm text-muted-foreground hover:text-foreground"
-                onClick={() => setMode("signup")}
-              >
-                Create a household account
-              </button>
+              {canSelfRegister ? (
+                <button
+                  type="button"
+                  className="w-full py-1 text-sm text-muted-foreground hover:text-foreground"
+                  onClick={() => setMode("signup")}
+                >
+                  Create a household account
+                </button>
+              ) : null}
             </form>
           ) : (
             <form onSubmit={handleSignIn} className="space-y-3">
@@ -449,13 +477,15 @@ export function LoginView({ callbackUrl, error }: LoginViewProps) {
                   Back to {lastProfile}
                 </button>
               ) : null}
-              <button
-                type="button"
-                className="w-full py-1 text-sm text-muted-foreground hover:text-foreground"
-                onClick={() => setMode("signup")}
-              >
-                Create a household account
-              </button>
+              {canSelfRegister ? (
+                <button
+                  type="button"
+                  className="w-full py-1 text-sm text-muted-foreground hover:text-foreground"
+                  onClick={() => setMode("signup")}
+                >
+                  Create a household account
+                </button>
+              ) : null}
             </form>
           )}
         </CardContent>

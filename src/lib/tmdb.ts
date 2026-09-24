@@ -82,16 +82,45 @@ async function apiKey(): Promise<string> {
   return key;
 }
 
+/**
+ * TMDB issues two credentials: a v3 "API Key" (32 hex chars, query param) and
+ * a v4 "API Read Access Token" (a JWT, bearer header). People paste either,
+ * so both are accepted.
+ */
+export function tmdbAuth(key: string): { param?: string; headers: Record<string, string> } {
+  const trimmed = key.trim();
+  if (trimmed.startsWith("eyJ")) {
+    return { headers: { Accept: "application/json", Authorization: `Bearer ${trimmed}` } };
+  }
+  return { param: trimmed, headers: { Accept: "application/json" } };
+}
+
+/** Checks a TMDB credential against the API without saving it. */
+export async function validateTmdbKey(key: string): Promise<{ ok: boolean; error?: string }> {
+  const auth = tmdbAuth(key);
+  const url = new URL(`${TMDB_BASE}/configuration`);
+  if (auth.param) url.searchParams.set("api_key", auth.param);
+  try {
+    const res = await fetch(url, { headers: auth.headers, cache: "no-store", signal: AbortSignal.timeout(8000) });
+    if (res.ok) return { ok: true };
+    if (res.status === 401) return { ok: false, error: "TMDB rejected this key." };
+    return { ok: false, error: `TMDB returned HTTP ${res.status}.` };
+  } catch {
+    return { ok: false, error: "Could not reach TMDB to verify the key." };
+  }
+}
+
 async function tmdbFetch<T>(path: string, params: Record<string, string | number | boolean> = {}): Promise<T> {
   const url = new URL(`${TMDB_BASE}${path}`);
-  url.searchParams.set("api_key", await apiKey());
+  const auth = tmdbAuth(await apiKey());
+  if (auth.param) url.searchParams.set("api_key", auth.param);
   url.searchParams.set("language", "en-US");
   for (const [k, v] of Object.entries(params)) {
     url.searchParams.set(k, String(v));
   }
 
   const res = await fetch(url, {
-    headers: { Accept: "application/json" },
+    headers: auth.headers,
     next: { revalidate: 3600 }, // cache for an hour
   });
 
@@ -269,6 +298,9 @@ export interface TmdbPersonCredit {
   job?: string;
   department?: string;
   adult?: boolean;
+  genre_ids?: number[];
+  vote_count?: number;
+  episode_count?: number;
 }
 
 export interface TmdbPersonCredits {
@@ -412,6 +444,25 @@ export const tmdb = {
       include_adult: false,
     }),
 
+  /**
+   * Films that reached streaming / digital purchase recently (release types
+   * 4 and 5), newest first, with enough votes to skip placeholder entries.
+   */
+  newDigitalReleases: (page = 1, region = "US") => {
+    const today = new Date().toISOString().slice(0, 10);
+    const since = new Date(Date.now() - NEW_RELEASE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
+    return tmdbFetch<TmdbPaged<TmdbMovie>>("/discover/movie", {
+      with_release_type: "4|5",
+      region,
+      "release_date.gte": since,
+      "release_date.lte": today,
+      "vote_count.gte": NEW_RELEASE_MIN_VOTES,
+      sort_by: "popularity.desc",
+      include_adult: false,
+      page,
+    });
+  },
+
   personDetails: (id: number) => tmdbFetch<TmdbPerson>(`/person/${id}`),
 
   personCredits: (id: number) =>
@@ -420,6 +471,9 @@ export const tmdb = {
 
 /** TMDB watch provider id for Netflix (US catalog). */
 export const NETFLIX_PROVIDER_ID = 8;
+
+const NEW_RELEASE_WINDOW_DAYS = 120;
+const NEW_RELEASE_MIN_VOTES = 20;
 
 export const COMMON_GENRES: { id: number; name: string }[] = [
   { id: 28, name: "Action" },

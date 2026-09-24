@@ -8,7 +8,7 @@ import { transitionContent } from "@/lib/motion";
 import { ArrowLeft } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SeasonPicker } from "@/components/season-picker";
-import { EpisodeStrip } from "@/components/episode-strip";
+import { EpisodeList } from "@/components/episode-list";
 import { BrowseError } from "@/components/empty-states";
 
 interface Props {
@@ -46,7 +46,7 @@ export function TvSeasonView({ tvId, season }: Props) {
     },
   });
 
-  const poster = tmdbImageUrl(seasonData?.poster_path, "original");
+  const poster = tmdbImageUrl(seasonData?.poster_path ?? show?.poster_path, "w342");
 
   // Show itself failed to load — nothing else on the page can render meaningfully.
   if (showFailed && !showLoading) {
@@ -73,16 +73,16 @@ export function TvSeasonView({ tvId, season }: Props) {
           animate={{ opacity: 1, y: 0 }}
           transition={transitionContent}
         >
-          <div className="hidden sm:block shrink-0 w-32">
+          <div className="hidden shrink-0 sm:block sm:w-40 lg:w-48">
             {poster ? (
-              <img src={poster} alt={seasonData?.name} className="w-full rounded-2xl shadow-lg" />
+              <img src={poster} alt={seasonData?.name} className="sticky top-24 w-full rounded-2xl shadow-lg" />
             ) : (
               <Skeleton className="w-32 h-48 rounded-2xl" />
             )}
           </div>
 
           <div className="flex-1 min-w-0">
-            <h1 className="font-display text-xl font-bold sm:text-2xl">{show?.name}</h1>
+            <h1 className="font-display text-2xl font-bold sm:text-4xl">{show?.name}</h1>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <h2 className="font-display text-sm font-semibold">Episodes</h2>
               {showLoading || !show?.seasons ? (
@@ -103,10 +103,9 @@ export function TvSeasonView({ tvId, season }: Props) {
               {seasonFailed ? (
                 <BrowseError label="episodes" onRetry={() => refetchSeason()} compact />
               ) : (
-                <EpisodeStrip
+                <EpisodeList
                   tvId={tvId}
                   season={season}
-                  showSort
                   seriesPosterPath={show?.poster_path}
                   seriesBackdropPath={show?.backdrop_path}
                 />

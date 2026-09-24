@@ -1,14 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
-  <!-- Flat PWA icon (dark tile). Media query for browser tab uses favicon.svg -->
-  <rect x="32" y="32" width="448" height="448" rx="112" fill="#141419"/>
-  <text
-    x="256"
-    y="326"
-    text-anchor="middle"
-    font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
-    font-size="232"
-    font-weight="800"
-    letter-spacing="-0.02em"
-    fill="#F4F4F7"
-  >AB</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1c1c24"/>
+      <stop offset="1" stop-color="#08080b"/>
+    </linearGradient>
+    <linearGradient id="red" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff3b4a"/>
+      <stop offset="1" stop-color="#d10f25"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg)"/>
+  <rect x="16.5" y="16.5" width="479" height="479" rx="111.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  <!-- A: two legs -->
+  <path d="M256 104 L392 408 H330 L256 232 L182 408 H120 Z" fill="#f5f5f7"/>
+  <!-- crossbar as a play triangle -->
+  <path d="M236 304 L236 372 L294 338 Z" fill="url(#red)"/>
 </svg>

@@ -333,7 +333,10 @@ function DetailContent({
   return (
     <div className="min-h-screen pb-12">
       {/* Backdrop + logo overlay (no poster boxart) */}
-      <div className="relative h-[62vh] min-h-[420px] w-full sm:h-[75vh] sm:min-h-[520px]">
+      {/* Flex column, content pinned to the bottom: the hero grows when the
+          text is taller than the backdrop (phones) instead of overflowing up
+          under the navbar. */}
+      <div className="relative flex min-h-[62vh] w-full flex-col justify-end sm:min-h-[75vh]">
         {backdrop && (
           <img
             src={backdrop}
@@ -342,7 +345,7 @@ function DetailContent({
             alt=""
             // Primary LCP candidate on this route — never lazy.
             fetchPriority="high"
-            className="h-full w-full object-cover"
+            className="absolute inset-0 h-full w-full object-cover"
           />
         )}
         <div className="absolute inset-0 bg-gradient-to-t from-background from-0% via-background/55 via-35% to-background/15 to-80%" />
@@ -365,7 +368,7 @@ function DetailContent({
         </button>
 
         {/* Bottom-left: logo + meta + actions */}
-        <div className="absolute inset-x-0 bottom-0 z-10 px-4 pb-8 sm:px-6 sm:pb-12 lg:px-8 lg:pb-16">
+        <div className="relative z-10 px-4 pb-8 pt-32 sm:px-6 sm:pb-12 lg:px-8 lg:pb-16">
           <div className="flex max-w-4xl flex-col gap-4 pr-0 sm:pr-56">
             {/* The h1 was inside the else branch, so any title TMDB has logo art
                 for - which is most of them - rendered a detail page with no

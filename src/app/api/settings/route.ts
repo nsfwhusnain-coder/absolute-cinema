@@ -34,7 +34,9 @@ export async function GET() {
     if (SECRET_KEYS.includes(s.key)) {
       continue; // never leaves the server
     }
-    if (ADMIN_ONLY_KEYS.includes(s.key) && !user.isAdmin) {
+    if (ADMIN_ONLY_KEYS.includes(s.key)) {
+      // Admins see that a key exists (last 4 chars), never the key itself.
+      if (user.isAdmin && s.value) out[s.key] = `…${s.value.slice(-4)}`;
       continue;
     }
     out[s.key] = s.value;

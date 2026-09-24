@@ -30,6 +30,19 @@ import { checkRegistrationGate } from "@/lib/registration-gate";
  *   - If the env var is unset, registration is disabled entirely (even a
  *     correct-looking guess can't pass, since there's nothing to match).
  */
+/**
+ * GET /api/register — what the sign-in screen should offer.
+ * firstRun: no accounts exist, so the next sign-up becomes the admin.
+ * inviteEnabled: self sign-up with an invite code is available.
+ */
+export async function GET() {
+  const firstRun = (await db.user.count()) === 0;
+  return NextResponse.json(
+    { firstRun, inviteEnabled: Boolean(process.env.REGISTRATION_INVITE_CODE) },
+    { headers: { "Cache-Control": "no-store" } },
+  );
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { name, pin, inviteCode } = (await req.json()) as {

@@ -1,3 +1,4 @@
+import { tmdb } from "@/lib/tmdb";
 import gzip from "zlib";
 
 export interface SubtitleTrackOption {
@@ -161,22 +162,12 @@ export function convertSrtToVtt(srtContent: string): string {
 
 export async function getImdbIdFromTmdb(
   tmdbId: number,
-  mediaType: "movie" | "tv",
-  tmdbApiKey?: string
+  mediaType: "movie" | "tv"
 ): Promise<string | null> {
-  const apiKey = tmdbApiKey || process.env.TMDB_API_KEY;
-  if (!apiKey) return null;
-
+  // Uses the shared TMDB client so a key saved in Settings works, not only .env.
   try {
-    const endpoint =
-      mediaType === "tv"
-        ? `https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${apiKey}`
-        : `https://api.themoviedb.org/3/movie/${tmdbId}/external_ids?api_key=${apiKey}`;
-
-    const res = await fetch(endpoint, { next: { revalidate: 86400 } });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.imdb_id || null;
+    const ids = await tmdb.externalIds(tmdbId, mediaType);
+    return ids.imdb_id || null;
   } catch {
     return null;
   }

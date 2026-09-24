@@ -41,7 +41,50 @@ function genreTitle(type: MediaKind, id: number): string {
   return list.find((g) => g.id === id)?.name ?? `Genre ${id}`;
 }
 
+/** Streaming services with their own home rail and View All pages (TMDB watch-provider ids, US). */
+export const STREAMING_SERVICES = [
+  { slug: "prime", name: "Prime Video", providerId: 9 },
+  { slug: "disney", name: "Disney+", providerId: 337 },
+  { slug: "apple", name: "Apple TV+", providerId: 350 },
+  { slug: "max", name: "Max", providerId: 1899 },
+  { slug: "hulu", name: "Hulu", providerId: 15 },
+] as const;
+
+export type StreamingService = (typeof STREAMING_SERVICES)[number];
+
+export function providerPath(type: MediaKind, providerId: number, page: number): string {
+  return page <= 1
+    ? `discover/${type}/provider/${providerId}`
+    : `discover/${type}/provider/${providerId}?page=${page}`;
+}
+
+function serviceCategories(): Record<string, BrowseCategory> {
+  const out: Record<string, BrowseCategory> = {};
+  for (const service of STREAMING_SERVICES) {
+    for (const type of ["movie", "tv"] as const) {
+      const slug = `${service.slug}-${type === "movie" ? "movies" : "tv"}`;
+      out[slug] = {
+        slug,
+        title: `${type === "movie" ? "Movies" : "Series"} on ${service.name}`,
+        mediaType: type,
+        paged: true,
+        tmdbPathForPage: (page) => providerPath(type, service.providerId, page),
+      };
+    }
+  }
+  return out;
+}
+
 const STATIC_CATEGORIES: Record<string, BrowseCategory> = {
+  ...serviceCategories(),
+  "new-digital": {
+    slug: "new-digital",
+    title: "New on Digital",
+    mediaType: "movie",
+    paged: true,
+    tmdbPathForPage: (page) =>
+      page <= 1 ? "discover/movie/new-digital" : `discover/movie/new-digital?page=${page}`,
+  },
   "trending-movies": {
     slug: "trending-movies",
     title: "Trending Movies",

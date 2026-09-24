@@ -1,5 +1,6 @@
 "use client";
 
+import { creditScore, isAppearanceCredit, pickFeaturedCredit } from "@/lib/person-credits";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
@@ -34,9 +35,6 @@ function creditYear(credit: TmdbPersonCredit): number | null {
   return Number.isFinite(year) ? year : null;
 }
 
-function creditScore(credit: TmdbPersonCredit): number {
-  return (credit.popularity ?? 0) * 10 + (credit.vote_average ?? 0);
-}
 
 interface ProgressRow {
   tmdbId: number;
@@ -113,7 +111,9 @@ function collectFilmography(
     seen.add(key);
     merged.push({ ...credit, media_type: kind });
   }
-  const cleaned = withoutAdultTitles(merged, hideAdult).sort((a, b) => creditScore(b) - creditScore(a));
+  const cleaned = withoutAdultTitles(merged, hideAdult)
+    .filter((c) => !isAppearanceCredit(c))
+    .sort((a, b) => creditScore(b) - creditScore(a));
   const movies = cleaned.filter((c) => c.media_type === "movie").slice(0, FILMOGRAPHY_LIMIT);
   const shows = cleaned.filter((c) => c.media_type === "tv").slice(0, FILMOGRAPHY_LIMIT);
 
@@ -128,10 +128,7 @@ function collectFilmography(
     castSeen.add(key);
     castOnly.push({ ...credit, media_type: kind });
   }
-  const featuredCast = withoutAdultTitles(castOnly, hideAdult).sort(
-    (a, b) => (b.popularity ?? 0) - (a.popularity ?? 0)
-  );
-  const featured = featuredCast.find((c) => c.poster_path) ?? featuredCast[0] ?? null;
+  const featured = pickFeaturedCredit(withoutAdultTitles(castOnly, hideAdult));
   return { movies, shows, featured };
 }
 

@@ -17,6 +17,7 @@ import {
   tmdbUrlAtSize,
 } from "@/lib/playback/bloom-visuals";
 import "@/components/brand-mark.css";
+import { LogoGlyph } from "@/components/brand-mark";
 import "./loading-bloom.css";
 
 /** Netflix-style match-cut. TV / reduced-motion stay a short fade. */
@@ -232,8 +233,8 @@ export function LoadingScreen({
           </div>
         ) : (
           <span className="ab-glass bloom-mark" data-compact="false" aria-hidden>
-            <span className="ab-glass__letter-wrap">
-              <span className="ab-glass__letters">AB</span>
+            <span className="ab-glass__letter-wrap h-full w-full">
+              <LogoGlyph className="h-[46%] w-[46%] text-white" />
             </span>
           </span>
         )}

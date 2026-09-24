@@ -136,7 +136,7 @@ const ACCENT_COLORS: { id: string; label: string; hex: string }[] = [
   { id: "purple", label: "Purple", hex: "#a855f7" },
 ];
 
-type SettingsTab = "preferences" | "watched";
+type SettingsTab = "preferences" | "connections" | "server" | "watched";
 
 /** Designed loading state matching the settings layout — no bare spinner. */
 function SettingsSkeleton() {
@@ -209,7 +209,13 @@ function InstallAppSection() {
 export function SettingsView() {
   const { data: session } = useSession();
   const navigate = useNavigate();
-  const [tab, setTab] = useState<SettingsTab>("preferences");
+  const [tab, setTab] = useState<SettingsTab>(() => {
+    if (typeof window === "undefined") return "preferences";
+    const requested = new URLSearchParams(window.location.search).get("tab");
+    return requested === "connections" || requested === "server" || requested === "watched"
+      ? requested
+      : "preferences";
+  });
 
   const { data, isLoading } = useQuery<SettingsData>({
     queryKey: ["settings"],
@@ -259,7 +265,11 @@ export function SettingsView() {
             <p className="mt-1 text-sm text-muted-foreground">
               {tab === "watched"
                 ? "Titles you’ve marked as already watched"
-                : "Playback preferences and account options"}
+                : tab === "connections"
+                  ? "API keys this server uses for the catalog and streaming"
+                  : tab === "server"
+                    ? "People, appearance and diagnostics for this server"
+                    : "Playback preferences and account options"}
             </p>
           </div>
           <GlassPillTabs
@@ -267,13 +277,38 @@ export function SettingsView() {
             onChange={setTab}
             options={[
               { value: "preferences", label: "Preferences" },
-              { value: "watched", label: "Already watched" },
+              ...(isAdmin
+                ? [
+                    { value: "connections" as const, label: "Connections" },
+                    { value: "server" as const, label: "Server" },
+                  ]
+                : []),
+              { value: "watched", label: "Watched" },
             ]}
           />
         </div>
 
         {tab === "watched" ? (
           <WatchedHistorySection />
+        ) : tab === "connections" && isAdmin ? (
+          <div className="space-y-6">
+            <TmdbSection configured={data.status.tmdb} masked={data.settings.tmdb_api_key || ""} />
+            <RealDebridSection />
+          </div>
+        ) : tab === "server" && isAdmin ? (
+          <div className="space-y-6">
+            <UserManagementSection />
+            <AppearanceSection initialAccent={data.settings.accent_color || "crimson"} />
+            <SystemHealthSection />
+            <PlaybackProviderSection providers={data.providers} initial={data.status.playbackProvider} />
+            <FeatureFlagsSection
+              initial={{
+                flag_ui_bottom_nav: data.settings.flag_ui_bottom_nav || "on",
+                flag_ui_hubs: data.settings.flag_ui_hubs || "on",
+                flag_playback_fast_path: data.settings.flag_playback_fast_path || "on",
+              }}
+            />
+          </div>
         ) : (
           <>
         {/* User account info */}
@@ -333,61 +368,6 @@ export function SettingsView() {
           </CardContent>
         </Card>
 
-        {isAdmin ? (
-          <section className="space-y-6 border-t border-white/10 pt-8">
-            <div>
-              <h2 className="font-display text-xl font-semibold tracking-tight">Admin</h2>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Two keys run the whole app: TMDB for titles, Real-Debrid for
-                premium streams. Scrapers and the player are built in — nothing
-                else to plug in for click-play.
-              </p>
-            </div>
-
-            <Card className="rounded-2xl">
-              <CardHeader>
-                <CardTitle className="font-display text-base">Service Status</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                <StatusRow
-                  label="TMDB API"
-                  ok={data.status.tmdb}
-                  okLabel="Configured"
-                  badLabel="Missing API key"
-                />
-                <StatusRow
-                  label="Playback provider"
-                  ok={true}
-                  okLabel={
-                    data.providers.find((p) => p.id === data.status.playbackProvider)?.name ||
-                    data.status.playbackProvider
-                  }
-                  badLabel=""
-                />
-              </CardContent>
-            </Card>
-
-            <SystemHealthSection />
-
-            <RealDebridSection />
-
-            <TmdbSection initial={data.settings.tmdb_api_key || ""} />
-
-            <PlaybackProviderSection providers={data.providers} initial={data.status.playbackProvider} />
-
-            <AppearanceSection initialAccent={data.settings.accent_color || "crimson"} />
-
-            <FeatureFlagsSection
-              initial={{
-                flag_ui_bottom_nav: data.settings.flag_ui_bottom_nav || "on",
-                flag_ui_hubs: data.settings.flag_ui_hubs || "on",
-                flag_playback_fast_path: data.settings.flag_playback_fast_path || "on",
-              }}
-            />
-
-            <UserManagementSection />
-          </section>
-        ) : null}
           </>
         )}
       </motion.div>
@@ -478,10 +458,10 @@ function HouseholdPreferencesSection() {
   return (
     <Card className="rounded-2xl">
       <CardHeader>
-        <CardTitle className="font-display text-base">Household</CardTitle>
+        <CardTitle className="font-display text-base">Content filter</CardTitle>
         <CardDescription>
-          This is TMDB&apos;s rare adult flag, not R / TV-MA. Fight Club will still appear.
-          On by default. Turning the filter off requires this profile&apos;s PIN.
+          Hides titles TMDB marks as adult (explicit content). R and TV-MA titles are not
+          affected. Turning the filter off asks for this profile&apos;s PIN.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -1285,53 +1265,64 @@ function RealDebridSection() {
   );
 }
 
-function TmdbSection({ initial }: { initial: string }) {
-  const [value, setValue] = useState(initial);
+function TmdbSection({ configured, masked }: { configured: boolean; masked: string }) {
+  const [value, setValue] = useState("");
   const qc = useQueryClient();
   const save = useMutation({
     mutationFn: async () => {
-      const res = await fetch("/api/settings", {
+      const res = await fetch("/api/setup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tmdb_api_key: value }),
+        body: JSON.stringify({ tmdbKey: value }),
       });
-      if (!res.ok) throw new Error("Failed to save");
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error || "Failed to save");
+      }
     },
     onSuccess: () => {
-      toast.success("TMDB API key saved");
-      qc.invalidateQueries({ queryKey: ["settings"] });
+      toast.success("TMDB key verified and saved");
+      setValue("");
+      qc.invalidateQueries();
     },
-    onError: () => toast.error("Failed to save"),
+    onError: (err: Error) => toast.error(err.message),
   });
 
   return (
     <Card className="rounded-2xl">
       <CardHeader>
-        <CardTitle className="font-display flex items-center gap-2 text-base">
-          <Film className="h-4 w-4 text-primary" /> TMDB API Key
-        </CardTitle>
-        <CardDescription>
-          Used for posters, metadata, and search. The key from{" "}
-          <code className="px-1 rounded bg-muted">.env</code> takes precedence if set.
-        </CardDescription>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="font-display flex items-center gap-2 text-base">
+              <Film className="h-4 w-4 text-primary" /> TMDB
+            </CardTitle>
+            <CardDescription className="mt-1.5">Posters, titles, cast and search.</CardDescription>
+          </div>
+          <StatusRow label="" ok={configured} okLabel={masked ? `Connected ${masked}` : "Connected"} badLabel="Not set" />
+        </div>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="space-y-1.5">
-          <Label htmlFor="tmdb-key">API Key (optional override)</Label>
+          <Label htmlFor="tmdb-key">{configured ? "Replace key" : "API key"}</Label>
           <Input
             id="tmdb-key"
             type="password"
+            autoComplete="off"
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            placeholder="Leave blank to use .env value"
+            placeholder="API key or API Read Access Token"
           />
           <p className="text-xs text-muted-foreground">
-            Get a free key at <code className="px-1 rounded bg-muted">themoviedb.org/settings/api</code>
+            Free at{" "}
+            <a className="underline underline-offset-2" href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">
+              themoviedb.org/settings/api
+            </a>
+            . Verified before saving; a key saved here overrides TMDB_API_KEY in .env.
           </p>
         </div>
-        <Button onClick={() => save.mutate()} disabled={save.isPending} size="sm" className="rounded-full">
+        <Button onClick={() => save.mutate()} disabled={save.isPending || !value.trim()} size="sm" className="rounded-full">
           {save.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Save className="h-4 w-4 mr-1" />}
-          Save
+          Verify and save
         </Button>
       </CardContent>
     </Card>

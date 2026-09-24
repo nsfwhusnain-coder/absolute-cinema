@@ -334,14 +334,20 @@ export function SearchView({ initialQuery, initialGenre, initialType }: Props) {
               initial="hidden"
               animate="show"
             >
-              {results.map((m: { media_type?: string; id: number; name?: string; profile_path?: string | null }) => (
+              {results.map((m: { media_type?: string; id: number; name?: string; profile_path?: string | null; known_for_department?: string }) => (
                 <motion.div
                   key={`${m.media_type}-${m.id}`}
                   variants={fadeUp}
                   transition={transitionFast}
                 >
                   {m.media_type === "person" ? (
-                    <PersonCard id={m.id} name={m.name || ""} profilePath={m.profile_path ?? null} />
+                    <PersonCard
+                      id={m.id}
+                      name={m.name || ""}
+                      profilePath={m.profile_path ?? null}
+                      department={m.known_for_department}
+                      variant="poster"
+                    />
                   ) : (
                     <MovieCard movie={m as never} className="w-full" />
                   )}

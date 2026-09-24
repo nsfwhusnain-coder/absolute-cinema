@@ -96,9 +96,10 @@ export function MovieCard({
     <div
       className={cn(
         "group relative shrink-0",
-        isPoster
-          ? "w-[150px] sm:w-[170px] md:w-[190px]"
-          : "w-[240px] md:w-[320px]",
+        // Grid callers pass w-full; the rail widths are responsive, so
+        // tailwind-merge would keep sm:/md: widths and overflow the column.
+        !className?.split(/\s+/).includes("w-full") &&
+          (isPoster ? "w-[150px] sm:w-[170px] md:w-[190px]" : "w-[240px] md:w-[320px]"),
         className
       )}
       onMouseEnter={kickPreresolve}
