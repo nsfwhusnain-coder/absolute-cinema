@@ -277,6 +277,7 @@ export async function GET(
         season,
         episode,
         forceRefresh: noCache,
+        want4k: qualityHint === "auto" || (typeof qualityHint === "number" && qualityHint >= 2160),
       });
 
   const providerPromise = provider.resolve({
@@ -420,6 +421,7 @@ async function resolveDebridSourcesSafely(req: {
   season?: number;
   episode?: number;
   forceRefresh?: boolean;
+  want4k?: boolean;
 }): Promise<PlaybackSource[]> {
   try {
     const { resolveDebridSources } = await import("@/lib/playback/debrid");

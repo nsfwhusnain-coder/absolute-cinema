@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { PREFERENCES_QUERY_KEY, patchPreferences } from "@/lib/preferences-client";
+import { LOADER_SCENES, LOADER_SCENE_KEY, LOADER_SCENE_LABELS, readSceneOverride } from "@/lib/loader/select";
 import { Check, Palette } from "lucide-react";
 import {
   ACCENTS,
@@ -26,6 +27,7 @@ export function AppearanceSection() {
   const [material, setMaterial] = useState<Material>(currentMaterial);
   const [accent, setAccent] = useState<AccentId>(currentAccent);
   const qc = useQueryClient();
+  const [loaderScene, setLoaderScene] = useState<string>(() => readSceneOverride() ?? "auto");
   // Applied at once on this device, then saved to the profile so every device follows.
   const save = (patch: { material?: Material; accent?: AccentId }) =>
     patchPreferences(patch)
@@ -64,6 +66,29 @@ export function AppearanceSection() {
             </button>
           ))}
         </div>
+      </Row>
+      <Row label="Loading scene" help="Shown while a movie or episode starts. Automatic picks one that suits the film. This device only.">
+        <select
+          aria-label="Loading scene"
+          value={loaderScene}
+          onChange={(e) => {
+            setLoaderScene(e.target.value);
+            try {
+              if (e.target.value === "auto") window.localStorage.removeItem(LOADER_SCENE_KEY);
+              else window.localStorage.setItem(LOADER_SCENE_KEY, e.target.value);
+            } catch {
+              /* private mode */
+            }
+          }}
+          className="h-10 rounded-full border border-white/12 bg-white/[0.06] px-4 text-sm text-white focus:border-white/45 focus:outline-none [&>option]:bg-neutral-900"
+        >
+          <option value="auto">Automatic</option>
+          {LOADER_SCENES.map((id) => (
+            <option key={id} value={id}>
+              {LOADER_SCENE_LABELS[id]}
+            </option>
+          ))}
+        </select>
       </Row>
       <Row label="Accent colour">
         <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Accent colour">

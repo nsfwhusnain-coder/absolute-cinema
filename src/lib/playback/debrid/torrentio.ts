@@ -175,6 +175,8 @@ const RESOLUTION_1080_PATTERN = /1080p/i;
 const RESOLUTION_ANY_PATTERN = /(\d{3,4})p/i;
 const SEEDERS_PATTERN = /👤[^\d]*(\d+)/;
 const SIZE_PATTERN = /(\d+(?:\.\d+)?)\s*(GiB|GB|MiB|MB)\b/i;
+/** Torrentio's footer size is the selected file; a size in the release name is often the whole pack. */
+const FILE_SIZE_PATTERN = /💾\s*(\d+(?:\.\d+)?)\s*(GiB|GB|MiB|MB)\b/i;
 /* The capture pattern moved to release-scorer.ts so the drop below and the
    ranking penalty there cannot drift apart. It is slightly broader now
    (hdtc, and separators inside telesync/telecine/camrip). */
@@ -468,7 +470,7 @@ export function parseSeeders(text: string): number {
 
 /** Parse Torrentio's selected-file size footer into bytes. */
 export function parseSizeBytes(text: string): number | null {
-  const match = (text || "").match(SIZE_PATTERN);
+  const match = (text || "").match(FILE_SIZE_PATTERN) ?? (text || "").match(SIZE_PATTERN);
   if (!match?.[1] || !match[2]) return null;
   const value = Number(match[1]);
   if (!Number.isFinite(value) || value <= 0) return null;
@@ -578,7 +580,10 @@ type CandidateClass =
  */
 const PER_CLASS_CAP: Record<CandidateClass, number> = {
   "native-2160": 5,
-  "safari-2160": 10,
+  // Deep enough that lighter, smoothly streamable 4K encodes survive the
+  // size-rich ranking; the bitrate ordering (streamability.ts) then puts them
+  // first, and placeholders among them no longer exhaust the pool.
+  "safari-2160": 20,
   "native-1080": 20,
   "safari-1080": 8,
   // One RD roster slot consumes this class only when no higher native slot

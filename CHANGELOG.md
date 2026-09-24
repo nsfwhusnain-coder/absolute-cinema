@@ -2,6 +2,31 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.2.0] - 2026-09-25
+
+### Added
+- **Loading scenes:** six live scenes chosen by the film's genre and painted in
+  its poster colours: a ray-traced black hole, a warp through a nebula, northern
+  lights over a lake, rain on a window at night, drifting embers, and ribbons of
+  light, with bloom and film grain. The loading screen now shows only the title.
+- Episodes button next to Settings for shows.
+
+### Changed
+- 4K first: with Best or 4K quality the player waits for the 4K search instead
+  of starting the first 1080p it finds, and the search tries far more 4K
+  releases, so every episode that has 4K plays in 4K.
+- 4K releases are ranked by bitrate: smooth-streaming encodes come before
+  80 Mbps remuxes that play a little, load a little.
+- One clear glass material for every player control and menu.
+
+### Fixed
+- Seeking far ahead no longer abandons a server that was playing: the jump gets
+  up to 30 seconds and is retried on the same server instead of re-searching.
+- Subtitles for anime and foreign-language audio are always on, prefer the
+  file's own English track, and switch to a server that has them if needed.
+- Downloaded subtitles went blank on HLS servers.
+- A brief Torrentio outage no longer hides Real-Debrid results for half an hour.
+
 ## [2.1.0] - 2026-09-24
 
 ### Added

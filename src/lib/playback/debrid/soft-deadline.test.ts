@@ -33,4 +33,20 @@ describe("awaitRosterWithSoftDeadline", () => {
     expect(result.complete).toBe(true);
     expect(result.sources[0]!.id).toBe("uhd");
   });
+
+  it("holds out for a 4K pool that is still hunting when the viewer wants 4K", async () => {
+    const entry = { run: never(), progress: [source("hd", 1080)], hunting4k: true };
+    setTimeout(() => entry.progress.push(source("uhd", 2160)), 300);
+    const result = await awaitRosterWithSoftDeadline(entry, 50, 5_000);
+    expect(result.sources.map((s) => s.id)).toContain("uhd");
+  });
+
+  it("settles for 1080p once the 4K hunt ends empty", async () => {
+    const entry = { run: never(), progress: [source("hd", 1080)], hunting4k: true };
+    setTimeout(() => (entry.hunting4k = false), 200);
+    const started = Date.now();
+    const result = await awaitRosterWithSoftDeadline(entry, 50, 5_000);
+    expect(result.sources.map((s) => s.id)).toEqual(["hd"]);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
 });

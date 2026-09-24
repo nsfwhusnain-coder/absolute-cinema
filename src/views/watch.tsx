@@ -18,6 +18,7 @@ import { useSession } from "next-auth/react";
 import { tvQueryIndex } from "@/lib/playback/tv-index";
 import { getAutoplayNext } from "@/lib/player-preferences";
 import type { SkipSegment } from "@/lib/playback/skip-times";
+import { fetchLoaderLook, loaderLookQueryKey } from "@/lib/loader/look-client";
 
 /** Cancelable end-of-episode autoplay countdown (task 9). */
 const NEXT_EPISODE_COUNTDOWN_S = 10;
@@ -303,6 +304,12 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
   // where the viewer left off rather than at 0 and jumping.
   const showPlayerShell = mounted && !!session && progressLoaded;
   const baseTitle = meta?.title || meta?.name || playback?.title || "Untitled";
+  const { data: loaderLook } = useQuery({
+    queryKey: loaderLookQueryKey(mediaType, id),
+    queryFn: () => fetchLoaderLook(mediaType, id),
+    enabled: mounted,
+    staleTime: 24 * 60 * 60 * 1000,
+  });
   const { data: skipData } = useQuery({
     queryKey: ["skip-times", id, tvSeason, tvEpisode],
     queryFn: async () => {
@@ -699,6 +706,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
             displayTitle={baseTitle}
             episodeLabel={episodeLabel}
             overview={overview}
+            loaderLook={loaderLook}
             skipSegments={skipData?.segments}
             backdrop={backdrop}
             logo={logo}

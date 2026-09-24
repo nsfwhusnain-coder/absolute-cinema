@@ -5,6 +5,8 @@ import { languageName } from "@/lib/language-name";
 import type { SubtitlePreference } from "@/lib/profile-preferences";
 import { usePlayerState, type StreamSubtitleTrack, type SubtitleOption } from "./store";
 import { getTitleLanguage, rememberTitleLanguage } from "@/lib/title-language";
+import { betterThanExternal } from "./subtitle-policy";
+import { parseVtt } from "./vtt";
 
 export interface ExternalSubtitle {
   id: string;
@@ -19,7 +21,6 @@ interface StreamCue {
   text: string;
 }
 
-const EXTERNAL_LABEL_PREFIX = "ext:";
 const STREAM_PREFIX = "stream:";
 /** Remux runs produce cues as they go; re-read the track this often while it is shown. */
 const STREAM_CUE_REFRESH_MS = 15_000;
@@ -81,12 +82,17 @@ export function useSubtitles(
   external: readonly ExternalSubtitle[],
   preference: SubtitlePreference,
   /** Remembers the viewer's choice for this show (see title-language). */
-  rememberKey: string
+  rememberKey: string,
+  /** The audio is in a language the viewer does not read: show English even if the profile says off. */
+  required = false
 ) {
   const store = usePlayerState;
   const streamSubtitles = usePlayerState((s) => s.streamSubtitles);
   const userChose = useRef(false);
-  const externalEl = useRef<HTMLTrackElement | null>(null);
+  // Downloaded and remuxed subtitles are drawn from the playback clock, not
+  // through a <track>: hls.js clears the cues of every text track on the
+  // element whenever it loads a manifest, and toggles subtitle tracks off.
+  const clockDriven = useRef(false);
   const streamCues = useRef<StreamCue[]>([]);
   const streamTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamAbort = useRef<AbortController | null>(null);
@@ -95,7 +101,6 @@ export function useSubtitles(
     const out: Array<{ track: TextTrack; option: SubtitleOption }> = [];
     for (let i = 0; i < video.textTracks.length; i++) {
       const track = video.textTracks[i]!;
-      if (track.label.startsWith(EXTERNAL_LABEL_PREFIX)) continue;
       if (track.kind !== "subtitles" && track.kind !== "captions") continue;
       out.push({
         track,
@@ -106,6 +111,7 @@ export function useSubtitles(
   }, []);
 
   const stopStream = useCallback(() => {
+    clockDriven.current = false;
     if (streamTimer.current) clearInterval(streamTimer.current);
     streamTimer.current = null;
     streamAbort.current?.abort();
@@ -136,6 +142,19 @@ export function useSubtitles(
     [store]
   );
 
+  const loadExternal = useCallback((vttUrl: string) => {
+    const abort = new AbortController();
+    streamAbort.current = abort;
+    void fetch(vttUrl, { signal: abort.signal })
+      .then((res) => (res.ok ? res.text() : ""))
+      .then((text) => {
+        if (!abort.signal.aborted) streamCues.current = parseVtt(text);
+      })
+      .catch(() => {
+        /* aborted or offline: nothing to draw */
+      });
+  }, []);
+
   const select = useCallback(
     (id: string | null, byUser = true) => {
       const video = videoRef.current;
@@ -146,35 +165,27 @@ export function useSubtitles(
         rememberTitleLanguage(rememberKey, { subtitle: language });
       }
       for (const { track } of embeddedTracks(video)) track.mode = "disabled";
-      externalEl.current?.remove();
-      externalEl.current = null;
       stopStream();
       store.getState().set({ activeSubtitle: id, cueText: "" });
       if (!id) return;
 
       if (id.startsWith(STREAM_PREFIX)) {
+        clockDriven.current = true;
         startStream(Number(id.slice(STREAM_PREFIX.length)));
         return;
       }
-      let track: TextTrack | null = null;
-      const embedded = embeddedTracks(video).find((e) => e.option.id === id);
-      if (embedded) {
-        track = embedded.track;
-      } else {
-        const ext = external.find((x) => x.id === id);
-        if (!ext) return;
-        const el = document.createElement("track");
-        el.kind = "subtitles";
-        el.label = `${EXTERNAL_LABEL_PREFIX}${ext.label}`;
-        el.srclang = ext.language.slice(0, 2) || "en";
-        el.src = ext.vttUrl;
-        video.appendChild(el);
-        externalEl.current = el;
-        track = el.track;
+      const ext = external.find((x) => x.id === id);
+      if (ext) {
+        clockDriven.current = true;
+        loadExternal(ext.vttUrl);
+        return;
       }
+      const embedded = embeddedTracks(video).find((e) => e.option.id === id);
+      if (!embedded) return;
+      const track = embedded.track;
       track.mode = "hidden";
       track.oncuechange = () => {
-        const cues = track!.activeCues;
+        const cues = track.activeCues;
         const lines: string[] = [];
         for (let i = 0; cues && i < cues.length; i++) {
           const cue = cues[i] as VTTCue;
@@ -183,7 +194,7 @@ export function useSubtitles(
         store.getState().set({ cueText: lines.join("\n") });
       };
     },
-    [videoRef, external, embeddedTracks, store, startStream, stopStream, rememberKey]
+    [videoRef, external, embeddedTracks, store, startStream, stopStream, loadExternal, rememberKey]
   );
 
   const refreshOptions = useCallback(() => {
@@ -197,15 +208,21 @@ export function useSubtitles(
     store.getState().set({ subtitles: options });
     const active = store.getState().activeSubtitle;
     if (active && !options.some((o) => o.id === active)) select(null, false);
-    if (!userChose.current && store.getState().activeSubtitle === null) {
-      // This show's remembered choice wins over the profile default.
+    if (userChose.current) return;
+    const current = store.getState().activeSubtitle;
+    if (current === null) {
+      // This show's remembered choice wins over the profile default, unless
+      // the viewer could not follow the audio without subtitles.
       const remembered = getTitleLanguage(rememberKey)?.subtitle;
-      if (remembered === null) return;
-      if (remembered === undefined && preference === "off") return;
-      const pick = defaultPick(options, remembered);
+      if (!required && remembered === null) return;
+      if (!required && remembered === undefined && preference === "off") return;
+      const pick = defaultPick(options, remembered ?? undefined) ?? (required ? defaultPick(options) : undefined);
       if (pick) select(pick.id, false);
+      return;
     }
-  }, [videoRef, external, preference, embeddedTracks, store, select, rememberKey]);
+    const upgrade = betterThanExternal(options, current);
+    if (upgrade) select(upgrade.id, false);
+  }, [videoRef, external, preference, embeddedTracks, store, select, rememberKey, required]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -233,7 +250,7 @@ export function useSubtitles(
     const video = videoRef.current;
     if (!video) return;
     const onTime = () => {
-      if (!store.getState().activeSubtitle?.startsWith(STREAM_PREFIX)) return;
+      if (!clockDriven.current) return;
       const text = activeText(streamCues.current, video.currentTime);
       if (text !== store.getState().cueText) store.getState().set({ cueText: text });
     };
@@ -245,13 +262,7 @@ export function useSubtitles(
     };
   }, [videoRef, store]);
 
-  useEffect(
-    () => () => {
-      externalEl.current?.remove();
-      stopStream();
-    },
-    [stopStream]
-  );
+  useEffect(() => () => stopStream(), [stopStream]);
 
   return { selectSubtitle: select };
 }

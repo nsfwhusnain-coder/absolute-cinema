@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Airplay,
+  ListVideo,
   Maximize,
   Minimize,
   Pause,
@@ -29,8 +30,11 @@ import { titleLanguageKey } from "@/lib/title-language";
 import { useQuery } from "@tanstack/react-query";
 import { PREFERENCES_QUERY_KEY, fetchPreferences } from "@/lib/preferences-client";
 import type { SkipSegment } from "@/lib/playback/skip-times";
+import { CinematicLoader, type LoaderLook } from "@/components/loader/cinematic-loader";
 import { usePlayerController } from "./use-player-controller";
 import { useSubtitles, type ExternalSubtitle } from "./use-subtitles";
+import { useSubtitleGuard } from "./use-subtitle-guard";
+import { subtitlesRequired } from "./subtitle-policy";
 import { normalizeHeight, playableHere, qualityChoices, qualityLabel, type AudioChoice, type TitleContext } from "./playable";
 import {
   BufferingSpinner,
@@ -40,7 +44,6 @@ import {
   LoadingOverlay,
   MenuItem,
   MenuValue,
-  type LoadingStep,
   MenuSection,
   PlayerMenu,
   SeekBar,
@@ -75,6 +78,8 @@ export interface PlayerProps {
   episodeLabel?: string;
   /** Synopsis shown while the stream starts. */
   overview?: string;
+  /** Colours and genres for the loading scene. */
+  loaderLook?: LoaderLook;
   /** Intro/recap/credits times (anime), offered as a skip button. */
   skipSegments?: SkipSegment[];
   backdrop?: string | null;
@@ -133,12 +138,24 @@ export function Player(props: PlayerProps) {
     onRefreshSources: props.onRefreshSources,
   });
   const { data: profilePrefs } = useQuery({ queryKey: PREFERENCES_QUERY_KEY, queryFn: fetchPreferences, staleTime: 5 * 60_000 });
+  const audioLanguage =
+    state.remuxAudio?.tracks.find((t) => t.index === state.remuxAudio?.active)?.language ??
+    state.audioTracks.find((t) => t.id === state.activeAudio)?.lang ??
+    null;
+  const subsRequired = subtitlesRequired(props.title.originalLanguage, audioLanguage);
   const { selectSubtitle } = useSubtitles(
     videoRef,
     props.externalSubtitles,
     props.subtitlePreference,
-    titleLanguageKey(props.title.mediaType, props.title.tmdbId)
+    titleLanguageKey(props.title.mediaType, props.title.tmdbId),
+    subsRequired
   );
+  useSubtitleGuard({
+    required: subsRequired,
+    sources: props.sources,
+    remuxAvailable: props.remuxAvailable,
+    selectSource: actions.selectSource,
+  });
 
   const activeSource = props.sources.find((s) => s.id === state.activeSourceId) ?? null;
   const isRemux = activeSource ? sourceDelivery(activeSource) === "remux" : false;
@@ -296,29 +313,13 @@ export function Player(props: PlayerProps) {
     [actions, poke, started]
   );
   const showLoading = !started && !state.failureMessage;
+  // The loading scene stays mounted through its exit, then unmounts for good.
+  const [loaderGone, setLoaderGone] = useState(false);
   const controlsShown = state.controlsVisible || panel !== "none" || !state.playing;
 
   const bufferedAhead = Math.max(0, state.bufferedEnd - state.currentTime);
   const connecting = Boolean(activeSource) && state.phase !== "resolving";
   const bufferingStart = connecting && bufferedAhead > 0;
-  const loadingSteps: LoadingStep[] = [
-    {
-      label: "Finding servers",
-      detail: playable.length ? `${playable.length} found${props.discovering ? " so far" : ""}` : "Searching…",
-      state: connecting ? "done" : "active",
-    },
-    { label: "Connecting", detail: connecting ? serverName(activeSource) : undefined, state: bufferingStart ? "done" : connecting ? "active" : "pending" },
-    { label: "Buffering", state: bufferingStart ? "active" : "pending" },
-  ];
-  const loadingChips = activeSource && connecting
-    ? [
-        qualityLabel(normalizeHeight(sourceMaxHeight(activeSource) || 1080)),
-        ...(state.dynamicRange && state.dynamicRange !== "SDR" ? ["HDR"] : []),
-        ...(activeSource.origin === "debrid" ? ["Real-Debrid"] : []),
-      ]
-    : [];
-  const loadingNote = state.startNote ?? (connecting && isRemux && !bufferingStart ? "Preparing the file for your browser" : null);
-
   // Times only apply to the cut they were measured on: ignore them when this
   // file's length differs by more than a few seconds.
   const skip = started
@@ -395,16 +396,12 @@ export function Player(props: PlayerProps) {
         background={profilePrefs?.captionBackground}
       />
 
-      {showLoading && (
+      {!loaderGone && (
         <LoadingOverlay
-          backdrop={props.backdrop}
-          logo={props.logo}
+          leaving={!showLoading}
+          scene={<CinematicLoader look={props.loaderLook} leaving={!showLoading} onGone={() => setLoaderGone(true)} />}
           title={props.displayTitle}
           subtitle={props.episodeLabel}
-          description={props.overview}
-          steps={loadingSteps}
-          chips={loadingChips}
-          note={loadingNote}
           progress={bufferingStart ? Math.min(1, bufferedAhead / START_BUFFER_S) : undefined}
         />
       )}
@@ -421,7 +418,7 @@ export function Player(props: PlayerProps) {
 
       {state.notice && (
         <div className="pointer-events-none absolute inset-x-0 top-5 z-40 flex justify-center px-4">
-          <div role="status" className="glass max-w-md rounded-full px-4 py-2 text-center text-sm text-white">
+          <div role="status" className="glass-clear glass-dense max-w-md rounded-full px-4 py-2 text-center text-sm text-white">
             {state.notice.text}
           </div>
         </div>
@@ -430,13 +427,14 @@ export function Player(props: PlayerProps) {
       {/* Top bar */}
       <div
         className={cn(
-          "absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-4 bg-gradient-to-b from-black/70 via-black/25 to-transparent p-4 transition-opacity duration-300 sm:p-6",
-          controlsShown ? "opacity-100" : "pointer-events-none opacity-0"
+          "absolute inset-x-0 top-0 z-20 isolate flex items-start justify-between gap-4 p-4 sm:p-6",
+          !controlsShown && "pointer-events-none"
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex min-w-0 items-center gap-3">
-          <IconButton label="Back" onClick={props.onBack} className="glass" size="lg">
+        <div className={cn("absolute inset-0 -z-10 bg-gradient-to-b from-black/70 via-black/25 to-transparent", fade(controlsShown))} />
+        <div className={cn("flex min-w-0 items-center gap-3", fade(controlsShown))}>
+          <IconButton label="Back" onClick={props.onBack} className="glass-clear" size="lg">
             <ArrowLeft className="h-5 w-5" />
           </IconButton>
           <div className={cn("min-w-0", showLoading && "invisible")}>
@@ -445,7 +443,7 @@ export function Player(props: PlayerProps) {
           </div>
         </div>
         {nowHeight > 0 && (
-          <div className="glass hidden items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold sm:flex">
+          <div className={cn("glass-clear hidden items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold sm:flex", fade(controlsShown))}>
             <Sparkles className="h-3.5 w-3.5" /> {qualityLabel(nowHeight)}
           </div>
         )}
@@ -455,17 +453,17 @@ export function Player(props: PlayerProps) {
       {started && (
         <div
           className={cn(
-            "absolute inset-0 z-10 flex items-center justify-center gap-10 transition-opacity duration-300",
-            controlsShown && !state.buffering ? "opacity-100" : "pointer-events-none opacity-0"
+            "absolute inset-0 z-10 flex items-center justify-center gap-10",
+            !(controlsShown && !state.buffering) && "pointer-events-none"
           )}
         >
-          <IconButton label="Back 10 seconds" onClick={() => actions.seekBy(-SEEK_STEP_S)} className="glass hidden sm:inline-flex" size="lg">
+          <IconButton label="Back 10 seconds" onClick={() => actions.seekBy(-SEEK_STEP_S)} className={cn("glass-clear hidden sm:inline-flex", fade(controlsShown && !state.buffering))} size="lg">
             <RotateCcw className="h-5 w-5" />
           </IconButton>
-          <IconButton label={state.playing ? "Pause" : "Play"} onClick={actions.togglePlay} className="glass" size="xl">
+          <IconButton label={state.playing ? "Pause" : "Play"} onClick={actions.togglePlay} className={cn("glass-clear", fade(controlsShown && !state.buffering))} size="xl">
             {state.playing ? <Pause className="h-7 w-7 fill-current" /> : <Play className="h-7 w-7 translate-x-0.5 fill-current" />}
           </IconButton>
-          <IconButton label="Forward 10 seconds" onClick={() => actions.seekBy(SEEK_STEP_S)} className="glass hidden sm:inline-flex" size="lg">
+          <IconButton label="Forward 10 seconds" onClick={() => actions.seekBy(SEEK_STEP_S)} className={cn("glass-clear hidden sm:inline-flex", fade(controlsShown && !state.buffering))} size="lg">
             <RotateCw className="h-5 w-5" />
           </IconButton>
         </div>
@@ -491,12 +489,12 @@ export function Player(props: PlayerProps) {
       {/* Bottom bar */}
       <div
         className={cn(
-          "absolute inset-x-0 bottom-0 z-20 px-3 pb-3 transition-opacity duration-300 sm:px-6 sm:pb-6",
-          controlsShown && started ? "opacity-100" : "pointer-events-none opacity-0"
+          "absolute inset-x-0 bottom-0 z-20 px-3 pb-3 sm:px-6 sm:pb-6",
+          !(controlsShown && started) && "pointer-events-none"
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="glass-clear rounded-[1.75rem] px-4 pb-2 pt-1.5 sm:px-5">
+        <div className={cn("glass-clear rounded-[1.75rem] px-4 pb-2 pt-1.5 sm:px-5", fade(controlsShown && started))}>
           <div className="flex items-center gap-3">
             <span className="w-14 text-right text-xs font-medium tabular-nums text-white/90">{formatTime(state.currentTime)}</span>
             <SeekBar
@@ -522,7 +520,16 @@ export function Player(props: PlayerProps) {
               )}
             </div>
             <div className="flex items-center gap-0.5">
-              <IconButton label="Settings" active={panel !== "none"} onClick={() => setPanel(panel === "none" ? "settings" : "none")}>
+              {props.tv && (
+                <IconButton label="Episodes" active={panel === "episodes"} onClick={() => setPanel(panel === "episodes" ? "none" : "episodes")}>
+                  <ListVideo className="h-5 w-5" />
+                </IconButton>
+              )}
+              <IconButton
+                label="Settings"
+                active={panel !== "none" && panel !== "episodes"}
+                onClick={() => setPanel(panel === "none" || panel === "episodes" ? "settings" : "none")}
+              >
                 <Settings className="h-5 w-5" />
               </IconButton>
               <IconButton label={state.fullscreen ? "Exit full screen" : "Full screen"} onClick={toggleFullscreen}>
@@ -550,7 +557,6 @@ export function Player(props: PlayerProps) {
               <MenuItem label="Picture" trailing={<MenuValue>{VIDEO_FITS.find((f) => f.value === state.videoFit)?.label}</MenuValue>} onClick={() => setPanel("picture")} />
               <MenuItem label="Playback speed" trailing={<MenuValue>{state.rate === 1 ? "Normal" : `${state.rate}×`}</MenuValue>} onClick={() => setPanel("speed")} />
               <MenuItem label="Server" trailing={<MenuValue>{serverName(activeSource)}</MenuValue>} onClick={() => setPanel("servers")} />
-              {props.tv && <MenuItem label="Episodes" trailing={<MenuValue>{`S${props.tv.season} · E${props.tv.episode}`}</MenuValue>} onClick={() => setPanel("episodes")} />}
               {typeof document !== "undefined" && document.pictureInPictureEnabled && (
                 <MenuItem
                   label="Picture in picture"
@@ -689,6 +695,16 @@ function channelsLabel(channels: number | null): string | undefined {
   if (channels === 1) return "Mono";
   if (channels === 2) return "Stereo";
   return `${channels - 1}.1`;
+}
+
+/**
+ * Fades a floating control in or out. The fade sits on the glass element
+ * itself, never on a wrapper: an ancestor below full opacity becomes the
+ * blur's backdrop root, so the glass would stop blurring the video and turn
+ * clear for the length of every fade.
+ */
+function fade(shown: boolean): string {
+  return cn("transition-opacity duration-300", shown ? "opacity-100" : "opacity-0");
 }
 
 function serverName(source: PlaybackSource | null): string {

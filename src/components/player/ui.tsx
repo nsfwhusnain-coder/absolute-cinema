@@ -147,9 +147,9 @@ export function SeekBar({
           style={{ left: Math.min(Math.max(hover.x, 80), (barRef.current?.clientWidth ?? 160) - 80) }}
         >
           {frame && (
-            <img src={frame} alt="" className="glass h-[90px] w-40 rounded-xl object-cover" />
+            <img src={frame} alt="" className="glass-clear h-[90px] w-40 rounded-xl object-cover" />
           )}
-          <span className="glass rounded-full px-2.5 py-1 text-xs font-medium tabular-nums text-white">
+          <span className="glass-clear rounded-full px-2.5 py-1 text-xs font-medium tabular-nums text-white">
             {formatTime(hover.time)}
           </span>
         </div>
@@ -210,7 +210,7 @@ export function PlayerMenu({
       aria-label={title}
       onClick={(e) => e.stopPropagation()}
       className={cn(
-        "glass-strong flex max-h-[min(70vh,34rem)] w-[min(92vw,22rem)] flex-col overflow-hidden rounded-3xl text-white",
+        "glass-clear glass-dense flex max-h-[min(70vh,34rem)] w-[min(92vw,22rem)] flex-col overflow-hidden rounded-3xl text-white",
         className
       )}
     >
@@ -288,91 +288,48 @@ export function MenuItem({
 }
 
 /** Before the first frame: artwork, title and what the player is doing. */
-export interface LoadingStep {
-  label: string;
-  detail?: string;
-  state: "done" | "active" | "pending";
-}
-
-/** Full-screen start-up view: artwork, what is playing, and exactly what the player is doing. */
+/**
+ * The loading screen: the scene and the title, nothing else. Details about
+ * servers and buffering stay out of the way; the hairline under the title
+ * fills as the first seconds buffer.
+ */
 export function LoadingOverlay({
-  backdrop,
-  logo,
+  scene,
+  leaving = false,
   title,
   subtitle,
-  description,
-  steps,
-  chips,
-  note,
   progress,
 }: {
-  backdrop?: string | null;
-  logo?: string | null;
+  /** The live scene behind the title. */
+  scene: ReactNode;
+  /** Fading out over the first frames of video. */
+  leaving?: boolean;
   title: string;
   subtitle?: string;
-  description?: string;
-  steps: LoadingStep[];
-  chips: string[];
-  note?: string | null;
   /** 0-1 while buffering the first seconds. */
   progress?: number;
 }) {
   return (
-    <div className="absolute inset-0 z-10 flex items-end overflow-hidden bg-black sm:items-center">
-      {backdrop && (
-        <img src={backdrop} alt="" className="absolute inset-0 h-full w-full scale-105 object-cover opacity-60 blur-sm" />
+    <div
+      className={cn(
+        "absolute inset-0 z-10 overflow-hidden bg-black transition-opacity duration-700",
+        leaving && "pointer-events-none opacity-0"
       )}
-      <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-black/30" />
-      <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-black/30 to-transparent" />
-      <div className="relative flex w-full max-w-xl flex-col gap-5 px-6 pb-16 sm:ml-[8vw] sm:px-0 sm:pb-0">
-        {logo ? (
-          <img src={logo} alt={title} className="max-h-24 w-auto max-w-[70vw] self-start object-contain drop-shadow-2xl sm:max-h-32" />
-        ) : (
-          <h1 className="font-display text-3xl font-bold text-white drop-shadow sm:text-5xl">{title}</h1>
+    >
+      {scene}
+      <div className="absolute inset-x-0 bottom-0 h-2/5 bg-gradient-to-t from-black/55 to-transparent" />
+      <div className="loader-title absolute inset-x-0 bottom-[9vh] flex flex-col items-center gap-3 px-6 text-center">
+        <h1 className="font-display text-xl font-extralight uppercase tracking-[0.42em] text-white/95 [text-shadow:0_0_28px_rgba(255,255,255,0.35)] sm:text-3xl sm:tracking-[0.55em]">
+          {title}
+        </h1>
+        {subtitle && (
+          <p className="text-[10px] font-light uppercase tracking-[0.45em] text-white/55 sm:text-xs">{subtitle}</p>
         )}
-        {subtitle && <p className="-mt-2 text-sm font-medium text-white/85 sm:text-base">{subtitle}</p>}
-        {description && <p className="line-clamp-3 max-w-lg text-sm leading-relaxed text-white/65">{description}</p>}
-        <div className="glass-clear w-full max-w-md rounded-3xl p-4">
-          <ol className="space-y-2.5">
-            {steps.map((step) => (
-              <li key={step.label} className="flex items-center gap-3 text-sm">
-                <span
-                  className={cn(
-                    "flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
-                    step.state === "done" && "bg-white text-black",
-                    step.state === "active" && "bg-white/15 text-white",
-                    step.state === "pending" && "bg-white/[0.06] text-white/30"
-                  )}
-                  aria-hidden
-                >
-                  {step.state === "done" ? (
-                    <Check className="h-3 w-3" strokeWidth={3} />
-                  ) : step.state === "active" ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                  )}
-                </span>
-                <span className={cn("font-medium", step.state === "pending" ? "text-white/40" : "text-white")}>{step.label}</span>
-                {step.detail && <span className="ml-auto truncate pl-3 text-xs text-white/60">{step.detail}</span>}
-              </li>
-            ))}
-          </ol>
-          {progress !== undefined && (
-            <div className="mt-3 h-1 overflow-hidden rounded-full bg-white/10" aria-hidden>
-              <div className="h-full rounded-full bg-white transition-[width] duration-300" style={{ width: `${Math.round(progress * 100)}%` }} />
-            </div>
-          )}
-          {(chips.length > 0 || note) && (
-            <div className="mt-3 flex flex-wrap items-center gap-1.5">
-              {chips.map((chip) => (
-                <span key={chip} className="rounded-md bg-white/12 px-1.5 py-0.5 text-[11px] font-semibold tracking-wide text-white/90">
-                  {chip}
-                </span>
-              ))}
-              {note && <span className="text-xs text-white/60">{note}</span>}
-            </div>
-          )}
+        <div className="mt-2 h-px w-40 overflow-hidden bg-white/10 sm:w-56" aria-hidden>
+          <div
+            className={cn("h-full bg-white/70 transition-[width] duration-500", progress === undefined && "loader-hairline w-1/3")}
+            style={progress === undefined ? undefined : { width: `${Math.round(progress * 100)}%` }}
+          />
         </div>
       </div>
     </div>
@@ -383,7 +340,7 @@ export function LoadingOverlay({
 export function BufferingSpinner() {
   return (
     <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-      <div className="glass flex h-16 w-16 items-center justify-center rounded-full">
+      <div className="glass-clear flex h-16 w-16 items-center justify-center rounded-full">
         <Loader2 className="h-7 w-7 animate-spin text-white" />
       </div>
     </div>
@@ -403,7 +360,7 @@ export function FailureCard({
 }) {
   return (
     <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 p-6" onClick={(e) => e.stopPropagation()}>
-      <div role="alertdialog" aria-label="Playback problem" className="glass-strong w-full max-w-sm rounded-3xl p-6 text-center text-white">
+      <div role="alertdialog" aria-label="Playback problem" className="glass-clear glass-dense w-full max-w-sm rounded-3xl p-6 text-center text-white">
         <h2 className="font-display text-lg font-semibold">Can&apos;t play this right now</h2>
         <p className="mt-2 text-sm leading-relaxed text-white/70">{message}</p>
         <div className="mt-5 flex flex-col gap-2">

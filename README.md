@@ -284,6 +284,7 @@ preferences, and each 4K stream gets its own remux session.
 - Profile pictures: [DiceBear](https://www.dicebear.com) styles *Lorelei* by Lisa Wischofsky, *Open Peeps* by Pablo Stanley and *Thumbs* by DiceBear, all CC0.
 - Anime skip times: [AniSkip](https://aniskip.com), a community database. Anime ID mapping: [ani.zip](https://ani.zip) and [Kitsu](https://kitsu.io).
 - Catalog data and images: [TMDB](https://www.themoviedb.org).
+- Loading scenes: [three.js](https://threejs.org) (MIT) and [GSAP](https://gsap.com) (GreenSock standard no-charge license).
 
 ## Disclaimer
 

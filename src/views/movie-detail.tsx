@@ -1,9 +1,11 @@
 "use client";
 
 import { CollectionRow } from "@/components/collection-row";
+import { preloadLoaderEngine } from "@/components/loader/cinematic-loader";
+import { fetchLoaderLook, loaderLookQueryKey } from "@/lib/loader/look-client";
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { pickTitleLogoUrl, backdropSrcSet, type TmdbImages } from "@/lib/tmdb";
 import { transitionContent } from "@/lib/motion";
@@ -51,6 +53,16 @@ function formatLanguage(code: string): string {
 }
 
 export function DetailView({ mediaType, id, initialData }: Props) {
+  // Get the loading scene ready before Play: this title's colours and the engine.
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    void queryClient.prefetchQuery({
+      queryKey: loaderLookQueryKey(mediaType, id),
+      queryFn: () => fetchLoaderLook(mediaType, id),
+      staleTime: 24 * 60 * 60 * 1000,
+    });
+    preloadLoaderEngine();
+  }, [queryClient, mediaType, id]);
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["tmdb", mediaType, "details", id],
     queryFn: async () => {

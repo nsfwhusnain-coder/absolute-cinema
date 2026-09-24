@@ -41,12 +41,17 @@ export function isSuspect(source: PlaybackSource, now = Date.now()): boolean {
   return (source.runtimeHealth?.cooldownUntil ?? 0) > now;
 }
 
-/** A start below this waits briefly for something better (see LOW_QUALITY_GRACE_MS). */
-const GOOD_START_HEIGHT = 1080;
+/**
+ * Best (auto) aims for 4K: a start below it waits while discovery may still
+ * find one (see LOW_QUALITY_GRACE_MS / FOUR_K_GRACE_MS). Capping this at
+ * 1080 let whichever 1080p source answered first win the start, so one
+ * episode played 4K and the next did not.
+ */
+const BEST_START_HEIGHT = 2160;
 
 export function createRanker(quality: "auto" | number, remuxAvailable: boolean, preferredProvider: string): Ranker {
   return {
-    targetHeight: quality === "auto" ? GOOD_START_HEIGHT : Math.min(quality, GOOD_START_HEIGHT),
+    targetHeight: quality === "auto" ? BEST_START_HEIGHT : Math.min(quality, BEST_START_HEIGHT),
     isSuspect: (source) => isSuspect(source),
     pick(candidates) {
       const playable = playableHere(candidates, remuxAvailable);

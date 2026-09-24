@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { PlaybackSource } from "./types";
 import {
+  FOUR_K_GRACE_MS,
   LOW_QUALITY_GRACE_MS,
   PLAYED_FAIL_COOLDOWN_MS,
   START_FAIL_COOLDOWN_MS,
@@ -56,6 +57,12 @@ describe("orchestrator", () => {
       const flaky: Ranker = { ...picky, isSuspect: (s) => s.id === "hd" };
       expect(onRoster(initialOrchestratorState, [hd], true, flaky, T0).command.type).toBe("wait");
       expect(onRoster(initialOrchestratorState, [hd], false, flaky, T0).command).toMatchObject({ type: "attach", sourceId: "hd" });
+    });
+
+    it("holds out longer for 4K when the viewer wants the best quality", () => {
+      const best: Ranker = { ...picky, targetHeight: 2160 };
+      expect(onRoster(initialOrchestratorState, [hd], true, best, T0).command).toEqual({ type: "wait", recheckInMs: FOUR_K_GRACE_MS });
+      expect(onRoster(initialOrchestratorState, [hd], false, best, T0).command).toMatchObject({ type: "attach", sourceId: "hd" });
     });
 
     it("does not wait when the viewer asked for low quality", () => {

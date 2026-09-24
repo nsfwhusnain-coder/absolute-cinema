@@ -30,6 +30,12 @@ export const PLAYED_FAIL_COOLDOWN_MS = 30_000;
 export const SAME_SOURCE_RETRIES = 2;
 /** Longest a start waits for a better source than the ones found so far. */
 export const LOW_QUALITY_GRACE_MS = 5_000;
+/**
+ * With a 4K target the wait is longer: the loading scene covers it, and the
+ * server's 4K hunt (placeholder-heavy on Real-Debrid) needs time to finish.
+ * Starting 1080p early is what made one episode 4K and the next not.
+ */
+export const FOUR_K_GRACE_MS = 20_000;
 
 export interface SourceHealth {
   failures: number;
@@ -125,7 +131,8 @@ export function onRoster(
     const weak = best && (heightOf(best) < (ranker.targetHeight ?? 0) || ranker.isSuspect?.(best) === true);
     if (best && weak && discovering && state.phase === "resolving" && !state.everPlayed) {
       const since = state.firstCandidateAt ?? now;
-      const left = LOW_QUALITY_GRACE_MS - (now - since);
+      const grace = (ranker.targetHeight ?? 0) >= 2160 ? FOUR_K_GRACE_MS : LOW_QUALITY_GRACE_MS;
+      const left = grace - (now - since);
       if (left > 0) return { state: { ...state, firstCandidateAt: since }, command: { type: "wait", recheckInMs: left } };
     }
     if (best) {

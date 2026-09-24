@@ -332,6 +332,10 @@ describe("parseSizeBytes", () => {
 
   it("returns null for missing, zero, or malformed sizes", () => {
     expect(parseSizeBytes("Release without a size")).toBeNull();
+  });
+
+  it("prefers the selected file's size over a pack size in the name", () => {
+    expect(parseSizeBytes("Complete Box Set [26.8GB]\n👤 3 💾 1.5 GB ⚙️ 1337x")).toBe(1.5 * 1024 ** 3);
     expect(parseSizeBytes("Release 0 GB")).toBeNull();
     expect(parseSizeBytes("Release many GB")).toBeNull();
     expect(parseSizeBytes(`Release ${"1"}${"0".repeat(300)} GB`)).toBeNull();

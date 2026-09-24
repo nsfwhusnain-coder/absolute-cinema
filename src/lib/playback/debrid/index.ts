@@ -74,7 +74,9 @@
  */
 import type { MediaType, PlaybackSource } from "../types";
 import { inferAudioLanguageFromText } from "../source-facts";
+import { tmdb } from "../../tmdb";
 import { resolveKitsuEpisode } from "./anime-mapping";
+import { orderForStreaming } from "./streamability";
 import {
   fetchTorrentioCandidates,
   fetchTorrentioKitsuCandidates,
@@ -159,6 +161,19 @@ const RD_SLOTS: DebridSlot[] = [
 const RD_FAST_DEADLINE_MS = 1_500;
 /** Extra candidates resolved alongside the ones a slot pool still needs. */
 const POOL_HEDGE = 1;
+/**
+ * 4K pools try a full batch at a time and get a longer budget of their own.
+ * Torrentio marks most 4K releases cached on Real-Debrid, but many resolve
+ * to RD's small "unavailable" placeholder video, so with a narrow batch and
+ * the shared 16s deadline an episode only got 4K when the first few picks
+ * happened to be real: S3E2 had 4K and S1E1 did not, though both have plenty.
+ */
+const RD_4K_POOL_HEDGE = RESOLVE_CONCURRENCY;
+const RD_4K_DEADLINE_MS = 30_000;
+/** Below this a "video" is Real-Debrid's placeholder, not a release. */
+const RD_PLACEHOLDER_MAX_BYTES = 1024 * 1024;
+const RD_PLACEHOLDER_TTL_MS = 6 * 60 * 60 * 1000;
+const RD_PLACEHOLDER_MAX_ENTRIES = 5_000;
 /** Full-resolve path bound — shared across every missing RD slot's resolve attempts (including any per-slot fallback to the next-ranked candidate). */
 const RD_FULL_DEADLINE_MS = 16_000;
 /** Per-call ceiling for a single `resolveTokenFreeRedirect`, clamped down further by whatever remains of the shared deadline. */
@@ -202,6 +217,35 @@ const RD_SLOT_MISS_EXHAUSTED_TTL_MS = 2 * 60 * 1000;
 /** Bound the map so a long-lived process cannot grow it without limit. */
 const RD_SLOT_MISS_MAX_ENTRIES = 2_000;
 const rdSlotMisses = new Map<string, number>();
+
+/**
+ * Torrents Real-Debrid answered with its placeholder. RD caches whole
+ * torrents, so one placeholder episode means the rest of that pack is
+ * placeholders too; remembering the hash spares the next episode the same
+ * dead resolves and leaves its budget for releases that actually play.
+ */
+const rdPlaceholderHashes = new Map<string, number>();
+
+function isKnownPlaceholder(candidate: DebridCandidate): boolean {
+  const hash = candidate.infoHash?.toLowerCase();
+  if (!hash) return false;
+  const expiresAt = rdPlaceholderHashes.get(hash);
+  if (expiresAt === undefined) return false;
+  if (expiresAt > Date.now()) return true;
+  rdPlaceholderHashes.delete(hash);
+  return false;
+}
+
+function rememberPlaceholder(candidate: DebridCandidate, validation: MediaValidationResult): void {
+  const hash = candidate.infoHash?.toLowerCase();
+  if (!hash || validation.reason !== "too_small") return;
+  if (validation.totalBytes == null || validation.totalBytes > RD_PLACEHOLDER_MAX_BYTES) return;
+  if (rdPlaceholderHashes.size >= RD_PLACEHOLDER_MAX_ENTRIES) {
+    const oldest = rdPlaceholderHashes.keys().next().value;
+    if (oldest !== undefined) rdPlaceholderHashes.delete(oldest);
+  }
+  rdPlaceholderHashes.set(hash, Date.now() + RD_PLACEHOLDER_TTL_MS);
+}
 
 function slotMissKey(keyBase: KeyBase, slot: DebridSlot): string {
   return `${keyBase.imdbId}:${keyBase.mediaType}:${keyBase.season ?? 0}:${keyBase.episode ?? 0}:${slot}`;
@@ -265,6 +309,8 @@ export interface ResolveDebridSourcesRequest {
   episode?: number;
   /** Discard signed RD links after the player proves the roster is dead. */
   forceRefresh?: boolean;
+  /** The viewer wants 4K (Best or 2160p): wait for the 4K hunt before settling for 1080p. */
+  want4k?: boolean;
 }
 
 interface ResolvedCandidate extends DebridCandidate {
@@ -283,6 +329,18 @@ async function fetchTorrentioCandidatesForTitle(
   imdbId: string,
   rdToken: string
 ): Promise<DebridCandidate[]> {
+  const [candidates, runtime] = await Promise.all([
+    fetchRankedTorrentioCandidates(req, imdbId, rdToken),
+    titleRuntimeMinutes(req),
+  ]);
+  return orderForStreaming(candidates, runtime);
+}
+
+async function fetchRankedTorrentioCandidates(
+  req: ResolveDebridSourcesRequest,
+  imdbId: string,
+  rdToken: string
+): Promise<DebridCandidate[]> {
   if (req.mediaType === "tv" && req.season && req.episode) {
     const kitsu = await resolveKitsuEpisode(req.tmdbId, req.season, req.episode);
     if (kitsu) {
@@ -297,6 +355,21 @@ async function fetchTorrentioCandidatesForTitle(
     episode: req.episode,
     rdToken,
   });
+}
+
+/** Runtime turns file sizes into bitrates, so 4K that cannot stream smoothly ranks last. */
+async function titleRuntimeMinutes(req: ResolveDebridSourcesRequest): Promise<number | null> {
+  try {
+    if (req.mediaType === "movie") {
+      const movie = (await tmdb.movieDetails(req.tmdbId)) as { runtime?: number | null } | null;
+      return movie?.runtime || null;
+    }
+    if (!req.season || !req.episode) return null;
+    const season = await tmdb.tvSeason(req.tmdbId, req.season);
+    return season?.episodes?.find((ep) => ep.episode_number === req.episode)?.runtime || null;
+  } catch {
+    return null;
+  }
 }
 
 interface KeyBase {
@@ -533,6 +606,7 @@ function buildRdSlotOptions(
   const available = (items: DebridCandidate[]) => {
     const seen = new Set<string>();
     return items.filter((candidate) => {
+      if (isKnownPlaceholder(candidate)) return false;
       const hashIdentity = candidateHashIdentity(candidate);
       const titleIdentity = releaseTitleIdentity(candidate.title);
       const identities = [
@@ -666,6 +740,7 @@ async function resolveSlotCandidate(
       Math.min(RD_MEDIA_VALIDATION_TIMEOUT_MS, remaining)
     );
     if (!validation.acceptable) {
+      rememberPlaceholder(candidate, validation);
       logRejectedRdMedia(candidate, validation, mediaType, "fresh");
       continue;
     }
@@ -722,7 +797,8 @@ async function resolveRankedCandidatePool(
   token: string,
   deadline: number,
   mediaType: MediaType,
-  occupiedIdentities: Set<string>
+  occupiedIdentities: Set<string>,
+  hedge = POOL_HEDGE
 ): Promise<ResolvedCandidate[]> {
   const resolvedCandidates: ResolvedCandidate[] = [];
   const claimedIdentities = new Set(occupiedIdentities);
@@ -740,7 +816,7 @@ async function resolveRankedCandidatePool(
     // without fanning out across the whole list.
     const batch = options.slice(
       cursor,
-      cursor + Math.min(RESOLVE_CONCURRENCY, remainingNeeded + POOL_HEDGE)
+      cursor + Math.min(RESOLVE_CONCURRENCY, remainingNeeded + hedge)
     );
     cursor += batch.length;
     const batchResults = await mapWithConcurrency(
@@ -1009,7 +1085,15 @@ type RosterResult = { sources: PlaybackSource[]; candidates: DebridCandidate[] }
  * sharing, both resolved the same candidates against Real-Debrid at once,
  * doubling traffic and provoking 503s.
  */
-const inflightRosters = new Map<string, { run: Promise<RosterResult>; progress: PlaybackSource[] }>();
+/** Live roster state a caller can watch while the resolve is still running. */
+interface RosterEntry {
+  run: Promise<RosterResult>;
+  progress: PlaybackSource[];
+  /** True while a 4K pool is still resolving candidates. */
+  hunting4k?: boolean;
+}
+
+const inflightRosters = new Map<string, RosterEntry>();
 
 function rosterKey(keyBase: KeyBase): string {
   return `${keyBase.imdbId}:${keyBase.mediaType}:${keyBase.season ?? 0}:${keyBase.episode ?? 0}`;
@@ -1020,14 +1104,14 @@ function resolveRealDebridSlotsShared(
   req: ResolveDebridSourcesRequest,
   rdToken: string,
   preFetchedCandidates?: DebridCandidate[]
-): { run: Promise<RosterResult>; progress: PlaybackSource[] } {
+): RosterEntry {
   const key = rosterKey(keyBase);
   const existing = inflightRosters.get(key);
   // An explicit "try again" must not be answered by the attempt that failed.
   if (existing && !req.forceRefresh) return existing;
-  const progress: PlaybackSource[] = [];
-  const run = resolveRealDebridSlots(keyBase, req, rdToken, preFetchedCandidates, progress);
-  const entry = { run, progress };
+  const entry: RosterEntry = { run: Promise.resolve({ sources: [], candidates: [] }), progress: [] };
+  entry.run = resolveRealDebridSlots(keyBase, req, rdToken, preFetchedCandidates, entry);
+  const run = entry.run;
   inflightRosters.set(key, entry);
   void run
     .finally(() => {
@@ -1052,6 +1136,8 @@ export function isIncompleteDebridRoster(sources: PlaybackSource[]): boolean {
 const RD_SOFT_DEADLINE_MS = 5_000;
 const RD_SOFT_POLL_MS = 250;
 const RD_GOOD_ENOUGH_HEIGHT = 1080;
+/** With a 4K preference, how long to hold out for a 4K pool that is still hunting. */
+export const RD_4K_SOFT_DEADLINE_MS = 18_000;
 
 /**
  * Waits for the full roster, but answers as soon as the soft deadline has
@@ -1060,8 +1146,9 @@ const RD_GOOD_ENOUGH_HEIGHT = 1080;
  * the next play; the player's roster refresh picks them up as well.
  */
 export async function awaitRosterWithSoftDeadline(
-  entry: { run: Promise<RosterResult>; progress: PlaybackSource[] },
-  softDeadlineMs = RD_SOFT_DEADLINE_MS
+  entry: RosterEntry,
+  softDeadlineMs = RD_SOFT_DEADLINE_MS,
+  fourKDeadlineMs = 0
 ): Promise<RosterResult & { complete: boolean }> {
   const started = Date.now();
   let settled: (RosterResult & { complete: boolean }) | null = null;
@@ -1075,8 +1162,11 @@ export async function awaitRosterWithSoftDeadline(
   );
   while (!settled) {
     const elapsed = Date.now() - started;
+    const has4k = entry.progress.some((s) => (s.maxHeight ?? 0) >= 2160);
+    const still4k = entry.hunting4k === true && !has4k && elapsed < fourKDeadlineMs;
     if (
       elapsed >= softDeadlineMs &&
+      !still4k &&
       entry.progress.some((s) => (s.maxHeight ?? 0) >= RD_GOOD_ENOUGH_HEIGHT)
     ) {
       const seen = new Set<string>();
@@ -1093,8 +1183,9 @@ async function resolveRealDebridSlots(
   req: ResolveDebridSourcesRequest,
   rdToken: string,
   preFetchedCandidates?: DebridCandidate[],
-  progress?: PlaybackSource[]
+  entry?: RosterEntry
 ): Promise<{ sources: PlaybackSource[]; candidates: DebridCandidate[] }> {
+  const progress = entry?.progress;
   const { hits, missing, occupiedIdentities } = await readCachedRdSlots(keyBase, rdToken);
   progress?.push(...hits);
   // Publish each tier the moment its pool settles so a caller waiting with a
@@ -1136,20 +1227,24 @@ async function resolveRealDebridSlots(
   const native1080Slots = missing.filter((slot) => slot.startsWith("native-1080"));
   const remux1080Slots = missing.filter((slot) => slot.startsWith("safari-1080"));
   const remux4kSlots = missing.filter((slot) => slot.startsWith("safari-2160"));
-  const resolvePool = (slots: DebridSlot[]) =>
-    slots.length > 0
+  const deadline4k = Date.now() + RD_4K_DEADLINE_MS;
+  const resolvePool = (slots: DebridSlot[]) => {
+    const is4k = slotHeight(slots[0] ?? "native-720") === 2160;
+    return slots.length > 0
       ? resolveRankedCandidatePool(
           slotOptions[slots[0]!] ?? [],
           slots.length,
           rdToken,
-          deadline,
+          is4k ? deadline4k : deadline,
           req.mediaType,
-          occupiedIdentities
+          occupiedIdentities,
+          is4k ? RD_4K_POOL_HEDGE : POOL_HEDGE
         ).then((results) => {
           report(slots, results);
           return results;
         })
       : Promise.resolve([] as ResolvedCandidate[]);
+  };
   const otherMissingBase = missing.filter(
     (slot) =>
       !slot.startsWith("native-1080") &&
@@ -1157,10 +1252,16 @@ async function resolveRealDebridSlots(
       !slot.startsWith("safari-2160") &&
       !slot.startsWith("safari-1080")
   );
-  const [rankedNative4k, rankedNative1080, rankedRemux4k, rankedRemux1080, otherEntriesAll] = await Promise.all([
-    resolvePool(native4kSlots),
+  const fourKPools = Promise.all([resolvePool(native4kSlots), resolvePool(remux4kSlots)]);
+  if (entry && (native4kSlots.length || remux4kSlots.length)) {
+    entry.hunting4k = true;
+    void fourKPools.finally(() => {
+      entry.hunting4k = false;
+    }).catch(() => {});
+  }
+  const [[rankedNative4k, rankedRemux4k], rankedNative1080, rankedRemux1080, otherEntriesAll] = await Promise.all([
+    fourKPools,
     resolvePool(native1080Slots),
-    resolvePool(remux4kSlots),
     resolvePool(remux1080Slots),
     mapWithConcurrency(otherMissingBase, RESOLVE_CONCURRENCY, async (slot) => {
       const options = slotOptions[slot];
@@ -1237,7 +1338,10 @@ async function resolveRealDebridSlots(
   // deadline is only a slow minute and expires much sooner.
   const filledSlots = new Set(resolvedPerSlot.map((entry) => entry.slot));
   const deadlineExhausted = Date.now() >= deadline;
-  for (const slot of requiredMissing) {
+  // No candidates at all is what a failed or rate-limited Torrentio call
+  // looks like too; that is not an inventory fact worth half an hour.
+  const unfillable = candidates.length > 0 ? requiredMissing : [];
+  for (const slot of unfillable) {
     if (filledSlots.has(slot)) continue;
     const hadCandidates = Boolean(slotOptions[slot]?.length);
     if (!hadCandidates) {
@@ -1496,7 +1600,9 @@ export async function resolveDebridSources(
       }
       const rdToken = process.env.REAL_DEBRID_API_TOKEN as string;
       const { sources: rdSources, candidates, complete } = await awaitRosterWithSoftDeadline(
-        resolveRealDebridSlotsShared(keyBase, req, rdToken)
+        resolveRealDebridSlotsShared(keyBase, req, rdToken),
+        undefined,
+        req.want4k ? RD_4K_SOFT_DEADLINE_MS : 0
       );
       if (!complete) incompleteRosters.add(sources);
       sources.push(...rdSources);

@@ -29,8 +29,19 @@ const REMUX_START_TIMEOUT_MS = 25_000;
 /** This many rebuffers inside the window means the source cannot keep up, even if each one recovers. */
 const REBUFFER_LIMIT = 3;
 const REBUFFER_WINDOW_MS = 90_000;
-/** Buffering right after a seek is expected and does not count. */
-const SEEK_GRACE_MS = 4_000;
+/**
+ * Buffering right after a seek is expected and does not count. A remuxed
+ * source restarts its converter at the new position and then produces only
+ * a little faster than real time, so the first few rebuffers after a long
+ * jump are the converter catching up, not a failing server.
+ */
+const SEEK_GRACE_MS = 15_000;
+/**
+ * A source that was playing before the seek has proven itself: give the
+ * jump this long to land before calling it stalled, and then retry it at the
+ * same spot rather than moving to another server or searching again.
+ */
+const SEEK_STALL_TIMEOUT_MS = 30_000;
 const QUALITY_STEPS = [2160, 1440, 1080, 720, 480];
 /** Buffering this long with no progress while playing means the server is too slow. */
 const STALL_TIMEOUT_MS = 12_000;
@@ -147,7 +158,10 @@ export function usePlayerController(options: PlayerControllerOptions) {
 
   const armStall = useCallback(() => {
     if (stallTimer.current) clearTimeout(stallTimer.current);
-    stallTimer.current = setTimeout(() => playbackFailed("stall", "stall"), STALL_TIMEOUT_MS);
+    const afterSeek = Date.now() - lastSeekAt.current < SEEK_GRACE_MS;
+    stallTimer.current = afterSeek
+      ? setTimeout(() => playbackFailed("seek stall", "error"), SEEK_STALL_TIMEOUT_MS)
+      : setTimeout(() => playbackFailed("stall", "stall"), STALL_TIMEOUT_MS);
   }, [playbackFailed]);
 
   const execute = useCallback(

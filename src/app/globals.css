@@ -639,6 +639,14 @@ html[data-material="solid"] {
     inset 0 -1px 0 rgba(255, 255, 255, 0.06),
     0 20px 50px rgba(0, 0, 0, 0.35);
 }
+/* The same clear glass for text-heavy panels (player menus, notices): the
+   same blur and sheen, a little more tint so small text stays readable over
+   bright video. */
+.glass-clear.glass-dense {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14) 0%, rgba(255, 255, 255, 0.04) 42%, rgba(255, 255, 255, 0.02) 100%),
+    rgba(16, 16, 22, 0.42);
+}
 /* Solid means no frosted surfaces anywhere, including one-off blurred chips. */
 html[data-material="solid"] [class*="backdrop-blur"] {
   -webkit-backdrop-filter: none;
@@ -711,4 +719,33 @@ html[data-tv="1"] :where(.glass, .glass-strong, .glass-clear) {
 .player-caption[data-background="shadow"] {
   background: transparent;
   text-shadow: 0 0 4px #000, 0 0 2px #000, 0 2px 3px rgba(0, 0, 0, 0.9);
+}
+
+/* Loading screen: the title settles in slowly; the hairline sweeps while nothing is buffering yet. */
+@keyframes loader-title-in {
+  from {
+    opacity: 0;
+    letter-spacing: 0.8em;
+    filter: blur(6px);
+  }
+}
+.loader-title h1 {
+  animation: loader-title-in 2.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes loader-hairline {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+.loader-hairline {
+  animation: loader-hairline 2.2s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .loader-title h1,
+  .loader-hairline {
+    animation: none;
+  }
 }
