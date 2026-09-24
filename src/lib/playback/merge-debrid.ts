@@ -3,7 +3,7 @@ import { decideImmediateSource } from "./decide-playback";
 
 /**
  * Shared debrid-merge helpers — extracted from the playback route so that any
- * route which needs to look up a source by id (e.g. /api/transcode) can
+ * route which needs to look up a source by id (e.g. /api/vod/open) can
  * reproduce the SAME full roster (embed + debrid) the playback route returns.
  *
  * The debrid tier (Real-Debrid + Torrentio) is NOT part of provider.resolve()

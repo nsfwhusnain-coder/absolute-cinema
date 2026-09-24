@@ -42,7 +42,7 @@ export function clearRosterCache(): void {
  *
  * WHY THIS EXISTS: the debrid tier is NOT part of provider.resolve() — it's a
  * separate parallel call the playback route merges in (mergeDebridSources).
- * Routes that need to look up a specific source by id (e.g. /api/transcode,
+ * Routes that need to look up a specific source by id (e.g. /api/vod/open,
  * which re-resolves to find the source the player picked) must reproduce that
  * SAME merge or debrid sources will be invisible to them (they'd 404 on every
  * debrid source id). This helper is the single shared way to do that.

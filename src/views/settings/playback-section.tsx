@@ -73,7 +73,7 @@ export function PlaybackSection() {
       icon={<PlayCircle className="h-4 w-4 text-white/70" />}
       description="Saved to your profile, so every device you sign in on follows them."
     >
-      <Row label="Quality" help="Best plays 4K when a 4K copy exists and your screen can show it. Saver uses the least data.">
+      <Row label="Quality" help="Best plays the highest quality this device can decode, 4K when there is one. Saver uses the least data.">
         <Segmented
           label="Quality"
           value={quality}

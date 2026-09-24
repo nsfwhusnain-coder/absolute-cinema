@@ -10,7 +10,7 @@ import { clearMediaValidationCache } from "./media-validation";
  * see torrentio.ts's module header) and, when it's the top-ranked candidate
  * in its class, wins a slot honestly tagged `container: "mkv"` so the
  * client's `isSourcePlayableHere` (source-quality.ts) can route it through
- * /api/transcode rather than ever claiming it plays natively. Also covers
+ * /api/vod/open rather than ever claiming it plays natively. Also covers
  * the fast/prefetch path: a cold cache resolves exactly one native pick
  * within its own bounded deadline and backgrounds the rest; a warm cache
  * returns near-instantly with no network.

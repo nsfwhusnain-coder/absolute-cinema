@@ -7,12 +7,12 @@
 **Your own streaming service. Self-hosted, powered by your Real-Debrid account.**
 
 A Netflix-style web app for movies and TV that finds a stream the moment you press Play,
-starts in seconds, and gets faster every time you watch.
+starts in seconds, seeks instantly, even in 4K, and plays the same way in every browser.
 
 [![CI](https://github.com/nsfwhusnain-coder/absolute-cinema/actions/workflows/ci.yml/badge.svg)](https://github.com/nsfwhusnain-coder/absolute-cinema/actions/workflows/ci.yml)
 ![Next.js](https://img.shields.io/badge/Next.js-16-000?logo=nextdotjs)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-ready-2496ed?logo=docker&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-2496ed?logo=docker&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
 <img src="docs/screenshots/home.jpg" alt="Absolute Cinema home screen" width="100%">
@@ -26,7 +26,7 @@ starts in seconds, and gets faster every time you watch.
 - [Features](#features)
 - [Screenshots](#screenshots)
 - [Quick start](#quick-start)
-- [First-run setup](#first-run-setup)
+- [First run](#first-run)
 - [How playback works](#how-playback-works)
 - [Configuration](#configuration)
 - [Updating and backups](#updating-and-backups)
@@ -38,40 +38,47 @@ starts in seconds, and gets faster every time you watch.
 ## Features
 
 **Watching**
-- **Press Play and it just starts.** Real-Debrid cached releases and free web sources are searched in parallel; the best one that your browser can actually decode is picked automatically.
-- **4K where it counts.** Real 2160p from Real-Debrid, with MKV releases rewrapped into a browser-friendly stream on the fly (no re-encode, ~10× realtime).
-- **Remembers what worked.** Every title keeps a record of which server delivered it, at what resolution and how smoothly. Next time, that server is first in line, so repeat plays and next episodes skip the search.
-- **Seek anywhere, with previews.** Hover the timeline to see thumbnails; jumping ahead in a 4K file starts a fresh stream at that point instead of waiting for it to download.
-- **Automatic failover.** If a server stalls or dies, playback moves to the next one without you doing anything. Servers that keep failing are benched for the session.
-- **Proper player.** Quality picker with honest per-server labels, audio track and subtitle selection (with preferences remembered), playback speed, next-episode countdown, resume from where you stopped, keyboard shortcuts and touch gestures.
+- **Press Play and it starts.** Real-Debrid cached releases and free web sources are searched in parallel, and the player starts on the best one this device can actually decode.
+- **Real 4K that seeks instantly.** MKV releases, where nearly all 4K lives, are rewrapped on the fly into a standard HLS stream: the video is never re-encoded, the whole timeline is available from the first second, and jumping to any point starts playing in about three seconds.
+- **Never switches mid-film.** Once a server is playing it stays. A dropped connection is retried on the same server at the same position; only a server that genuinely cannot keep up is swapped for the next one, seamlessly.
+- **Remembers what worked.** Each title keeps a record of which server delivered it, at what resolution and how smoothly, so repeat plays and the next episode skip the search.
+- **A clean glass player.** Quality, speed, server and download in one menu, subtitles and audio tracks, thumbnail previews on the timeline, picture-in-picture, AirPlay, next-episode countdown, resume, and full keyboard control.
 
 **Browsing**
 - Home rows for trending, new on digital, top rated and what is on Netflix, Prime Video, Disney+, Apple TV+, Max and Hulu, plus "Because you watched…" recommendations.
-- Movie and show pages with cast, full season lists with synopses and air dates, person pages, genre hubs and instant search.
+- Movie and show pages with cast, full season lists, person pages, genre hubs and instant search.
 - My List, Continue Watching and "already watched" tracking per profile.
 
 **Household**
-- Multiple profiles with PIN sign-in; the first account is the admin.
-- Adult-content filter per profile.
-- Installable as an app (PWA) on phones, tablets and desktops. A TV mode with D-pad navigation works on smart-TV browsers (webOS, Tizen, Android TV).
+- **"Who's watching?"** Pick your profile, enter your PIN, done. Anyone can create a profile with just a name and PIN; the first profile is the admin, who can close sign-ups or hide the picker.
+- Per-profile playback preferences (quality, audio language, subtitles), list and history.
+- Adult-title filter per profile, locked behind its PIN.
+- **Clear** (frosted glass, the default) and **Solid** themes, with six accent colours.
+- Installable as an app (PWA) on phones, tablets and desktops; a TV mode with D-pad navigation works on smart-TV browsers.
 
 **Self-hosting**
-- One container, `docker compose up -d`, done. SQLite, no external database.
-- API keys are entered in the browser and verified before they are saved; they never reach the client.
-- A health endpoint, rollback-safe update script and automatic database snapshots.
+- One container, `docker compose up -d`, on any 64-bit Linux, macOS or Windows machine running Docker (amd64 or arm64). SQLite, no external database.
+- Only two keys, TMDB and Real-Debrid, entered in the browser and verified before they are saved. They never reach the client.
+- Live health in Settings, a health endpoint, rollback-safe updates and automatic database snapshots.
 
 ## Screenshots
 
-| Title page | Season |
+| Who's watching | Title page |
 |---|---|
-| <img src="docs/screenshots/detail.jpg" alt="Movie detail page"> | <img src="docs/screenshots/season.jpg" alt="Season episode list"> |
-| **Search** | **First-run setup** |
-| <img src="docs/screenshots/search.jpg" alt="Search results"> | <img src="docs/screenshots/setup.jpg" alt="Setup wizard"> |
+| <img src="docs/screenshots/profiles.jpg" alt="Profile picker"> | <img src="docs/screenshots/detail.jpg" alt="Movie detail page"> |
+| **Player** | **Player settings** |
+| <img src="docs/screenshots/player.jpg" alt="Player"> | <img src="docs/screenshots/player-menu.jpg" alt="Player settings menu"> |
+| **Season** | **Search** |
+| <img src="docs/screenshots/season.jpg" alt="Season episode list"> | <img src="docs/screenshots/search.jpg" alt="Search results"> |
+| **Settings** | **Create a profile** |
+| <img src="docs/screenshots/settings.jpg" alt="Settings"> | <img src="docs/screenshots/signup.jpg" alt="Create a profile"> |
 
 <div align="center">
-<img src="docs/screenshots/mobile-home.jpg" alt="Mobile home" width="260">
-&nbsp;&nbsp;
-<img src="docs/screenshots/mobile-detail.jpg" alt="Mobile title page" width="260">
+<img src="docs/screenshots/mobile-profiles.jpg" alt="Mobile profile picker" width="240">
+&nbsp;
+<img src="docs/screenshots/mobile-home.jpg" alt="Mobile home" width="240">
+&nbsp;
+<img src="docs/screenshots/mobile-detail.jpg" alt="Mobile title page" width="240">
 </div>
 
 ## Quick start
@@ -86,45 +93,46 @@ cd absolute-cinema
 docker compose up -d
 ```
 
-Open **http://localhost:3000** (or `http://<server-ip>:3000` from another device).
+Open **http://localhost:3000**, or `http://<server-ip>:3000` from another device.
 
 The first build takes a few minutes because it installs a headless browser and ffmpeg.
 To use a different port, create a `.env` file containing `AC_PORT=8080`.
 
-## First-run setup
+## First run
 
-1. **Create the admin account.** The first visit shows a sign-up form; that account becomes the admin.
-2. **Add your TMDB key.** Get it from [themoviedb.org → Settings → API](https://www.themoviedb.org/settings/api). Either the *API Key* or the *API Read Access Token* works.
-3. **Add your Real-Debrid token** (optional but recommended). Copy it from [real-debrid.com/apitoken](https://real-debrid.com/apitoken).
+1. **Create your profile.** The first visit asks for a name and a PIN; that profile is the admin.
+2. **Add your TMDB key** from [themoviedb.org → Settings → API](https://www.themoviedb.org/settings/api). Either the *API Key* or the *API Read Access Token* works.
+3. **Add your Real-Debrid token** from [real-debrid.com/apitoken](https://real-debrid.com/apitoken). Optional, but it is what gives you fast 1080p and 4K.
 
-Both keys are checked against their services before they are saved, and can be changed
-later in **Settings → Connections**. To let family members create their own profiles,
-add them in **Settings → Server → Profiles**, or set `REGISTRATION_INVITE_CODE` and share the code.
+Both keys are checked before they are saved and can be changed later in
+**Settings → Server → Connections**. Everyone else just opens the site and taps
+**Add profile**. To stop that, turn off *Anyone can add a profile* in
+**Settings → Server → Profiles** and add people yourself.
 
 ## How playback works
 
 ```mermaid
 flowchart LR
     A[Press Play] --> B{Remembered<br/>server for<br/>this title?}
-    B -- yes --> C[Resolve a fresh link<br/>from that server]
+    B -- yes --> C[Fresh link from<br/>that server]
     B -- no --> D[Search in parallel]
-    D --> E[Real-Debrid cache<br/>via Torrentio]
+    D --> E[Real-Debrid cache]
     D --> F[Free web sources]
-    E --> G[Rank by what this<br/>browser can decode<br/>and real resolution]
+    E --> G[Rank by what this<br/>device can decode<br/>and real resolution]
     F --> G
     C --> H[Player]
     G --> H
-    H -- MKV / unsupported audio --> I[Remux worker<br/>stream copy to fMP4]
+    H -- MKV release --> I[Remuxer<br/>keyframe-exact HLS,<br/>video copied untouched]
     I --> H
     H -- first frame, stalls,<br/>watch time --> J[(Source memory)]
     J --> B
 ```
 
-- **Two-speed resolve.** A fast pass (cache and API-only sources) answers within a couple of seconds so video can start, while a full pass keeps looking in the background and upgrades the list.
-- **Source memory stores evidence, never URLs.** Debrid and CDN links expire within hours; "this server delivered real 2160p H.264 for this episode and someone watched 40 minutes" stays true. On the next play a fresh link is fetched from that server first.
-- **Browser-aware ranking.** HEVC/Dolby Vision releases are only offered where the browser can decode them (Safari, most TVs); Chrome and Firefox get H.264/AV1 4K or the best 1080p.
-- **Remux, not transcode.** MKV files are rewrapped with `ffmpeg -c:v copy`. Only the audio is converted (to AAC) when the original codec is not browser-safe. Seeking restarts the remux at the new position.
-- **Everything goes through your server.** HLS playlists and segments are proxied with SSRF protection, and debrid tokens are stripped from every URL before it reaches a browser.
+- **Sources arrive as they are found.** A quick answer (cache plus the fastest providers) comes back in one or two seconds and every later find streams in behind it. If only low-quality or known-flaky sources have turned up so far, the player waits a few seconds for something better, because whatever starts is kept for the whole title.
+- **Seekable 4K without transcoding.** The remuxer reads the MKV's keyframe index over HTTP range requests, plans the whole title as an HLS playlist of exact keyframe-aligned segments, and produces each segment on demand with `ffmpeg -c:v copy`. Only audio is converted, to stereo AAC, so it plays everywhere. Seeking far ahead starts a new run at that keyframe; already-produced segments are reused.
+- **Same behaviour in every browser.** Ranking only offers what the device can decode (HEVC and Dolby Vision where supported, H.264 or AV1 elsewhere), and one player engine handles HLS, native HLS on Apple devices, and plain files.
+- **Source memory stores evidence, never URLs.** Debrid and CDN links expire; "this server delivered real 2160p for this episode and someone watched 40 minutes" does not.
+- **Everything goes through your server.** Playlists and segments are proxied with SSRF protection, and debrid tokens are stripped from every URL before it reaches a browser.
 
 ## Configuration
 
@@ -137,24 +145,24 @@ Everything is optional. Copy [`.env.example`](.env.example) to `.env` to overrid
 | `REAL_DEBRID_API_TOKEN` | – | Real-Debrid token (a token saved in Settings wins) |
 | `NEXTAUTH_URL` | – | Public URL, only when behind a reverse proxy with a fixed hostname |
 | `NEXTAUTH_SECRET` | auto | Session secret; generated into `db/.auth-secret` on first start |
-| `REGISTRATION_INVITE_CODE` | – | Lets people self-register with this code |
-| `REMUX_ENABLED` | `1` | Rewrap MKV releases for the browser |
-| `TRANSCODER_ENABLED` | `0` | Full re-encode for incompatible codecs (CPU heavy) |
-| `TRANSCODER_CACHE_MAX_BYTES` | 100 GiB | Disk budget for remuxed files |
+| `REMUX_ENABLED` | `1` | Serve MKV releases as seekable streams |
+| `REMUX_CACHE_MAX_BYTES` | 50 GiB | Disk the remux cache may use |
+| `REMUX_MIN_FREE_BYTES` | 5 GiB | Free space the remux cache always leaves |
 | `BROWSER_POOL_SIZE` | `1` | Headless Chromium workers for web sources (1–4) |
 | `TORBOX_API_KEY` | – | Optional TorBox account as an extra debrid source |
 | `PROVIDER_<NAME>=0` | on | Disable an individual web source |
 
-**Data** lives in three folders next to `docker-compose.yml`: `db/` (accounts, history,
-settings), `data/source-memory/` (remembered servers) and `transcode-cache/`
-(temporary remux output, safe to delete).
+**Data** lives in three folders next to `docker-compose.yml`: `db/` (profiles, history,
+settings), `data/source-memory/` (remembered servers) and `transcode-cache/` (remux
+output; bounded by the settings above and safe to delete).
 
 **Reverse proxy.** Put Caddy, nginx or Traefik in front of port 3000 and set `NEXTAUTH_URL`
-to the public address. Streaming responses are long-lived; disable response buffering for
-`/api/hls` and `/api/transcode`.
+to the public address. Disable response buffering for `/api/hls` and `/api/vod`.
 
-**Hardware.** Any 64-bit Linux host with 2 GB RAM works for 1080p. 4K remuxing is I/O bound,
-so disk speed and bandwidth matter more than CPU. Keep at least 30 GB free if you watch 4K.
+**Hardware.** Anything that runs Docker: a mini PC, a NAS, a Raspberry Pi 5 or an old
+laptop. Video is never re-encoded, so the CPU barely matters; 2 GB of RAM is enough.
+For 4K, what counts is your internet connection (about 60–100 Mbit/s per stream) and
+some free disk for the remux cache.
 
 ## Updating and backups
 
@@ -172,7 +180,7 @@ docker tag absolute-cinema:rollback-<timestamp> absolute-cinema:latest && docker
 
 ## Development
 
-Requirements: [Bun](https://bun.sh) 1.3+, Node.js 22+, and ffmpeg for remux work.
+Requirements: [Bun](https://bun.sh) 1.3+, Node.js 22+, and ffmpeg.
 
 ```bash
 bun install
@@ -182,12 +190,13 @@ echo "DATABASE_URL=file:../db/dev.db" >> .env
 bun run db:push
 
 bun run dev                        # web app on :3000
-bun run dev:scraper                # stream resolver on :3030 (second terminal)
+bun run dev:scraper                # source resolver on :3030 (second terminal)
+bun run dev:remuxer                # MKV remuxer on :3040 (third terminal)
 ```
 
 | Command | What it does |
 |---|---|
-| `bun run test` | Unit tests (1,200+) for playback, ranking, proxy, debrid and scrapers |
+| `bun run test` | Unit tests for playback, ranking, the player state machine, remuxer, proxy, debrid and scrapers |
 | `bun run typecheck` | TypeScript, no emit |
 | `bun run lint` | ESLint |
 | `bun run build` | Production build |
@@ -199,15 +208,16 @@ bun run dev:scraper                # stream resolver on :3030 (second terminal)
 ```
 src/
   app/                  Next.js routes (pages + API)
-    api/playback/       resolve sources for a title (fast + full passes)
-    api/hls/            HLS/DASH proxy with SSRF protection
-    api/transcode/      remux / transcode front door
-  components/           UI; video-player.tsx is the player state machine
-  lib/playback/         ranking, source memory, failover, debrid tier
-  views/                page-level components
+    api/playback/       sources for a title (quick + full answers)
+    api/vod/            remux sessions: open, playlist, init and segments
+    api/hls/            HLS proxy with SSRF protection
+    api/profiles/       the "Who's watching?" list
+  components/player/    player: orchestrator hook, media engine, glass UI
+  lib/playback/         ranking, orchestrator state machine, source memory, debrid
+  views/                page-level components (settings/ is one file per section)
 mini-services/
   stream-scraper/       Bun service that resolves web sources (internal :3030)
-  transcoder/           ffmpeg remux / transcode worker (internal :3040)
+  remuxer/              MKV → keyframe-exact HLS (internal :3040)
 prisma/schema.prisma    SQLite schema
 workers/hls-proxy/      optional Cloudflare Worker edge proxy
 scripts/                update, backup, disk and smoke-test tooling
@@ -218,15 +228,20 @@ scripts/                update, backup, disk and smoke-test tooling
 **Do I need Real-Debrid?** No, but without it playback relies on free web sources, which are
 slower, less reliable and usually top out at 1080p.
 
-**Why doesn't 4K play in Chrome?** Most 4K releases are HEVC or Dolby Vision, which Chrome
-and Firefox cannot decode. Absolute Cinema offers them only where they will play (Safari, Apple
-devices, most smart TVs) and gives other browsers the best compatible version.
+**Does 4K play in Chrome?** Yes, when the release is H.264 or AV1, or when your device can
+decode HEVC (most recent Windows, macOS and Android devices can). Dolby Vision and HEVC
+releases are only offered where they will actually play; otherwise you get the best
+compatible version instead of an error.
+
+**Why did it pick 1080p on my laptop?** *Best* quality always goes for 4K, but only among
+copies this device can decode. When every 4K release of a title is HEVC and the browser
+has no HEVC decoder, the best compatible version is 1080p.
 
 **Where is my data stored?** In `db/` on your own server. Nothing is sent anywhere except
-requests to TMDB, Real-Debrid and the stream sources needed to play what you pick.
+the requests to TMDB, Real-Debrid and the stream sources needed to play what you pick.
 
 **Can several people watch at once?** Yes. Each profile has its own list, progress and
-preferences. Concurrent 4K remuxes are limited to protect bandwidth and disk.
+preferences, and each 4K stream gets its own remux session.
 
 ## Disclaimer
 

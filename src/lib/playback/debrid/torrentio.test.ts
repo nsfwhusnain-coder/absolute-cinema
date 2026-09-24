@@ -266,7 +266,7 @@ describe("isDirectPlayDebridRelease", () => {
   });
 });
 
-describe("isBrowserPlayableContainer — the absolute NATIVE browser-playability gate (no longer a drop filter — consumed by source-quality.ts's isSourcePlayableHere to decide native vs. /api/transcode)", () => {
+describe("isBrowserPlayableContainer — the absolute NATIVE browser-playability gate (no longer a drop filter — consumed by source-quality.ts's isSourcePlayableHere to decide native vs. /api/vod/open)", () => {
   it("mp4/mov/unknown are eligible", () => {
     expect(isBrowserPlayableContainer("mp4")).toBe(true);
     expect(isBrowserPlayableContainer("mov")).toBe(true);
@@ -463,7 +463,7 @@ describe("fetchTorrentioCandidates — MKV/HEVC kept (transcoder-link) + per-cla
    * demux directly, so an MKV/HEVC candidate must survive selection with
    * its real `container`/`codec` intact — dropping it would silently lose a
    * real (often the BEST) release rather than routing it through
-   * /api/transcode.
+   * /api/vod/open.
    */
   it("keeps an MKV/HEVC 4K release — top of its class by seeders, container/codec preserved for the client's transcode gate", async () => {
     globalThis.fetch = (async () =>

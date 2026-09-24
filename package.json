@@ -1,12 +1,13 @@
 {
   "name": "absolute-cinema",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "A self-hosted, Netflix-style streaming front end for your own Real-Debrid account.",
   "license": "MIT",
   "scripts": {
     "dev": "next dev -p 3000",
     "dev:scraper": "cd mini-services/stream-scraper && bun --hot index.ts",
+    "dev:remuxer": "cd mini-services/remuxer && REMUX_CACHE_DIR=${REMUX_CACHE_DIR:-../../transcode-cache} bun --hot index.ts",
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
     "start": "NODE_ENV=production node .next/standalone/server.js",
     "lint": "eslint .",

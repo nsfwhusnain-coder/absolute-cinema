@@ -40,7 +40,7 @@ describe("buildFastDebridResponse", () => {
     });
     const response = buildFastDebridResponse([mkv]);
     // `streamUrl` stays the raw source URL: it is the fast path's hint, and the
-    // player derives the real /api/transcode?mode=remux URL from the source it
+    // player derives the /api/vod/open remux session from the source it
     // selects (see sourceDelivery in video-player.tsx). What matters here is
     // that an MKV-only hit is no longer discarded as unplayable.
     expect(response?.status).toBe("available");
