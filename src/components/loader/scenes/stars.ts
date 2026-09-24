@@ -198,7 +198,7 @@ export const createStars: SceneFactory = ({ THREE, gsap, scene, camera, uniforms
   gsap.to(params, { speed: 1, duration: 3.2, ease: "power2.inOut" });
 
   return {
-    bloom: { strength: 1.05, radius: 0.55, threshold: 0.7 },
+    bloom: { strength: 0.65, radius: 0.55, threshold: 0.8 },
     resolution: 0.85,
     update(time, delta) {
       local.uSpeed.value = params.speed;
@@ -215,7 +215,7 @@ export const createStars: SceneFactory = ({ THREE, gsap, scene, camera, uniforms
     },
     exit(duration) {
       gsap.killTweensOf(params);
-      gsap.to(params, { speed: 3.2, curve: 0, duration, ease: "power3.in" });
+      gsap.to(params, { speed: 1.6, curve: 0, duration, ease: "sine.in" });
     },
     dispose() {
       gsap.killTweensOf(params);

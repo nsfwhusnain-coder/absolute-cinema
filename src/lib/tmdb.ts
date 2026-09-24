@@ -321,7 +321,7 @@ export interface TmdbAnimeSignalsRaw {
   };
 }
 
-export { withoutAdultTitles } from "./tmdb-filters";
+export { heroPicks, isShowcaseWorthy, showcase, withoutAdultTitles } from "./tmdb-filters";
 
 // ---------- Endpoints ----------
 export const tmdb = {
@@ -461,6 +461,10 @@ export const tmdb = {
       watch_region: region,
       page,
       sort_by: "popularity.desc",
+      // Popular and liked: without a floor the list leads with whatever
+      // landed this week, however it was received.
+      "vote_average.gte": PROVIDER_MIN_RATING,
+      "vote_count.gte": type === "movie" ? 250 : 120,
       include_adult: false,
     }),
 
@@ -477,6 +481,7 @@ export const tmdb = {
       "release_date.gte": since,
       "release_date.lte": today,
       "vote_count.gte": NEW_RELEASE_MIN_VOTES,
+      "vote_average.gte": NEW_RELEASE_MIN_RATING,
       sort_by: "popularity.desc",
       include_adult: false,
       page,
@@ -503,7 +508,7 @@ export const tmdb = {
     }
     const genre = /^genre-(\d+)$/.exec(kind);
     if (genre) return tv({ with_genres: `${ANIME_GENRE_ID},${genre[1]}`, sort_by: "popularity.desc", "vote_count.gte": 50 });
-    return tv({ sort_by: "popularity.desc" });
+    return tv({ sort_by: "popularity.desc", "vote_average.gte": 7, "vote_count.gte": 50 });
   },
 
   /** A film series ("Dune Collection") and all its parts. */
@@ -524,7 +529,10 @@ const NEW_RELEASE_WINDOW_DAYS = 120;
 const ANIME_GENRE_ID = 16;
 /** How far back the Movies/Shows "acclaimed now" picks may reach. */
 const ACCLAIMED_WINDOW_DAYS = 540;
-const NEW_RELEASE_MIN_VOTES = 20;
+const NEW_RELEASE_MIN_VOTES = 60;
+const NEW_RELEASE_MIN_RATING = 6.5;
+/** Streaming-service lists: well received titles only. */
+const PROVIDER_MIN_RATING = 6.5;
 
 export const COMMON_GENRES: { id: number; name: string }[] = [
   { id: 28, name: "Action" },

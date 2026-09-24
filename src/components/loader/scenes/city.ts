@@ -101,7 +101,7 @@ export const createCity: SceneFactory = ({ THREE, gsap, scene, uniforms }) => {
   gsap.to(local.uDrift, { value: 1, duration: 3, ease: "power2.out" });
 
   return {
-    bloom: { strength: 0.85, radius: 0.7, threshold: 0.7 },
+    bloom: { strength: 0.55, radius: 0.7, threshold: 0.8 },
     update() {},
     evolve() {
       gsap.timeline({ repeat: -1, yoyo: true, delay: 5 })

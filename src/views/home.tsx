@@ -11,7 +11,7 @@ import { Shuffle } from "lucide-react";
 import { useNavigate } from "@/hooks/use-navigate";
 import { MovieCard } from "@/components/movie-card";
 import { CardOverflowMenu } from "@/components/card-overflow-menu";
-import { NETFLIX_PROVIDER_ID, tmdbImageUrl, withoutAdultTitles } from "@/lib/tmdb";
+import { NETFLIX_PROVIDER_ID, heroPicks, showcase, tmdbImageUrl, withoutAdultTitles } from "@/lib/tmdb";
 import { useHideAdult } from "@/hooks/use-hide-adult";
 import {
   fetchTmdbPages,
@@ -40,6 +40,8 @@ import { collapseContinueItems } from "@/lib/continue-watching";
 
 const LIST_PAGES = 3;
 const RAIL_CARD_LIMIT = 16;
+/** Banner slides: the week's biggest well-reviewed titles. */
+const HERO_COUNT = 6;
 const RAIL_STACK_GAP = 40;
 /**
  * Image bleed + mask provide the handoff. Keep 0 — not a positive gutter
@@ -198,8 +200,8 @@ export function HomeView() {
 
     return {
       becauseYouWatched: withoutAdultTitles(becauseYouWatched, hideAdult),
-      trendingMovies: withoutAdultTitles(takeUnique(catalog.data.trendingMovies, "movie", seen), hideAdult),
-      trendingSeries: withoutAdultTitles(takeUnique(catalog.data.trendingSeries, "tv", seen), hideAdult),
+      trendingMovies: withoutAdultTitles(takeUnique(showcase(catalog.data.trendingMovies, "movie"), "movie", seen), hideAdult),
+      trendingSeries: withoutAdultTitles(takeUnique(showcase(catalog.data.trendingSeries, "tv"), "tv", seen), hideAdult),
       netflixMovies: withoutAdultTitles(takeUnique(catalog.data.netflixMovies, "movie", seen), hideAdult),
       netflixSeries: withoutAdultTitles(takeUnique(catalog.data.netflixSeries, "tv", seen), hideAdult),
       topRatedMovies: withoutAdultTitles(takeUnique(catalog.data.topRatedMovies, "movie", seen), hideAdult),
@@ -207,21 +209,35 @@ export function HomeView() {
     };
   }, [catalog.data, continueQuery.data, recSeed, recSeedMediaType, becauseYouWatchedQuery.data, hideAdult]);
 
-  // Home's banner is what everyone is watching today, movies and shows alike;
-  // the Movies and Shows pages feature acclaimed picks instead.
+  // Home's banner and Top 10 are what everyone is watching, movies and shows
+  // alike, held to a quality bar: popular and well liked, never this week's
+  // unreviewed or poorly received releases. The week's trending list is the
+  // pool (today's alone is too thin once filtered).
   const heroQuery = useQuery({
-    queryKey: ["tmdb", "home-hero", "trending-all-day"],
-    queryFn: () => tmdbFetch("trending/all/day"),
+    queryKey: ["tmdb", "home-hero", "trending-all-week-day"],
+    queryFn: async () => {
+      const [day, week] = await Promise.all([
+        tmdbFetch("trending/all/day").catch(() => ({ results: [] as TmdbListItem[] })),
+        tmdbFetch("trending/all/week").catch(() => ({ results: [] as TmdbListItem[] })),
+      ]);
+      const seenIds = new Set<string>();
+      return [...(day.results ?? []), ...(week.results ?? [])].filter((m) => {
+        const key = `${m.media_type}:${m.id}`;
+        if (seenIds.has(key)) return false;
+        seenIds.add(key);
+        return true;
+      });
+    },
     staleTime: 60 * 60 * 1000,
   });
-  const heroPool: Array<TmdbListItem & { media_type: "movie" | "tv" }> = heroQuery.data?.results?.length
-    ? heroQuery.data.results
-        .filter((m) => (m.media_type === "movie" || m.media_type === "tv") && m.backdrop_path)
-        .map((m) => ({ ...m, media_type: m.media_type as "movie" | "tv" }))
-    : (catalog.data?.trendingMovies ?? []).map((m) => ({ ...(m as TmdbListItem), media_type: "movie" as const }));
-  const featured = withoutAdultTitles(heroPool, hideAdult)
-    .slice(0, 5)
-    .map((m) => ({ ...m, overview: m.overview ?? "" }));
+  const trendingAll: Array<TmdbListItem & { media_type: "movie" | "tv" }> = (heroQuery.data?.length
+    ? heroQuery.data
+    : (catalog.data?.trendingMovies ?? []).map((m) => ({ ...m, media_type: "movie" }))
+  )
+    .filter((m) => m.media_type === "movie" || m.media_type === "tv")
+    .map((m) => ({ ...m, media_type: m.media_type as "movie" | "tv" }));
+  const heroPool = showcase(withoutAdultTitles(trendingAll, hideAdult));
+  const featured = heroPicks(withoutAdultTitles(trendingAll, hideAdult), HERO_COUNT).map((m) => ({ ...m, overview: m.overview ?? "" }));
 
   // "Play something": a random pick from what is trending today.
   const playSomething = () => {
@@ -357,7 +373,18 @@ export function HomeView() {
               </MovieRow>
             ) : null}
 
-            <TopTenRow title="Top 10 Today" items={withoutAdultTitles(heroPool, hideAdult)} />
+            <TopTenRow title="Top 10 Today" items={heroPool.slice(0, 10)} />
+
+            <LazyRail minHeight={360}>
+              <CatalogRail
+                title="Acclaimed New Releases"
+                sources={[
+                  { path: "discover/movie/acclaimed", mediaType: "movie" },
+                  { path: "discover/tv/acclaimed", mediaType: "tv" },
+                ]}
+                showcaseOnly
+              />
+            </LazyRail>
 
             {rows?.trendingMovies.length ? (
               <MovieRow title="Trending Movies" viewAllHref="/browse/trending-movies">
@@ -384,6 +411,7 @@ export function HomeView() {
                 title="Popular Anime"
                 viewAllHref="/browse/anime-trending"
                 sources={[{ path: "discover/anime/trending", mediaType: "tv" }]}
+                showcaseOnly
               />
             </LazyRail>
 
@@ -392,6 +420,7 @@ export function HomeView() {
                 title="New on Digital"
                 viewAllHref="/browse/new-digital"
                 sources={[{ path: "discover/movie/new-digital", mediaType: "movie" }]}
+                showcaseOnly
               />
             </LazyRail>
 

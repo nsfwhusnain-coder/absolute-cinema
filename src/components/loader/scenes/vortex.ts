@@ -132,7 +132,7 @@ export const createVortex: SceneFactory = ({ THREE, gsap, scene, uniforms, quali
   gsap.to(local.uSpin, { value: 1, duration: 5, ease: "power2.out" });
 
   return {
-    bloom: { strength: 0.85, radius: 0.7, threshold: 0.78 },
+    bloom: { strength: 0.6, radius: 0.7, threshold: 0.8 },
     resolution: 0.7,
     update(time) {
       local.uYaw.value = 0.4 + time * 0.018;
@@ -145,9 +145,9 @@ export const createVortex: SceneFactory = ({ THREE, gsap, scene, uniforms, quali
     },
     exit(duration) {
       gsap.killTweensOf([local.uDist, local.uPitch, local.uSpin, local.uRoll]);
-      gsap.to(local.uDist, { value: 4.2, duration, ease: "power3.in" });
+      gsap.to(local.uDist, { value: local.uDist.value * 0.85, duration, ease: "sine.in" });
       gsap.to(local.uPitch, { value: 0.02, duration, ease: "power2.in" });
-      gsap.to(local.uSpin, { value: 2.4, duration, ease: "power2.in" });
+      gsap.to(local.uSpin, { value: 1.2, duration, ease: "sine.in" });
     },
     dispose() {
       gsap.killTweensOf([local.uDist, local.uPitch, local.uSpin, local.uRoll]);

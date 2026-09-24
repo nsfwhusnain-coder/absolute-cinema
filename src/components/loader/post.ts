@@ -16,7 +16,7 @@ export interface BloomLook {
   threshold: number;
 }
 
-export const DEFAULT_BLOOM: BloomLook = { strength: 0.9, radius: 0.6, threshold: 0.72 };
+export const DEFAULT_BLOOM: BloomLook = { strength: 0.6, radius: 0.6, threshold: 0.8 };
 
 const GRADE_SHADER = {
   uniforms: {
@@ -50,11 +50,13 @@ float hash(vec2 p) {
 }
 
 // Colours below the knee pass through as authored; brighter light rolls off
-// smoothly toward white instead of clipping into flat patches.
+// smoothly and never reaches full white. A loader is watched in a dark room,
+// often at low brightness: peaks at full white read as flashes.
 vec3 shoulder(vec3 c) {
-  const float knee = 0.75;
+  const float knee = 0.55;
+  const float headroom = 0.27;
   vec3 over = max(c - knee, 0.0);
-  return min(c, knee) + over / (1.0 + over * 4.0);
+  return min(c, knee) + over / (1.0 + over / headroom);
 }
 
 void main() {

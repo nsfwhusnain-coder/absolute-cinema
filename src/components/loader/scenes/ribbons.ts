@@ -26,7 +26,8 @@ void main() {
   vec3 tangent = normalize(curve(u + 0.003) - c);
   vec3 side = normalize(cross(tangent, vec3(0.15, 1.0, 0.1)));
   vec3 up = normalize(cross(side, tangent));
-  float twist = u * 11.0 + uTime * 0.55 + uPhase;
+  // Slow: a fast twist swings each ribbon from edge-on to face-on and pulses.
+  float twist = u * 11.0 + uTime * 0.16 + uPhase;
   vec3 across = side * cos(twist) + up * sin(twist);
   vec3 p = c + across * (uv.y - 0.5) * uWidth * sin(3.14159 * u);
   vec4 mv = modelViewMatrix * vec4(p, 1.0);
@@ -44,13 +45,13 @@ void main() {
   float acrossBand = 1.0 - abs(vUv.y - 0.5) * 2.0;
   float core = pow(acrossBand, 7.0);
   float glow = pow(acrossBand, 1.8);
-  float shimmer = 0.55 + 0.45 * sin(vUv.x * 38.0 - uTime * 2.6 + uPhase * 9.0);
+  float shimmer = 0.8 + 0.2 * sin(vUv.x * 38.0 - uTime * 0.8 + uPhase * 9.0);
   vec3 col = mix(uMain, uAccent, smoothstep(0.15, 0.95, fract(vUv.x * 0.8 + uTime * 0.04 + uPhase * 0.3)));
   col = mix(col, uHighlight, core * 0.85);
   float ends = smoothstep(0.0, 0.14, vUv.x) * smoothstep(1.0, 0.86, vUv.x);
   float depthFade = smoothstep(10.0, 2.2, vDepth);
-  float a = (glow * 0.5 + core * 1.25) * shimmer * ends * depthFade * uIntensity;
-  gl_FragColor = vec4(col * a * (1.0 + core * 1.6), a);
+  float a = (glow * 0.35 + core * 0.75) * shimmer * ends * depthFade * uIntensity;
+  gl_FragColor = vec4(col * a, a);
 }
 `;
 
@@ -100,7 +101,7 @@ export const createRibbons: SceneFactory = ({ THREE, gsap, scene, camera, unifor
   gsap.to(params, { flow: 1, duration: 2.8, ease: "power2.out" });
 
   return {
-    bloom: { strength: 1.0, radius: 0.7, threshold: 0.65 },
+    bloom: { strength: 0.5, radius: 0.7, threshold: 0.8 },
     update(time) {
       for (const r of ribbons) {
         r.local.uFlow.value = params.flow;
@@ -116,7 +117,7 @@ export const createRibbons: SceneFactory = ({ THREE, gsap, scene, camera, unifor
     },
     exit(duration) {
       gsap.killTweensOf(params);
-      gsap.to(params, { flow: 3, push: 3.2, duration, ease: "power2.in" });
+      gsap.to(params, { flow: 1.4, push: 0.6, duration, ease: "sine.in" });
     },
     dispose() {
       gsap.killTweensOf(params);

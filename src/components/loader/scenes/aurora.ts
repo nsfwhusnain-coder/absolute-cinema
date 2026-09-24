@@ -103,7 +103,7 @@ export const createAurora: SceneFactory = ({ THREE, gsap, scene, uniforms }) => 
   gsap.to(local.uFlow, { value: 1, duration: 3, ease: "power1.out" });
 
   return {
-    bloom: { strength: 0.95, radius: 0.85, threshold: 0.55 },
+    bloom: { strength: 0.6, radius: 0.85, threshold: 0.75 },
     update() {},
     evolve() {
       gsap.timeline({ repeat: -1, yoyo: true, delay: 6 })

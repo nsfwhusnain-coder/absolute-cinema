@@ -35,7 +35,9 @@ void main() {
   p.y = mod(p.y + ${BOX.y.toFixed(1)}, ${(BOX.y * 2).toFixed(1)}) - ${BOX.y.toFixed(1)};
   vec4 mv = modelViewMatrix * vec4(p, 1.0);
   gl_PointSize = uSize * (0.45 + aRand) * uPixelRatio * 38.0 / max(0.5, -mv.z);
-  vFlicker = 0.6 + 0.4 * sin(uTime * (2.5 + aRand * 5.0) + aRand * 20.0);
+  // Slow, shallow flicker: fast brightness changes (3 Hz and up) are a
+  // photosensitivity risk, even on small points.
+  vFlicker = 0.78 + 0.22 * sin(uTime * (0.8 + aRand * 1.4) + aRand * 20.0);
   vRand = aRand;
   vFade = smoothstep(${BOX.zFar.toFixed(1)}, ${(BOX.zFar + 3).toFixed(1)}, p.z);
   gl_Position = projectionMatrix * mv;
@@ -59,7 +61,7 @@ void main() {
   col = mix(col, uHighlight, core * 0.6);
   float a = (core * uCore + glow * 0.45) * vFlicker * vFade * uAlpha * uIntensity;
   // Hot cores run past 1.0 so the bloom turns them into sparks.
-  gl_FragColor = vec4(col * a * (1.0 + core * uCore * 2.4), a);
+  gl_FragColor = vec4(col * a * (1.0 + core * uCore * 1.2), a);
 }
 `;
 
@@ -132,7 +134,7 @@ export const createCurrents: SceneFactory = ({ THREE, gsap, scene, camera, unifo
   gsap.to(local.uFlow, { value: 1, duration: 3, ease: "power2.out" });
 
   return {
-    bloom: { strength: 1.1, radius: 0.65, threshold: 0.6 },
+    bloom: { strength: 0.7, radius: 0.65, threshold: 0.75 },
     update(time) {
       camera.position.set(Math.sin(time * 0.05) * 0.8, Math.cos(time * 0.04) * 0.3, 5 - params.dolly);
       camera.lookAt(0, 0, -2);

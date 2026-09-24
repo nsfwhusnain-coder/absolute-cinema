@@ -5,7 +5,7 @@ import { MovieRow } from "@/components/movie-row";
 import { MovieCard } from "@/components/movie-card";
 import { MovieRowSkeleton } from "@/components/skeletons";
 import { useHideAdult } from "@/hooks/use-hide-adult";
-import { withoutAdultTitles } from "@/lib/tmdb";
+import { showcase, withoutAdultTitles } from "@/lib/tmdb";
 import { fetchTmdbPages, type MediaKind, type TmdbListItem } from "@/lib/tmdb-client";
 import { providerPath, type StreamingService } from "@/lib/browse-categories";
 
@@ -36,10 +36,13 @@ export function CatalogRail({
   title,
   viewAllHref,
   sources,
+  showcaseOnly = false,
 }: {
   title: string;
   viewAllHref?: string;
   sources: Source[];
+  /** Home rails: only popular, well-rated titles with artwork. */
+  showcaseOnly?: boolean;
 }) {
   const hideAdult = useHideAdult();
   const { data, isLoading } = useQuery({
@@ -56,7 +59,8 @@ export function CatalogRail({
   });
 
   if (isLoading) return <MovieRowSkeleton />;
-  const items = withoutAdultTitles(data ?? [], hideAdult).filter((m) => m.poster_path);
+  const all = withoutAdultTitles(data ?? [], hideAdult).filter((m) => m.poster_path);
+  const items = showcaseOnly ? showcase(all) : all;
   if (items.length === 0) return null;
 
   return (
@@ -78,6 +82,7 @@ export function ServiceRail({ service }: { service: StreamingService }) {
     <CatalogRail
       title={`On ${service.name}`}
       viewAllHref={`/browse/${service.slug}-movies`}
+      showcaseOnly
       sources={[
         { path: providerPath("movie", service.providerId, 1), mediaType: "movie" },
         { path: providerPath("tv", service.providerId, 1), mediaType: "tv" },
