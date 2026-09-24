@@ -64,5 +64,5 @@ ENV NODE_ENV=production
 
 EXPOSE 3000
 
-RUN chmod +x start.sh
-CMD ["./start.sh"]
+RUN chmod +x docker-entrypoint.sh
+CMD ["./docker-entrypoint.sh"]

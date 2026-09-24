@@ -21,7 +21,7 @@ if [ -z "${NEXTAUTH_SECRET:-}" ]; then
   if [ ! -s "$SECRET_FILE" ]; then
     head -c 48 /dev/urandom | base64 | tr -d '\n' > "$SECRET_FILE"
     chmod 600 "$SECRET_FILE"
-    echo "[start.sh] generated a session secret in db/.auth-secret"
+    echo "[entrypoint] generated a session secret in db/.auth-secret"
   fi
   NEXTAUTH_SECRET="$(cat "$SECRET_FILE")"
   export NEXTAUTH_SECRET
@@ -39,7 +39,7 @@ start_helper() {
   local name="$1" dir="$2"
   (cd "$dir" && exec bun index.ts) &
   PIDS[$name]=$!
-  echo "[start.sh] $name started (pid=${PIDS[$name]})"
+  echo "[entrypoint] $name started (pid=${PIDS[$name]})"
 }
 
 restart_helper() {
@@ -51,10 +51,10 @@ restart_helper() {
   fi
   RESTARTS[$name]=$((RESTARTS[$name] + 1))
   if [ "${RESTARTS[$name]}" -gt "$MAX_RESTARTS_PER_MINUTE" ]; then
-    echo "[start.sh] $name keeps crashing; exiting so Docker restarts the container"
+    echo "[entrypoint] $name keeps crashing; exiting so Docker restarts the container"
     exit 1
   fi
-  echo "[start.sh] restarting $name (${RESTARTS[$name]}/$MAX_RESTARTS_PER_MINUTE this minute)"
+  echo "[entrypoint] restarting $name (${RESTARTS[$name]}/$MAX_RESTARTS_PER_MINUTE this minute)"
   start_helper "$name" "$dir"
 }
 
@@ -64,15 +64,15 @@ wait_for_health() {
     sleep 1
     waited=$((waited + 1))
     if [ "$waited" -ge 60 ]; then
-      echo "[start.sh] $name did not become healthy within 60s"
+      echo "[entrypoint] $name did not become healthy within 60s"
       return 1
     fi
   done
-  echo "[start.sh] $name healthy"
+  echo "[entrypoint] $name healthy"
 }
 
 shutdown() {
-  echo "[start.sh] shutting down…"
+  echo "[entrypoint] shutting down…"
   for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
   wait 2>/dev/null || true
   exit 0
@@ -84,18 +84,18 @@ wait_for_health scraper http://127.0.0.1:3030/health
 if [ "${REMUX_ENABLED:-1}" != "0" ]; then
   start_helper remuxer /app/mini-services/remuxer
 else
-  echo "[start.sh] remuxer disabled (REMUX_ENABLED=0)"
+  echo "[entrypoint] remuxer disabled (REMUX_ENABLED=0)"
 fi
 
 # The web app runs on Node: its stream proxying holds far less memory than Bun's.
 NODE_ENV=production node .next/standalone/server.js &
 PIDS[app]=$!
-echo "[start.sh] web app started (pid=${PIDS[app]})"
+echo "[entrypoint] web app started (pid=${PIDS[app]})"
 
 while true; do
   sleep 2
   if ! kill -0 "${PIDS[app]}" 2>/dev/null; then
-    echo "[start.sh] web app exited"
+    echo "[entrypoint] web app exited"
     exit 1
   fi
   if ! kill -0 "${PIDS[scraper]}" 2>/dev/null; then

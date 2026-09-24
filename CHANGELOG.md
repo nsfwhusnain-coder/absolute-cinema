@@ -2,6 +2,30 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.1.0] - 2026-09-24
+
+### Added
+- **Anime:** an Anime section, Popular Anime on Home, episodes found by Kitsu so
+  differently numbered seasons play the right episode, subtitles and all audio
+  tracks from inside the file, and Skip Intro / Skip Credits (AniSkip).
+- **Profiles:** 26 illustrated avatars, one-tap profiles with an optional PIN,
+  and theme, subtitle style and autoplay saved per profile.
+- Top 10 Today, Play Something, film collections on movie pages, "Still
+  watching?", and audio/subtitle choices remembered per show.
+- Player: Picture fit (Fit / Fill / Stretch), one settings menu, a loading
+  screen that shows each step, double-tap to seek on touch screens.
+- Ready-made images for Intel/AMD and ARM, and `run.sh` / `run.ps1` that start
+  everything and print the address.
+
+### Fixed
+- Play-pause-play buffering on slow servers (the server now reads ahead), and
+  servers that keep rebuffering are swapped at the same spot.
+- Resume starts where you left off instead of the beginning.
+- Tapping or clicking the picture no longer pauses; only the play button does.
+- The next episode keeps full screen.
+- More Real-Debrid results for MKV releases, and 10-bit H.264 files (which no
+  browser plays) are skipped.
+
 ## [2.0.0] - 2026-09-24
 
 ### Added

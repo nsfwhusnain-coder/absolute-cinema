@@ -7,7 +7,7 @@
 # Steps: refuse a dirty tree, pull, check free disk, snapshot the database,
 # tag the running image for rollback, build, restart, and wait for health.
 # Roll back with:
-#   docker tag <printed rollback tag> absolute-cinema:latest && docker compose up -d
+#   docker tag <printed rollback tag> ghcr.io/nsfwhusnain-coder/absolute-cinema:latest && docker compose up -d
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

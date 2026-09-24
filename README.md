@@ -42,17 +42,24 @@ starts in seconds, seeks instantly, even in 4K, and plays the same way in every 
 - **Real 4K that seeks instantly.** MKV releases, where nearly all 4K lives, are rewrapped on the fly into a standard HLS stream: the video is never re-encoded, the whole timeline is available from the first second, and jumping to any point starts playing in about three seconds.
 - **Never switches mid-film.** Once a server is playing it stays. A dropped connection is retried on the same server at the same position; only a server that genuinely cannot keep up is swapped for the next one, seamlessly.
 - **Remembers what worked.** Each title keeps a record of which server delivered it, at what resolution and how smoothly, so repeat plays and the next episode skip the search.
-- **A clean glass player.** Quality, speed, server and download in one menu, subtitles and audio tracks, thumbnail previews on the timeline, picture-in-picture, AirPlay, next-episode countdown, resume, and full keyboard control.
+- **Smooth on slow servers too.** The server reads ahead the next segments while you watch, so providers that are slow to answer no longer cause play-pause-play; a server that still cannot keep up is swapped for another at the same spot.
+- **A clean glass player.** One settings menu for subtitles, audio, quality, picture fit (fit, fill, stretch), speed, server, episodes, picture-in-picture, AirPlay and download; timeline previews, resume where you left off, a loading screen that says what it is doing, and full keyboard and touch control (tap to show controls, double-tap the sides to skip 10 seconds).
+- **Made for binge-watching.** Skip Intro and Skip Credits for anime, a next-episode countdown, "Still watching?" after three episodes nobody touched, and your audio and subtitle choice remembered per show.
+
+**Anime**
+- An Anime section with trending, this season, top rated, films and genres.
+- The right episode even when TMDB and the release groups number seasons differently (Bleach: Thousand-Year Blood War, One Piece), found through Kitsu.
+- Subtitles and every audio track from inside the file: switch between Japanese with English subtitles and the English dub mid-episode.
 
 **Browsing**
-- Home rows for trending, new on digital, top rated and what is on Netflix, Prime Video, Disney+, Apple TV+, Max and Hulu, plus "Because you watched…" recommendations.
-- Movie and show pages with cast, full season lists, person pages, genre hubs and instant search.
+- Home with Top 10 Today, trending, new on digital, top rated, Popular Anime and what is on Netflix, Prime Video, Disney+, Apple TV+, Max and Hulu, plus "Because you watched…" and a Play Something shuffle.
+- Movie and show pages with cast, trailers, the rest of a film's collection, full season lists, person pages, genre hubs and instant search.
 - My List, Continue Watching and "already watched" tracking per profile.
 
 **Household**
-- **"Who's watching?"** Pick your profile, enter your PIN, done. Anyone can create a profile with just a name and PIN; the first profile is the admin, who can close sign-ups or hide the picker.
-- Per-profile playback preferences (quality, audio language, subtitles), list and history.
-- Adult-title filter per profile, locked behind its PIN.
+- **"Who's watching?"** Tap your profile and you are in. Profiles have a picture (26 illustrated avatars) and colour; anyone can add one, and each can choose to require a PIN. The first profile is the admin, who can close sign-ups or hide the picker.
+- Everything is saved per profile: quality, audio and subtitle language, subtitle size, autoplay, theme, list and history.
+- Adult-title filter per profile (behind the PIN when the profile has one).
 - **Clear** (frosted glass, the default) and **Solid** themes, with six accent colours.
 - Installable as an app (PWA) on phones, tablets and desktops; a TV mode with D-pad navigation works on smart-TV browsers.
 
@@ -68,6 +75,8 @@ starts in seconds, seeks instantly, even in 4K, and plays the same way in every 
 | <img src="docs/screenshots/profiles.jpg" alt="Profile picker"> | <img src="docs/screenshots/detail.jpg" alt="Movie detail page"> |
 | **Player** | **Player settings** |
 | <img src="docs/screenshots/player.jpg" alt="Player"> | <img src="docs/screenshots/player-menu.jpg" alt="Player settings menu"> |
+| **Starting up** | **Anime** |
+| <img src="docs/screenshots/loading.jpg" alt="Loading screen"> | <img src="docs/screenshots/anime.jpg" alt="Anime section"> |
 | **Season** | **Search** |
 | <img src="docs/screenshots/season.jpg" alt="Season episode list"> | <img src="docs/screenshots/search.jpg" alt="Search results"> |
 | **Settings** | **Create a profile** |
@@ -83,26 +92,48 @@ starts in seconds, seeks instantly, even in 4K, and plays the same way in every 
 
 ## Quick start
 
-You need [Docker](https://docs.docker.com/get-docker/) with the Compose plugin, a free
-[TMDB](https://www.themoviedb.org/signup) account and, for 1080p/4K, a
-[Real-Debrid](https://real-debrid.com/) subscription.
+You need three things:
+
+1. **Docker.** [Docker Desktop](https://www.docker.com/products/docker-desktop/) on Windows or macOS (on Linux, Docker Engine with the Compose plugin). Install it and start it once.
+2. **A TMDB API key**, free: sign up at [themoviedb.org](https://www.themoviedb.org/signup), then [Settings → API](https://www.themoviedb.org/settings/api).
+3. **A Real-Debrid account** for fast 1080p and 4K ([real-debrid.com](https://real-debrid.com/)). Optional: without it, free web sources are used.
+
+### Windows
+
+1. Download the project: the green **Code** button above → **Download ZIP**, then unzip it (or `git clone` it).
+2. Open the folder, right-click **run.ps1** and choose **Run with PowerShell**.
+   If Windows blocks it, open PowerShell in the folder and run:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\run.ps1
+   ```
+
+### macOS and Linux
 
 ```bash
 git clone https://github.com/nsfwhusnain-coder/absolute-cinema.git
 cd absolute-cinema
-docker compose up -d
+./run.sh
 ```
 
-Open **http://localhost:3000**, or `http://<server-ip>:3000` from another device.
+The script checks Docker, downloads the ready-made app (the first start takes a few
+minutes), waits until it is up and prints the addresses:
 
-The first build takes a few minutes because it installs a headless browser and ffmpeg.
+```
+  Absolute Cinema is running.
+  On this computer:        http://localhost:3000
+  On your phone or TV:     http://192.168.1.20:3000  (same Wi-Fi)
+```
+
+`./run.sh stop`, `./run.sh logs` and `./run.sh update` (or `.\run.ps1 stop` etc.) do what
+they say. Prefer plain Docker? `docker compose up -d` does the same, and
+`docker compose up -d --build` builds the app from this folder instead of downloading it.
 To use a different port, create a `.env` file containing `AC_PORT=8080`.
 
 ## First run
 
-1. **Create your profile.** The first visit asks for a name and a PIN; that profile is the admin.
-2. **Add your TMDB key** from [themoviedb.org → Settings → API](https://www.themoviedb.org/settings/api). Either the *API Key* or the *API Read Access Token* works.
-3. **Add your Real-Debrid token** from [real-debrid.com/apitoken](https://real-debrid.com/apitoken). Optional, but it is what gives you fast 1080p and 4K.
+1. **Create your profile.** Pick a name and a picture; this first profile is the admin. A PIN is optional (it is a good idea for the admin if other people use your network).
+2. **Paste your TMDB key** when the setup screen asks. Either the *API Key* or the *API Read Access Token* works.
+3. **Paste your Real-Debrid token** from [real-debrid.com/apitoken](https://real-debrid.com/apitoken). Optional, but it is what gives you fast 1080p and 4K.
 
 Both keys are checked before they are saved and can be changed later in
 **Settings → Server → Connections**. Everyone else just opens the site and taps
@@ -170,12 +201,14 @@ some free disk for the remux cache.
 ./scripts/update.sh
 ```
 
-This pulls the latest code, snapshots the database into `db-backups/`, tags the running
-image for rollback, rebuilds and waits for the health check. If something goes wrong, the
-script prints the rollback tag:
+For a normal install, `./run.sh update` (or `.\run.ps1 update`) downloads the newest
+release and restarts. `./scripts/update.sh` is for installs that follow the source: it
+pulls the latest code, snapshots the database into `db-backups/`, tags the running image
+for rollback, rebuilds and waits for the health check. If something goes wrong, it prints
+the rollback tag:
 
 ```bash
-docker tag absolute-cinema:rollback-<timestamp> absolute-cinema:latest && docker compose up -d
+docker tag absolute-cinema:rollback-<timestamp> ghcr.io/nsfwhusnain-coder/absolute-cinema:latest && docker compose up -d
 ```
 
 ## Development
@@ -219,6 +252,9 @@ mini-services/
   stream-scraper/       Bun service that resolves web sources (internal :3030)
   remuxer/              MKV → keyframe-exact HLS (internal :3040)
 prisma/schema.prisma    SQLite schema
+public/avatars/         profile pictures (CC0)
+run.sh, run.ps1         one-command start for macOS/Linux and Windows
+docker-entrypoint.sh    starts the scraper, remuxer and web app inside the container
 workers/hls-proxy/      optional Cloudflare Worker edge proxy
 scripts/                update, backup, disk and smoke-test tooling
 ```
@@ -242,6 +278,12 @@ the requests to TMDB, Real-Debrid and the stream sources needed to play what you
 
 **Can several people watch at once?** Yes. Each profile has its own list, progress and
 preferences, and each 4K stream gets its own remux session.
+
+## Credits
+
+- Profile pictures: [DiceBear](https://www.dicebear.com) styles *Lorelei* by Lisa Wischofsky, *Open Peeps* by Pablo Stanley and *Thumbs* by DiceBear, all CC0.
+- Anime skip times: [AniSkip](https://aniskip.com), a community database. Anime ID mapping: [ani.zip](https://ani.zip) and [Kitsu](https://kitsu.io).
+- Catalog data and images: [TMDB](https://www.themoviedb.org).
 
 ## Disclaimer
 

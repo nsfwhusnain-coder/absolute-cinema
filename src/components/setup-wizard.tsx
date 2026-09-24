@@ -62,7 +62,7 @@ export function SetupWizard() {
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-[#050508]/95 px-4 py-10 backdrop-blur-xl">
-      <div className="w-full max-w-lg rounded-3xl border border-white/10 bg-[#0c0c11] p-6 shadow-2xl sm:p-8">
+      <div className="glass-strong w-full max-w-lg rounded-3xl p-6 sm:p-8">
         <div className="mb-6 flex items-center gap-3">
           <BrandMark size="nav" />
           <div>
@@ -87,7 +87,7 @@ export function SetupWizard() {
                   <Check className="h-6 w-6" />
                 </div>
                 <p className="text-sm text-white/80">
-                  All set. You can change these any time under Settings → Connections.
+                  All set. You can change these any time under Settings → Server → Connections.
                 </p>
                 <Button className="w-full rounded-full" onClick={finish}>
                   Start watching

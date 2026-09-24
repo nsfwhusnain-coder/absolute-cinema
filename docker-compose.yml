@@ -1,13 +1,18 @@
 # Absolute Cinema — `docker compose up -d` and open http://localhost:3000
+# (or run ./run.sh on macOS/Linux, .\run.ps1 on Windows, which do the same and
+# print the address).
 #
-# Nothing here needs editing for a first run. The first account you create
-# becomes the admin; add your TMDB key and Real-Debrid token in Settings.
+# Nothing here needs editing for a first run. The first profile you create
+# becomes the admin; add your TMDB key and Real-Debrid token when asked.
 # Every value below can be overridden from a `.env` file (see .env.example).
+#
+# The ready-made image is downloaded; `docker compose up -d --build` builds
+# it from this folder instead.
 
 services:
   absolute-cinema:
     container_name: absolute-cinema
-    image: absolute-cinema:latest
+    image: ghcr.io/nsfwhusnain-coder/absolute-cinema:latest
     build:
       context: .
       dockerfile: Dockerfile

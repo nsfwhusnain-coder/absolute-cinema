@@ -35,8 +35,8 @@ export function EmptySearch({ query }: { query: string }) {
 
 export function NoProvider() {
   return (
-    <MessageCard icon={<KeyRound className="h-6 w-6" />} title="Streaming isn't set up yet" actions={[{ label: "Open settings", href: "/settings?tab=connections", primary: true }]}>
-      Add a Real-Debrid token in Settings → Connections to start playing titles.
+    <MessageCard icon={<KeyRound className="h-6 w-6" />} title="Playback is switched off" actions={[{ label: "Open settings", href: "/settings?tab=server", primary: true }]}>
+      An admin can switch it back on in Settings → Server → System → Advanced → Playback source.
     </MessageCard>
   );
 }
