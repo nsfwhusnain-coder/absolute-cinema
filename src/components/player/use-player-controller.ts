@@ -20,6 +20,7 @@ import { getPreferredProvider, getSavedPlaybackSpeed, setSavedPlaybackSpeed } fr
 import { MediaEngine } from "./engine";
 import { createRanker, resolvePlayable, type AudioChoice, type TitleContext } from "./playable";
 import { usePlayerState } from "./store";
+import { getTitleLanguage, rememberTitleLanguage, titleLanguageKey } from "@/lib/title-language";
 
 /** No first frame within this long means the source is not going to start. */
 const START_TIMEOUT_MS = 20_000;
@@ -194,7 +195,10 @@ export function usePlayerController(options: PlayerControllerOptions) {
       sustainedReported.current = false;
       const { title } = optionsRef.current;
       const override = audioOverride.current?.sourceId === source.id ? audioOverride.current.index : undefined;
-      const audio = override === undefined ? optionsRef.current.audio : { ...optionsRef.current.audio, index: override };
+      // A language picked earlier for this show beats the profile default.
+      const remembered = getTitleLanguage(titleLanguageKey(title.mediaType, title.tmdbId))?.audio;
+      const baseAudio = remembered ? { preference: "preferred" as const, language: remembered } : optionsRef.current.audio;
+      const audio = override === undefined ? baseAudio : { ...baseAudio, index: override };
       try {
         const resolved = await resolvePlayable(source, title, audio, startAt, video, abort.signal);
         if (abort.signal.aborted) return;
@@ -470,6 +474,9 @@ export function usePlayerController(options: PlayerControllerOptions) {
         const sourceId = orchestrator.current.activeId;
         if (!sourceId || store.getState().remuxAudio?.active === index) return;
         audioOverride.current = { sourceId, index };
+        const track = store.getState().remuxAudio?.tracks.find((t) => t.index === index);
+        const { title } = optionsRef.current;
+        if (track?.language) rememberTitleLanguage(titleLanguageKey(title.mediaType, title.tmdbId), { audio: track.language });
         executeRef.current({ type: "attach", sourceId, keepPosition: true, refresh: false });
       },
       retry() {

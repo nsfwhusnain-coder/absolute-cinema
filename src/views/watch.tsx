@@ -17,9 +17,12 @@ import { toast } from "sonner";
 import { useSession } from "next-auth/react";
 import { tvQueryIndex } from "@/lib/playback/tv-index";
 import { getAutoplayNext } from "@/lib/player-preferences";
+import type { SkipSegment } from "@/lib/playback/skip-times";
 
 /** Cancelable end-of-episode autoplay countdown (task 9). */
 const NEXT_EPISODE_COUNTDOWN_S = 10;
+/** After this many episodes start on their own with no interaction, ask "Still watching?". */
+const STILL_WATCHING_AFTER = 3;
 
 interface Props {
   mediaType: "movie" | "tv";
@@ -102,6 +105,24 @@ function resolveNextEpisode(
 
 /** Full-viewport watch page: the player and nothing else. */
 export function WatchView({ mediaType, id, season, episode }: Props) {
+  // Episodes that started on their own since anyone last touched anything.
+  const autoAdvances = useRef(0);
+  useEffect(() => {
+    const reset = () => {
+      autoAdvances.current = 0;
+    };
+    window.addEventListener("pointerdown", reset);
+    window.addEventListener("keydown", reset);
+    return () => {
+      window.removeEventListener("pointerdown", reset);
+      window.removeEventListener("keydown", reset);
+    };
+  }, []);
+  const shouldAskStillWatching = useCallback(() => autoAdvances.current >= STILL_WATCHING_AFTER, []);
+  const countAutoAdvance = useCallback(() => {
+    autoAdvances.current += 1;
+  }, []);
+
   // The player puts the whole page into full screen, so changing episode keeps
   // it; leaving the watch page is what ends it.
   useEffect(
@@ -276,6 +297,15 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
 
   const showPlayerShell = mounted && !!session;
   const baseTitle = meta?.title || meta?.name || playback?.title || "Untitled";
+  const { data: skipData } = useQuery({
+    queryKey: ["skip-times", id, tvSeason, tvEpisode],
+    queryFn: async () => {
+      const res = await fetch(`/api/skip-times?tmdbId=${id}&season=${tvSeason}&episode=${tvEpisode}`);
+      return res.ok ? ((await res.json()) as { segments: SkipSegment[] }) : { segments: [] };
+    },
+    enabled: mounted && mediaType === "tv" && tvSeason != null && tvEpisode != null,
+    staleTime: 60 * 60 * 1000,
+  });
   const episodeMeta = seasonMeta?.episodes?.find((e) => e.episode_number === tvEpisode);
   const episodeName = episodeMeta?.name;
   const overview = (mediaType === "tv" ? episodeMeta?.overview || meta?.overview : meta?.overview) || undefined;
@@ -663,6 +693,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
             displayTitle={baseTitle}
             episodeLabel={episodeLabel}
             overview={overview}
+            skipSegments={skipData?.segments}
             backdrop={backdrop}
             logo={logo}
             initialTime={savedTime}
@@ -703,6 +734,8 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
               fallbackDurationS={tmdbRuntimeSeconds}
               currentSeason={tvSeason}
               onPlayNow={goToNextEpisode}
+              askStillWatching={shouldAskStillWatching}
+              onAutoAdvance={countAutoAdvance}
             />
           )}
         </div>
@@ -732,17 +765,26 @@ function UpNextGate({
   currentSeason,
   fallbackDurationS,
   onPlayNow,
+  askStillWatching,
+  onAutoAdvance,
 }: {
   ended: boolean;
   target: { season: number; episode: number };
   currentSeason?: number;
   fallbackDurationS: number;
   onPlayNow: () => void;
+  askStillWatching: () => boolean;
+  onAutoAdvance: () => void;
 }) {
   const currentTime = usePlayerState((s) => s.currentTime);
   const duration = usePlayerState((s) => s.duration);
 
   const visible = ended || shouldShowUpNext(currentTime, duration, false, fallbackDurationS);
+  // The player hides its own "Next Episode" skip button while this card shows.
+  useEffect(() => {
+    usePlayerState.getState().set({ upNextVisible: visible });
+    return () => usePlayerState.getState().set({ upNextVisible: false });
+  }, [visible]);
   if (!visible) return null;
 
   return (
@@ -750,6 +792,8 @@ function UpNextGate({
       target={target}
       currentSeason={currentSeason}
       onPlayNow={onPlayNow}
+      askStillWatching={askStillWatching}
+      onAutoAdvance={onAutoAdvance}
     />
   );
 }
@@ -766,26 +810,47 @@ function NextEpisodeCountdown({
   target,
   currentSeason,
   onPlayNow,
+  askStillWatching,
+  onAutoAdvance,
 }: {
   target: { season: number; episode: number };
   currentSeason?: number;
   onPlayNow: () => void;
+  askStillWatching: () => boolean;
+  onAutoAdvance: () => void;
 }) {
   const [remaining, setRemaining] = useState(NEXT_EPISODE_COUNTDOWN_S);
-  const [cancelled, setCancelled] = useState(() => !getAutoplayNext());
+  // Several episodes in a row with nobody touching anything: ask before going on.
+  const [stillWatching] = useState(askStillWatching);
+  const [cancelled, setCancelled] = useState(() => !getAutoplayNext() || stillWatching);
   const firedRef = useRef(false);
 
   useEffect(() => {
     if (cancelled || remaining <= 0) {
       if (!cancelled && remaining <= 0 && !firedRef.current) {
         firedRef.current = true;
+        onAutoAdvance();
         onPlayNow();
       }
       return;
     }
     const timer = setTimeout(() => setRemaining((r) => r - 1), 1000);
     return () => clearTimeout(timer);
-  }, [remaining, cancelled, onPlayNow]);
+  }, [remaining, cancelled, onPlayNow, onAutoAdvance]);
+
+  if (stillWatching) {
+    return (
+      <div className="glass-clear absolute bottom-32 right-4 z-40 w-80 rounded-3xl p-5 text-white sm:right-8">
+        <div className="font-display text-lg font-semibold">Still watching?</div>
+        <p className="mt-1 text-sm text-white/65">Next up: S{target.season} · E{target.episode}</p>
+        <div className="mt-4 flex gap-2">
+          <Button type="button" onClick={onPlayNow} className="flex-1 rounded-full">
+            Keep watching
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   const playLabel =
     target.season !== currentSeason
@@ -793,7 +858,7 @@ function NextEpisodeCountdown({
       : `Play Episode ${target.episode}`;
 
   return (
-    <div className="glass-strong absolute bottom-32 right-4 z-40 w-72 rounded-3xl p-4 text-white sm:right-8">
+    <div className="glass-clear absolute bottom-32 right-4 z-40 w-72 rounded-3xl p-4 text-white sm:right-8">
       <div className="mb-2 text-center text-sm font-medium text-white">
         {cancelled ? "Up next" : `Next episode in ${remaining}…`}
       </div>

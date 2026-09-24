@@ -9,6 +9,8 @@ export interface ProfilePreferences extends ProfilePlaybackPreferences {
   material: Material;
   accent: AccentId;
   autoplayNext: boolean;
+  captionSize: "small" | "medium" | "large";
+  captionBackground: "box" | "shadow";
 }
 
 export const PREFERENCES_QUERY_KEY = ["profile-preferences"] as const;

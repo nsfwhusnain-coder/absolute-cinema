@@ -25,6 +25,8 @@ export interface HubRow {
   id: string;
   title: string;
   tmdbPath: string;
+  /** When a hub mixes kinds (the Anime page has films too). */
+  mediaType?: MediaKind;
 }
 
 function listPath(prefix: string, page: number): string {
@@ -181,6 +183,17 @@ export function resolveCategory(slug: string): BrowseCategory | null {
   const staticCat = STATIC_CATEGORIES[slug];
   if (staticCat) return staticCat;
 
+  const anime = ANIME_ROWS.find((row) => `anime-${row.kind}` === slug);
+  if (anime) {
+    return {
+      slug,
+      title: anime.title,
+      mediaType: anime.mediaType,
+      paged: true,
+      tmdbPathForPage: (page) => animePath(anime.kind, page),
+    };
+  }
+
   const movieGenre = GENRE_MOVIE_RE.exec(slug);
   if (movieGenre) {
     const id = Number(movieGenre[1]);
@@ -223,6 +236,27 @@ export function movieHubRows(): HubRow[] {
     tmdbPath: `discover/movie/${g.id}`,
   }));
   return [...base, ...genres];
+}
+
+const ANIME_ROWS: Array<{ kind: string; title: string; mediaType: MediaKind }> = [
+  { kind: "trending", title: "Trending Anime", mediaType: "tv" },
+  { kind: "season", title: "New This Season", mediaType: "tv" },
+  { kind: "top", title: "Top Rated Anime", mediaType: "tv" },
+  { kind: "movies", title: "Anime Movies", mediaType: "movie" },
+  { kind: "genre-10759", title: "Action & Adventure", mediaType: "tv" },
+  { kind: "genre-10765", title: "Fantasy & Sci-Fi", mediaType: "tv" },
+  { kind: "genre-35", title: "Comedy", mediaType: "tv" },
+  { kind: "genre-18", title: "Drama", mediaType: "tv" },
+  { kind: "genre-9648", title: "Mystery", mediaType: "tv" },
+];
+
+function animePath(kind: string, page: number): string {
+  return page <= 1 ? `discover/anime/${kind}` : `discover/anime/${kind}?page=${page}`;
+}
+
+/** Anime hub rows. */
+export function animeHubRows(): HubRow[] {
+  return ANIME_ROWS.map((row) => ({ id: `anime-${row.kind}`, title: row.title, tmdbPath: animePath(row.kind, 1), mediaType: row.mediaType }));
 }
 
 /** Shows hub rows (Appendix C, full parity including extended TV lists). */

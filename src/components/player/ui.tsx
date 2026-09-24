@@ -432,7 +432,17 @@ export function FailureCard({
   );
 }
 
-export function Captions({ text, raised }: { text: string; raised: boolean }) {
+export function Captions({
+  text,
+  raised,
+  size = "medium",
+  background = "box",
+}: {
+  text: string;
+  raised: boolean;
+  size?: "small" | "medium" | "large";
+  background?: "box" | "shadow";
+}) {
   if (!text) return null;
   return (
     <div
@@ -441,7 +451,11 @@ export function Captions({ text, raised }: { text: string; raised: boolean }) {
         raised ? "bottom-36" : "bottom-12"
       )}
     >
-      <p className="player-caption max-w-[80%] whitespace-pre-line rounded-lg bg-black/70 px-3 py-1 text-center font-medium leading-snug text-white">
+      <p
+        data-size={size}
+        data-background={background}
+        className="player-caption max-w-[80%] whitespace-pre-line rounded-lg bg-black/70 px-3 py-1 text-center font-medium leading-snug text-white"
+      >
         {text}
       </p>
     </div>

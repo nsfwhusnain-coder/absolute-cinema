@@ -27,7 +27,7 @@ const LIST_PAGES = 3;
 export interface BrowseHubProps {
   mediaType: MediaKind;
   title: string;
-  heroFrom: "trending" | "popular" | "acclaimed";
+  heroFrom: "trending" | "popular" | "acclaimed" | "anime";
   rows: HubRow[];
 }
 
@@ -47,7 +47,9 @@ export function BrowseHub({ mediaType, title, heroFrom, rows }: BrowseHubProps) 
   const hideAdult = useHideAdult();
 
   const heroPath =
-    heroFrom === "acclaimed"
+    heroFrom === "anime"
+      ? "discover/anime/acclaimed"
+      : heroFrom === "acclaimed"
       ? `discover/${mediaType}/acclaimed`
       : heroFrom === "trending"
         ? `trending/${mediaType}/week`
@@ -64,7 +66,7 @@ export function BrowseHub({ mediaType, title, heroFrom, rows }: BrowseHubProps) 
       const settled = await Promise.all(
         rows.map(async (row) => ({
           row,
-          items: await fetchHubRowItems(row, mediaType),
+          items: await fetchHubRowItems(row, row.mediaType ?? mediaType),
         }))
       );
       return settled;
@@ -77,7 +79,8 @@ export function BrowseHub({ mediaType, title, heroFrom, rows }: BrowseHubProps) 
     return rowsQuery.data.map(({ row, items }) => ({
       id: row.id,
       title: row.title,
-      items: withoutAdultTitles(takeUnique(items, mediaType, seen), hideAdult),
+      mediaType: row.mediaType ?? mediaType,
+      items: withoutAdultTitles(takeUnique(items, row.mediaType ?? mediaType, seen), hideAdult),
     }));
   }, [rowsQuery.data, mediaType, hideAdult]);
 
@@ -143,8 +146,8 @@ export function BrowseHub({ mediaType, title, heroFrom, rows }: BrowseHubProps) 
                       {row.items.map((m) => (
                         <MovieCard
                           key={m.id}
-                          movie={{ ...m, media_type: mediaType }}
-                          forceMediaType={mediaType}
+                          movie={{ ...m, media_type: row.mediaType }}
+                          forceMediaType={row.mediaType}
                         />
                       ))}
                     </MovieRow>
@@ -154,8 +157,8 @@ export function BrowseHub({ mediaType, title, heroFrom, rows }: BrowseHubProps) 
                         {row.items.map((m) => (
                           <MovieCard
                             key={m.id}
-                            movie={{ ...m, media_type: mediaType }}
-                            forceMediaType={mediaType}
+                            movie={{ ...m, media_type: row.mediaType }}
+                            forceMediaType={row.mediaType}
                           />
                         ))}
                       </MovieRow>

@@ -105,6 +105,31 @@ export function PlaybackSection() {
           onChange={(v) => save.mutate({ subtitlePreference: v })}
         />
       </Row>
+      <Row label="Subtitle size">
+        <Segmented
+          label="Subtitle size"
+          value={data?.captionSize ?? "medium"}
+          options={[
+            { value: "small", label: "Small" },
+            { value: "medium", label: "Medium" },
+            { value: "large", label: "Large" },
+          ]}
+          disabled={disabled}
+          onChange={(v) => save.mutate({ captionSize: v })}
+        />
+      </Row>
+      <Row label="Subtitle background" help="A dark box is easiest to read; a shadow keeps more of the picture.">
+        <Segmented
+          label="Subtitle background"
+          value={data?.captionBackground ?? "box"}
+          options={[
+            { value: "box", label: "Box" },
+            { value: "shadow", label: "Shadow" },
+          ]}
+          disabled={disabled}
+          onChange={(v) => save.mutate({ captionBackground: v })}
+        />
+      </Row>
       <Row inline label="Autoplay next episode" help="Starts the next episode after a short countdown.">
         <Toggle
           label="Autoplay next episode"

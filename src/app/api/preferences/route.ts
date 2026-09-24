@@ -12,6 +12,8 @@ import {
   getProfileExtras,
   getUserPlaybackPreferences,
   parseAccent,
+  parseCaptionBackground,
+  parseCaptionSize,
   parseMaterial,
   saveHideAdultPreference,
   saveProfileExtras,
@@ -50,6 +52,8 @@ export async function PATCH(req: NextRequest) {
     material?: unknown;
     accent?: unknown;
     autoplayNext?: unknown;
+    captionSize?: unknown;
+    captionBackground?: unknown;
   };
   try {
     body = (await req.json()) as typeof body;
@@ -89,13 +93,17 @@ export async function PATCH(req: NextRequest) {
   }
   const material = body.material === undefined ? undefined : parseMaterial(body.material);
   const accent = body.accent === undefined ? undefined : parseAccent(body.accent);
-  if (material === null || accent === null) {
-    return NextResponse.json({ error: "Unknown theme or accent." }, { status: 400 });
+  const captionSize = body.captionSize === undefined ? undefined : parseCaptionSize(body.captionSize);
+  const captionBackground = body.captionBackground === undefined ? undefined : parseCaptionBackground(body.captionBackground);
+  if (material === null || accent === null || captionSize === null || captionBackground === null) {
+    return NextResponse.json({ error: "One of the preferences is invalid." }, { status: 400 });
   }
   await saveProfileExtras(userId, {
     ...(material ? { material } : {}),
     ...(accent ? { accent } : {}),
     ...(typeof body.autoplayNext === "boolean" ? { autoplayNext: body.autoplayNext } : {}),
+    ...(captionSize ? { captionSize } : {}),
+    ...(captionBackground ? { captionBackground } : {}),
   });
   const [hideAdult, extras] = await Promise.all([
     typeof body.hideAdult === "boolean" ? body.hideAdult : getHideAdultPreference(userId),

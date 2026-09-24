@@ -7,7 +7,7 @@ import {
   Tv,
   Bookmark,
   Search,
-  Settings,
+  Sparkles,
 } from "lucide-react";
 import { useNavigate } from "@/hooks/use-navigate";
 import { cn } from "@/lib/utils";
@@ -17,9 +17,9 @@ const DOCK_ITEMS = [
   { label: "Home", icon: Home, path: "/" },
   { label: "Movies", icon: Film, path: "/movies" },
   { label: "Shows", icon: Tv, path: "/shows" },
+  { label: "Anime", icon: Sparkles, path: "/anime" },
   { label: "My List", icon: Bookmark, path: "/watchlist" },
   { label: "Search", icon: Search, path: "/search" },
-  { label: "Settings", icon: Settings, path: "/settings" },
 ] as const;
 
 interface MobileDockProps {
@@ -40,7 +40,7 @@ export function MobileDock({ hubsEnabled = true }: MobileDockProps) {
 
   const items = hubsEnabled
     ? DOCK_ITEMS
-    : DOCK_ITEMS.filter((item) => item.path !== "/movies" && item.path !== "/shows");
+    : DOCK_ITEMS.filter((item) => item.path !== "/movies" && item.path !== "/shows" && item.path !== "/anime");
 
   return (
     <nav

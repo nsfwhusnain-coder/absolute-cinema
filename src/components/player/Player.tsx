@@ -25,6 +25,10 @@ import { buildDownloadOptions, downloadDetailLine, downloadFilename, downloadSiz
 import { cn } from "@/lib/utils";
 import { usePlayerState, PLAYBACK_SPEEDS, VIDEO_FITS } from "./store";
 import { languageName } from "@/lib/language-name";
+import { titleLanguageKey } from "@/lib/title-language";
+import { useQuery } from "@tanstack/react-query";
+import { PREFERENCES_QUERY_KEY, fetchPreferences } from "@/lib/preferences-client";
+import type { SkipSegment } from "@/lib/playback/skip-times";
 import { usePlayerController } from "./use-player-controller";
 import { useSubtitles, type ExternalSubtitle } from "./use-subtitles";
 import { normalizeHeight, playableHere, qualityChoices, qualityLabel, type AudioChoice, type TitleContext } from "./playable";
@@ -53,6 +57,10 @@ const VOLUME_STEP = 0.1;
 const DOUBLE_TAP_MS = 300;
 /** Double taps in the outer 35% of the width seek; the middle only toggles controls. */
 const SEEK_ZONE = 0.35;
+/** The skip button disappears this close to the segment's end. */
+const SKIP_TAIL_S = 2;
+/** Skip times are trusted when the file is within this many seconds of the measured episode. */
+const SKIP_LENGTH_TOLERANCE_S = 20;
 /** Seconds buffered that the start-up progress bar counts as full. */
 const START_BUFFER_S = 4;
 
@@ -67,6 +75,8 @@ export interface PlayerProps {
   episodeLabel?: string;
   /** Synopsis shown while the stream starts. */
   overview?: string;
+  /** Intro/recap/credits times (anime), offered as a skip button. */
+  skipSegments?: SkipSegment[];
   backdrop?: string | null;
   logo?: string | null;
   initialTime: number;
@@ -122,7 +132,13 @@ export function Player(props: PlayerProps) {
     onEnded: props.onEnded,
     onRefreshSources: props.onRefreshSources,
   });
-  const { selectSubtitle } = useSubtitles(videoRef, props.externalSubtitles, props.subtitlePreference);
+  const { data: profilePrefs } = useQuery({ queryKey: PREFERENCES_QUERY_KEY, queryFn: fetchPreferences, staleTime: 5 * 60_000 });
+  const { selectSubtitle } = useSubtitles(
+    videoRef,
+    props.externalSubtitles,
+    props.subtitlePreference,
+    titleLanguageKey(props.title.mediaType, props.title.tmdbId)
+  );
 
   const activeSource = props.sources.find((s) => s.id === state.activeSourceId) ?? null;
   const isRemux = activeSource ? sourceDelivery(activeSource) === "remux" : false;
@@ -303,6 +319,19 @@ export function Player(props: PlayerProps) {
     : [];
   const loadingNote = state.startNote ?? (connecting && isRemux && !bufferingStart ? "Preparing the file for your browser" : null);
 
+  // Times only apply to the cut they were measured on: ignore them when this
+  // file's length differs by more than a few seconds.
+  const skip = started
+    ? props.skipSegments?.find(
+        (seg) =>
+          state.currentTime >= seg.start &&
+          state.currentTime < seg.end - SKIP_TAIL_S &&
+          (!seg.episodeLength || !state.duration || Math.abs(seg.episodeLength - state.duration) <= SKIP_LENGTH_TOLERANCE_S)
+      )
+    : undefined;
+  const skipToNext = skip?.kind === "credits" && Boolean(props.tv?.onNextEpisode);
+  const showSkip = Boolean(skip) && !(skipToNext && state.upNextVisible);
+
   const subtitleLabel = state.subtitles.find((o) => o.id === state.activeSubtitle)?.label ?? "Off";
   const remuxAudio = state.remuxAudio;
   const audioOptions =
@@ -359,7 +388,12 @@ export function Player(props: PlayerProps) {
       />
       <video ref={scoutRef} className="hidden" muted playsInline aria-hidden />
 
-      <Captions text={state.cueText} raised={controlsShown && started} />
+      <Captions
+        text={state.cueText}
+        raised={controlsShown && started}
+        size={profilePrefs?.captionSize}
+        background={profilePrefs?.captionBackground}
+      />
 
       {showLoading && (
         <LoadingOverlay
@@ -434,6 +468,23 @@ export function Player(props: PlayerProps) {
           <IconButton label="Forward 10 seconds" onClick={() => actions.seekBy(SEEK_STEP_S)} className="glass hidden sm:inline-flex" size="lg">
             <RotateCw className="h-5 w-5" />
           </IconButton>
+        </div>
+      )}
+
+      {skip && showSkip && (
+        <div className={cn("absolute right-4 z-30 transition-[bottom] duration-300 sm:right-8", controlsShown ? "bottom-32" : "bottom-10")}>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (skipToNext) props.tv!.onNextEpisode!();
+              else actions.seek(skip.end);
+            }}
+            className="glass-clear flex h-11 items-center gap-2 rounded-full px-5 text-sm font-semibold text-white transition hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+          >
+            {skipToNext ? "Next Episode" : skip.kind === "intro" ? "Skip Intro" : skip.kind === "recap" ? "Skip Recap" : "Skip Credits"}
+            <SkipForward className="h-4 w-4 fill-current" />
+          </button>
         </div>
       )}
 

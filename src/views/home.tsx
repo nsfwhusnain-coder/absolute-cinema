@@ -5,7 +5,10 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { HeroCarousel } from "@/components/hero-carousel";
-import { MovieRow } from "@/components/movie-row";
+import { TopTenRow } from "@/components/top-ten-row";
+import { MovieRow, RAIL_PAD_LEFT } from "@/components/movie-row";
+import { Shuffle } from "lucide-react";
+import { useNavigate } from "@/hooks/use-navigate";
 import { MovieCard } from "@/components/movie-card";
 import { CardOverflowMenu } from "@/components/card-overflow-menu";
 import { NETFLIX_PROVIDER_ID, tmdbImageUrl, withoutAdultTitles } from "@/lib/tmdb";
@@ -139,6 +142,7 @@ function isTotalCatalogFailure(catalog: HomeCatalog | undefined): boolean {
 
 export function HomeView() {
   const mounted = useMounted();
+  const navigate = useNavigate();
   const { data: session } = useSession();
   const hideAdult = useHideAdult();
 
@@ -219,6 +223,13 @@ export function HomeView() {
     .slice(0, 5)
     .map((m) => ({ ...m, overview: m.overview ?? "" }));
 
+  // "Play something": a random pick from what is trending today.
+  const playSomething = () => {
+    const pool = withoutAdultTitles(heroPool, hideAdult);
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    if (pick) navigate(`/watch/${pick.media_type}/${pick.id}`);
+  };
+
   const hasContinue = !continueQuery.isLoading && continueItems.length > 0;
   const catalogFailed = isTotalCatalogFailure(catalog.data);
 
@@ -294,6 +305,18 @@ export function HomeView() {
         className="relative z-10 flex flex-col"
         style={{ marginTop: HERO_TO_RAIL, gap: RAIL_STACK_GAP }}
       >
+        {featured.length > 0 && (
+          <div style={{ paddingLeft: RAIL_PAD_LEFT }}>
+            <button
+              type="button"
+              onClick={playSomething}
+              className="glass-clear inline-flex h-10 items-center gap-2 rounded-full px-4 text-sm font-semibold text-white transition hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
+            >
+              <Shuffle className="h-4 w-4" />
+              Play something
+            </button>
+          </div>
+        )}
         {continueQuery.isLoading ? (
           <MovieRowSkeleton count={4} />
         ) : hasContinue ? (
@@ -334,6 +357,8 @@ export function HomeView() {
               </MovieRow>
             ) : null}
 
+            <TopTenRow title="Top 10 Today" items={withoutAdultTitles(heroPool, hideAdult)} />
+
             {rows?.trendingMovies.length ? (
               <MovieRow title="Trending Movies" viewAllHref="/browse/trending-movies">
                 {rows.trendingMovies.slice(0, RAIL_CARD_LIMIT).map((m) => (
@@ -353,6 +378,14 @@ export function HomeView() {
                 ))}
               </MovieRow>
             ) : null}
+
+            <LazyRail minHeight={360}>
+              <CatalogRail
+                title="Popular Anime"
+                viewAllHref="/browse/anime-trending"
+                sources={[{ path: "discover/anime/trending", mediaType: "tv" }]}
+              />
+            </LazyRail>
 
             <LazyRail minHeight={360}>
               <CatalogRail

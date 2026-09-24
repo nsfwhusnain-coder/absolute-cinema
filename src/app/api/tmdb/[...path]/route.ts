@@ -111,6 +111,9 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ path: stri
       if (a === "genre" && (b === "movie" || b === "tv")) {
         return tmdb.genres(b);
       }
+      if (a === "discover" && b === "anime" && c) {
+        return tmdb.anime(c, Number(params.page) || 1);
+      }
       if (a === "discover" && (b === "movie" || b === "tv") && c === "acclaimed") {
         return tmdb.acclaimedRecent(b, Number(params.page) || 1);
       }
@@ -127,6 +130,9 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ path: stri
       }
       if (a === "discover" && (b === "movie" || b === "tv") && c) {
         return tmdb.discoverByGenre(b, Number(c), Number(params.page) || 1);
+      }
+      if (a === "collection" && b && !isNaN(Number(b))) {
+        return tmdb.collection(Number(b));
       }
       if (a === "person" && b && !isNaN(Number(b)) && c === "combined_credits") {
         return tmdb.personCredits(Number(b));

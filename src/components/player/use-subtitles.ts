@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, type RefObject } from "react";
 import { languageName } from "@/lib/language-name";
 import type { SubtitlePreference } from "@/lib/profile-preferences";
 import { usePlayerState, type StreamSubtitleTrack, type SubtitleOption } from "./store";
+import { getTitleLanguage, rememberTitleLanguage } from "@/lib/title-language";
 
 export interface ExternalSubtitle {
   id: string;
@@ -45,13 +46,18 @@ function streamOption(track: StreamSubtitleTrack): SubtitleOption {
   };
 }
 
-/** Full English subtitles first: from inside the file, then the stream, then downloaded. */
-function defaultPick(options: SubtitleOption[]): SubtitleOption | undefined {
-  const english = options.filter((o) => isEnglish(o.language) && !o.partial);
+function sameLanguage(a: string, b: string): boolean {
+  const base = (code: string) => code.toLowerCase().split("-")[0]!.replace(/^eng$/, "en").replace(/^jpn$/, "ja");
+  return base(a) === base(b);
+}
+
+/** Full subtitles in `language` first: from inside the file, then the stream, then downloaded. */
+function defaultPick(options: SubtitleOption[], language?: string): SubtitleOption | undefined {
+  const matching = options.filter((o) => (language ? sameLanguage(o.language, language) : isEnglish(o.language)) && !o.partial);
   return (
-    english.find((o) => o.origin === "embedded") ??
-    english.find((o) => o.origin === "stream") ??
-    english.find((o) => o.origin === "external")
+    matching.find((o) => o.origin === "embedded") ??
+    matching.find((o) => o.origin === "stream") ??
+    matching.find((o) => o.origin === "external")
   );
 }
 
@@ -73,7 +79,9 @@ function activeText(cues: readonly StreamCue[], time: number): string {
 export function useSubtitles(
   videoRef: RefObject<HTMLVideoElement | null>,
   external: readonly ExternalSubtitle[],
-  preference: SubtitlePreference
+  preference: SubtitlePreference,
+  /** Remembers the viewer's choice for this show (see title-language). */
+  rememberKey: string
 ) {
   const store = usePlayerState;
   const streamSubtitles = usePlayerState((s) => s.streamSubtitles);
@@ -132,7 +140,11 @@ export function useSubtitles(
     (id: string | null, byUser = true) => {
       const video = videoRef.current;
       if (!video) return;
-      if (byUser) userChose.current = true;
+      if (byUser) {
+        userChose.current = true;
+        const language = id ? store.getState().subtitles.find((o) => o.id === id)?.language ?? null : null;
+        rememberTitleLanguage(rememberKey, { subtitle: language });
+      }
       for (const { track } of embeddedTracks(video)) track.mode = "disabled";
       externalEl.current?.remove();
       externalEl.current = null;
@@ -171,7 +183,7 @@ export function useSubtitles(
         store.getState().set({ cueText: lines.join("\n") });
       };
     },
-    [videoRef, external, embeddedTracks, store, startStream, stopStream]
+    [videoRef, external, embeddedTracks, store, startStream, stopStream, rememberKey]
   );
 
   const refreshOptions = useCallback(() => {
@@ -185,11 +197,15 @@ export function useSubtitles(
     store.getState().set({ subtitles: options });
     const active = store.getState().activeSubtitle;
     if (active && !options.some((o) => o.id === active)) select(null, false);
-    if (!userChose.current && store.getState().activeSubtitle === null && preference !== "off") {
-      const pick = defaultPick(options);
+    if (!userChose.current && store.getState().activeSubtitle === null) {
+      // This show's remembered choice wins over the profile default.
+      const remembered = getTitleLanguage(rememberKey)?.subtitle;
+      if (remembered === null) return;
+      if (remembered === undefined && preference === "off") return;
+      const pick = defaultPick(options, remembered);
       if (pick) select(pick.id, false);
     }
-  }, [videoRef, external, preference, embeddedTracks, store, select]);
+  }, [videoRef, external, preference, embeddedTracks, store, select, rememberKey]);
 
   useEffect(() => {
     const video = videoRef.current;

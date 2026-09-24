@@ -106,6 +106,8 @@ export interface PlayerState {
   notice: PlayerNotice | null;
   /** Start-up note, e.g. that a server did not respond and the next is being tried. */
   startNote: string | null;
+  /** The watch page's up-next card is showing (the player hides its own "Next Episode" button). */
+  upNextVisible: boolean;
   set(partial: Partial<PlayerState>): void;
   showNotice(text: string, tone?: PlayerNotice["tone"]): void;
   reset(): void;
@@ -139,6 +141,7 @@ const initial = {
   qualityChoice: "auto" as const,
   notice: null,
   startNote: null,
+  upNextVisible: false,
 };
 
 let noticeSeq = 0;

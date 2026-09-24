@@ -1,5 +1,6 @@
 "use client";
 
+import { CollectionRow } from "@/components/collection-row";
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
@@ -584,6 +585,12 @@ function DetailContent({
         )}
 
         {reviews.length > 0 && <ReviewsSection reviews={reviews} />}
+
+        {mediaType === "movie" && data.belongs_to_collection?.id ? (
+          <motion.div className="mt-12" variants={fadeUp} transition={transitionContent}>
+            <CollectionRow collectionId={data.belongs_to_collection.id} />
+          </motion.div>
+        ) : null}
 
         {recs.length > 0 && (
           <motion.div className="mt-12" variants={fadeUp} transition={transitionContent}>

@@ -483,6 +483,33 @@ export const tmdb = {
     });
   },
 
+  /**
+   * Japanese animation. `kind`: trending, season (aired in the last few
+   * months), top, movies, acclaimed (recent and loved: the Anime page hero),
+   * or genre-<TMDB TV genre id>.
+   */
+  anime: (kind: string, page = 1) => {
+    const base = { with_genres: ANIME_GENRE_ID, with_original_language: "ja", include_adult: false, page };
+    const since = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+    if (kind === "movies") {
+      return tmdbFetch<TmdbPaged<TmdbMovie>>("/discover/movie", { ...base, sort_by: "popularity.desc", "vote_count.gte": 100 });
+    }
+    const tv = (params: Record<string, string | number | boolean>) =>
+      tmdbFetch<TmdbPaged<TmdbTv>>("/discover/tv", { ...base, ...params });
+    if (kind === "season") return tv({ "air_date.gte": since(90), sort_by: "popularity.desc" });
+    if (kind === "top") return tv({ sort_by: "vote_average.desc", "vote_count.gte": 400 });
+    if (kind === "acclaimed") {
+      return tv({ "air_date.gte": since(365), "vote_average.gte": 8, "vote_count.gte": 80, sort_by: "popularity.desc" });
+    }
+    const genre = /^genre-(\d+)$/.exec(kind);
+    if (genre) return tv({ with_genres: `${ANIME_GENRE_ID},${genre[1]}`, sort_by: "popularity.desc", "vote_count.gte": 50 });
+    return tv({ sort_by: "popularity.desc" });
+  },
+
+  /** A film series ("Dune Collection") and all its parts. */
+  collection: (id: number) =>
+    tmdbFetch<{ id: number; name: string; parts?: TmdbMovie[] }>(`/collection/${id}`),
+
   personDetails: (id: number) => tmdbFetch<TmdbPerson>(`/person/${id}`),
 
   personCredits: (id: number) =>
@@ -493,6 +520,8 @@ export const tmdb = {
 export const NETFLIX_PROVIDER_ID = 8;
 
 const NEW_RELEASE_WINDOW_DAYS = 120;
+/** TMDB's Animation genre; with original language Japanese it means anime. */
+const ANIME_GENRE_ID = 16;
 /** How far back the Movies/Shows "acclaimed now" picks may reach. */
 const ACCLAIMED_WINDOW_DAYS = 540;
 const NEW_RELEASE_MIN_VOTES = 20;

@@ -65,7 +65,7 @@ export function Navbar({ bottomNavEnabled = true, hubsEnabled = true }: NavbarPr
   if (sessionStatus !== "authenticated") return null;
 
   const navItems = PRIMARY_NAV.filter(
-    (item) => hubsEnabled || (item.path !== "/movies" && item.path !== "/shows")
+    (item) => hubsEnabled || (item.path !== "/movies" && item.path !== "/shows" && item.path !== "/anime")
   );
 
   return (

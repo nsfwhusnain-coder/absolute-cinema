@@ -6,6 +6,7 @@ export const PRIMARY_NAV = [
   { label: "Home", path: "/" },
   { label: "Movies", path: "/movies" },
   { label: "Shows", path: "/shows" },
+  { label: "Anime", path: "/anime" },
   { label: "My List", path: "/watchlist" },
 ] as const;
 
