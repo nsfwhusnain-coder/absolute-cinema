@@ -7,10 +7,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_DB="${ROOT}/db/absolute-cinema.db"
-if [[ ! -f "${DEFAULT_DB}" ]]; then
-  # Use whichever SQLite file DATABASE_URL points at (first .db in db/).
-  first="$(ls -1 "${ROOT}"/db/*.db 2>/dev/null | head -1 || true)"
-  [[ -n "${first}" ]] && DEFAULT_DB="${first}"
+# Prefer the file DATABASE_URL in .env points at (file:/app/db/<name>).
+if [[ -f "${ROOT}/.env" ]]; then
+  configured="$(sed -n 's#^DATABASE_URL=file:.*/db/##p' "${ROOT}/.env" | tail -1)"
+  [[ -n "${configured}" ]] && DEFAULT_DB="${ROOT}/db/${configured}"
+fi
+if [[ ! -s "${DEFAULT_DB}" ]]; then
+  # Otherwise the largest SQLite file in db/ (skips empty leftovers).
+  largest="$(ls -1S "${ROOT}"/db/*.db 2>/dev/null | head -1 || true)"
+  [[ -n "${largest}" ]] && DEFAULT_DB="${largest}"
 fi
 DB_PATH="${DB_PATH:-${DEFAULT_DB}}"
 BACKUP_ROOT="${BACKUP_ROOT:-${ROOT}/db-backups}"
