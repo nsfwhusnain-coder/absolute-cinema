@@ -3149,6 +3149,31 @@ function scheduleBackgroundEnrich(
 }
 
 const inflightScrapes = new Map<string, Promise<ScrapeResult>>();
+/**
+ * First playable result of an in-flight scrape, published before enrichment
+ * and latency probing (which can add ~10s). A fast request that coalesces onto
+ * a running full scrape answers from this instead of waiting for all of it.
+ */
+const inflightPrimaryResults = new Map<string, ScrapeResult>();
+const PRIMARY_POLL_MS = 100;
+
+async function awaitPrimaryOrDone(titleId: string, pending: Promise<ScrapeResult>): Promise<ScrapeResult> {
+  let done: ScrapeResult | null = null;
+  pending.then(
+    (result) => {
+      done = result;
+    },
+    () => {
+      done = { streamUrl: null, sources: [] };
+    }
+  );
+  while (!done) {
+    const primary = inflightPrimaryResults.get(titleId);
+    if (primary?.sources.length) return primary;
+    await new Promise((resolve) => setTimeout(resolve, PRIMARY_POLL_MS));
+  }
+  return done;
+}
 
 async function refreshRememberedProviders(
   key: string,
@@ -3284,10 +3309,13 @@ async function scrapeStream(
   if (!options.noCache) {
     const pending = inflightScrapes.get(titleId);
     if (pending) {
-      const shared = await pending;
+      const shared = options.fast ? await awaitPrimaryOrDone(titleId, pending) : await pending;
       if (shared.sources.length) {
         logAt("info", `[cache] coalesced ${key} onto in-flight ${titleId}`);
-        return { ...shared, partial: undefined };
+        // A primary result stays partial so the client keeps polling for the
+        // enriched roster; a finished scrape is final.
+        const fromPrimary = shared === inflightPrimaryResults.get(titleId);
+        return { ...shared, partial: fromPrimary ? true : undefined };
       }
     }
   }
@@ -3308,6 +3336,7 @@ async function scrapeStream(
   } finally {
     if (inflightScrapes.get(titleId) === unresolved) {
       inflightScrapes.delete(titleId);
+      inflightPrimaryResults.delete(titleId);
     }
   }
 }
@@ -3496,6 +3525,8 @@ async function executeUnresolvedScrape(
       "info",
       `[scrape] primary hit (${merged.sources.length}) — enriching toward ${MIN_SOURCES_TARGET}+ for ${key}`
     );
+    const primaryTitleId = titleMemoryIdFromCacheKey(key);
+    if (primaryTitleId) inflightPrimaryResults.set(primaryTitleId, { ...merged, partial: true });
     // All API providers already participated in the progressive race. Do not
     // re-await a slow arm after a healthy peer won.
     collected = await enrichMissingSources(
