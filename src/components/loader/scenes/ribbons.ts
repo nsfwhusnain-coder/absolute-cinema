@@ -49,7 +49,9 @@ void main() {
   vec3 col = mix(uMain, uAccent, smoothstep(0.15, 0.95, fract(vUv.x * 0.8 + uTime * 0.04 + uPhase * 0.3)));
   col = mix(col, uHighlight, core * 0.85);
   float ends = smoothstep(0.0, 0.14, vUv.x) * smoothstep(1.0, 0.86, vUv.x);
-  float depthFade = smoothstep(10.0, 2.2, vDepth);
+  // Far ribbons fade into the haze; near ones fade too, so a ribbon sweeping
+  // past the lens never fills the screen with light.
+  float depthFade = smoothstep(10.0, 3.2, vDepth) * smoothstep(1.4, 3.0, vDepth);
   float a = (glow * 0.35 + core * 0.75) * shimmer * ends * depthFade * uIntensity;
   gl_FragColor = vec4(col * a, a);
 }
