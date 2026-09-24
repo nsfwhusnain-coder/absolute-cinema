@@ -2,7 +2,6 @@
 
 import { SessionProvider } from "next-auth/react";
 import type { Session } from "next-auth";
-import { ThemeProvider } from "next-themes";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MotionConfig } from "framer-motion";
 import { useState } from "react";
@@ -47,16 +46,14 @@ export function Providers({ children, session }: { children: React.ReactNode; se
 
   return (
     <SessionProvider session={session}>
-      <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
-        <QueryClientProvider client={client}>
-          {/* "user" — every motion component below respects prefers-reduced-motion
-              automatically, no per-component useReducedMotion() checks needed. */}
-          <MotionConfig reducedMotion="user">
-            <ErrorBoundary>{children}</ErrorBoundary>
-            <GlobalShortcuts />
-          </MotionConfig>
-        </QueryClientProvider>
-      </ThemeProvider>
+      <QueryClientProvider client={client}>
+        {/* "user" — every motion component below respects prefers-reduced-motion
+            automatically, no per-component useReducedMotion() checks needed. */}
+        <MotionConfig reducedMotion="user">
+          <ErrorBoundary>{children}</ErrorBoundary>
+          <GlobalShortcuts />
+        </MotionConfig>
+      </QueryClientProvider>
     </SessionProvider>
   );
 }

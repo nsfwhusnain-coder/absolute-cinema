@@ -2,27 +2,17 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Search, Settings } from "lucide-react";
+import { Home, LogOut, Search, Settings, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { PRIMARY_NAV, isNavPathActive } from "@/lib/nav";
 import { NavLettermark } from "@/components/brand-mark";
-import { useSession } from "next-auth/react";
-import { useEffect, useState } from "react";
+import { signOut, useSession } from "next-auth/react";
+import { useEffect, useRef, useState } from "react";
+import { ProfileAvatar } from "@/views/login";
 
 const FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-transparent";
 
-/**
- * clear glass pill — backdrop shows through;
- * ambient colors tint the material. Our nav items only (no bell).
- */
-const NAV_PILL_GLASS: React.CSSProperties = {
-  background: "rgba(255,255,255,0.1)",
-  WebkitBackdropFilter: "blur(22px) saturate(180%) brightness(1.08)",
-  backdropFilter: "blur(22px) saturate(180%) brightness(1.08)",
-  boxShadow:
-    "inset 0 1px 0 rgba(255,255,255,0.35), inset 0 -0.5px 0 rgba(255,255,255,0.08), 0 8px 28px rgba(0,0,0,0.28)",
-};
 
 const SCROLL_SCRIM_THRESHOLD_PX = 24;
 
@@ -65,7 +55,7 @@ export function Navbar({ bottomNavEnabled = true, hubsEnabled = true }: NavbarPr
   const sessionStatus = useSession()?.status;
   const scrolled = useScrolledPast(SCROLL_SCRIM_THRESHOLD_PX);
 
-  if (pathname.startsWith("/watch")) return null;
+  if (pathname.startsWith("/watch") || pathname === "/login") return null;
 
   // Every destination in this bar is behind auth, so rendering it to a
   // signed-out visitor offers six links that all redirect straight back to
@@ -105,25 +95,7 @@ export function Navbar({ bottomNavEnabled = true, hubsEnabled = true }: NavbarPr
         </Link>
 
         {/* Island B — clear glass pill */}
-        <div
-          className="pointer-events-auto relative flex h-12 shrink-0 items-center gap-0.5 rounded-full border border-white/20 p-1"
-          style={NAV_PILL_GLASS}
-        >
-          {/* soft specular rim */}
-          <span
-            aria-hidden
-            className="pointer-events-none absolute inset-0 rounded-full"
-            style={{
-              padding: 1,
-              background:
-                "linear-gradient(160deg, rgba(255,255,255,0.5) 0%, rgba(255,255,255,0.08) 45%, rgba(255,255,255,0.18) 100%)",
-              WebkitMask:
-                "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
-              WebkitMaskComposite: "xor",
-              mask: "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
-              maskComposite: "exclude",
-            }}
-          />
+        <div className="glass pointer-events-auto relative flex h-12 shrink-0 items-center gap-0.5 rounded-full p-1">
 
           <nav
             className="relative z-[1] hidden items-center gap-0.5 md:flex"
@@ -174,21 +146,61 @@ export function Navbar({ bottomNavEnabled = true, hubsEnabled = true }: NavbarPr
             <Search className="h-[18px] w-[18px]" strokeWidth={1.75} aria-hidden />
           </Link>
 
-          <Link
-            href="/settings"
-            className={cn(
-              "relative z-[1] inline-flex h-10 w-10 items-center justify-center rounded-full transition-colors duration-200",
-              FOCUS_RING,
-              isNavPathActive(pathname, "/settings")
-                ? "bg-white text-black shadow-sm"
-                : "text-white/85 hover:bg-white/10 hover:text-white"
-            )}
-            aria-label="Settings"
-          >
-            <Settings className="h-[18px] w-[18px]" strokeWidth={1.75} aria-hidden />
-          </Link>
+          <ProfileMenu />
         </div>
       </div>
     </header>
+  );
+}
+
+/** Avatar button with Switch profile, Settings and Sign out. */
+function ProfileMenu() {
+  const { data: session } = useSession();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent ? e.key === "Escape" : !ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, [open]);
+  const name = session?.user?.name ?? "";
+  const item =
+    "flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-sm text-white hover:bg-[var(--mat-fill-hover)] focus-visible:bg-[var(--mat-fill-hover)] focus-visible:outline-none";
+  return (
+    <div ref={ref} className="relative z-[1]">
+      <button
+        type="button"
+        aria-label="Profile menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className={cn("ml-0.5 inline-flex h-10 w-10 items-center justify-center rounded-full", FOCUS_RING)}
+      >
+        <ProfileAvatar name={name || "?"} color={session?.user?.avatarColor ?? "#e50914"} size="sm" />
+      </button>
+      {open && (
+        <div role="menu" className="glass-strong absolute right-0 top-12 w-56 rounded-3xl p-2">
+          <div className="flex items-center gap-3 px-3 pb-2 pt-1">
+            <ProfileAvatar name={name || "?"} color={session?.user?.avatarColor ?? "#e50914"} size="sm" />
+            <span className="min-w-0 truncate text-sm font-semibold text-white">{name}</span>
+          </div>
+          <Link href="/login" role="menuitem" className={item} onClick={() => setOpen(false)}>
+            <Users className="h-4 w-4" /> Switch profile
+          </Link>
+          <Link href="/settings" role="menuitem" className={item} onClick={() => setOpen(false)}>
+            <Settings className="h-4 w-4" /> Settings
+          </Link>
+          <button type="button" role="menuitem" className={item} onClick={() => void signOut({ callbackUrl: "/login" })}>
+            <LogOut className="h-4 w-4" /> Sign out
+          </button>
+        </div>
+      )}
+    </div>
   );
 }

@@ -24,7 +24,6 @@ import {
   GlassPill,
   GlassPillSegment,
   GlassPillTabs,
-  GLASS_PILL_STYLE,
 } from "@/components/glass-pill";
 
 const staggerContainer = {
@@ -127,10 +126,7 @@ export function WatchlistView() {
                   { value: "tv", label: "TV" },
                 ]}
               />
-              <div
-                className="relative h-12 rounded-full border border-white/20 px-1"
-                style={GLASS_PILL_STYLE}
-              >
+              <div className="glass relative h-12 rounded-full px-1">
                 <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
                   <SelectTrigger className="h-10 w-[160px] border-0 bg-transparent text-sm text-white/90 shadow-none focus:ring-0">
                     <SelectValue />

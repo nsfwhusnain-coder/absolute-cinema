@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { defaultAvatarColor, isAvatarColor, signupsOpen } from "@/lib/profiles";
 import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
@@ -11,44 +12,19 @@ import {
 import { checkRegistrationGate } from "@/lib/registration-gate";
 
 /**
- * POST /api/register
- * Body: { name, pin, inviteCode? }
+ * POST /api/register  { name, pin, avatarColor? }
  *
- * First user becomes admin automatically.
- * No email — just a display name and a numeric PIN (4-10 digits).
- * Rate-limited per username (+ soft IP) — same window as login.
- *
- * SECURITY: this app is internet-facing and gates the
- * owner's paid Real-Debrid/TorBox subscription behind "sign in required" —
- * open self-registration defeats that entirely. Registration is now closed
- * by default:
- *   - An already-authenticated admin may always create additional accounts
- *     here (mirrors the "admin user-management" path — there is no separate
- *     admin-create-user endpoint today), regardless of the invite code.
- *   - Otherwise, `process.env.REGISTRATION_INVITE_CODE` must be set AND the
- *     request body's `inviteCode` must match it, or the request is rejected.
- *   - If the env var is unset, registration is disabled entirely (even a
- *     correct-looking guess can't pass, since there's nothing to match).
+ * Creates a profile: a display name plus a 4-10 digit PIN, no email. The
+ * first profile becomes the admin. After that, anyone may create a profile
+ * while sign-ups are open (Settings → Server, on by default) and an admin
+ * always may. Rate-limited per name and IP, like sign-in.
  */
-/**
- * GET /api/register — what the sign-in screen should offer.
- * firstRun: no accounts exist, so the next sign-up becomes the admin.
- * inviteEnabled: self sign-up with an invite code is available.
- */
-export async function GET() {
-  const firstRun = (await db.user.count()) === 0;
-  return NextResponse.json(
-    { firstRun, inviteEnabled: Boolean(process.env.REGISTRATION_INVITE_CODE) },
-    { headers: { "Cache-Control": "no-store" } },
-  );
-}
-
 export async function POST(req: NextRequest) {
   try {
-    const { name, pin, inviteCode } = (await req.json()) as {
+    const { name, pin, avatarColor } = (await req.json()) as {
       name?: string;
       pin?: string;
-      inviteCode?: string;
+      avatarColor?: string;
     };
 
     const requester = await getAuthenticatedUser();
@@ -57,8 +33,7 @@ export async function POST(req: NextRequest) {
     const gate = checkRegistrationGate({
       isAdminCreating,
       isFirstUser: (await db.user.count()) === 0,
-      requiredCode: process.env.REGISTRATION_INVITE_CODE,
-      providedCode: inviteCode,
+      signupsOpen: await signupsOpen(),
     });
     if (!gate.allowed) {
       return NextResponse.json({ error: gate.error }, { status: 403 });
@@ -67,8 +42,8 @@ export async function POST(req: NextRequest) {
     if (!name || !pin) {
       return NextResponse.json({ error: "Missing name or PIN" }, { status: 400 });
     }
-    if (name.trim().length < 2) {
-      return NextResponse.json({ error: "Name must be at least 2 characters" }, { status: 400 });
+    if (name.trim().length < 2 || name.trim().length > 24) {
+      return NextResponse.json({ error: "Name must be 2 to 24 characters" }, { status: 400 });
     }
     if (!/^\d{4,10}$/.test(pin)) {
       return NextResponse.json({ error: "PIN must be 4-10 digits" }, { status: 400 });
@@ -106,6 +81,7 @@ export async function POST(req: NextRequest) {
         name: trimmedName,
         pinHash,
         isAdmin: userCount === 0, // first user is admin
+        avatarColor: isAvatarColor(avatarColor) ? avatarColor : defaultAvatarColor(userCount),
       },
     });
 

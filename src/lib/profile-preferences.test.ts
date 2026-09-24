@@ -26,11 +26,11 @@ describe("profile playback preferences", () => {
     expect(normalizeAudioLanguage("../secret")).toBeNull();
   });
 
-  test("defaults to original audio, English subtitles, and wait-for-4K startup", () => {
-    expect(DEFAULT_PROFILE_PLAYBACK_PREFERENCES.playbackQuality).toBe(2160);
+  test("defaults to automatic quality, original audio and English subtitles", () => {
+    expect(DEFAULT_PROFILE_PLAYBACK_PREFERENCES.playbackQuality).toBe("auto");
     expect(DEFAULT_PROFILE_PLAYBACK_PREFERENCES.audioPreference).toBe("original");
     expect(DEFAULT_PROFILE_PLAYBACK_PREFERENCES.subtitlePreference).toBe("english");
-    expect(DEFAULT_PROFILE_PLAYBACK_PREFERENCES.fourKStartup).toBe("maximum");
+    expect(DEFAULT_PROFILE_PLAYBACK_PREFERENCES.fourKStartup).toBe("fast");
   });
 
   test("rejects unknown policy values", () => {

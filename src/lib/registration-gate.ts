@@ -1,59 +1,28 @@
 /**
- * Pure decision logic for the registration invite-code gate.
- * Extracted out of `src/app/api/register/route.ts` so the actual access-
- * control decision is unit-testable without mocking Next's Request/DB/
- * NextAuth plumbing.
+ * Who may create a profile.
  *
- * Rules:
- *  - An already-authenticated admin may always create additional accounts
- *    (mirrors the admin user-management path — there is no separate
- *    admin-create-user endpoint today), regardless of the invite code.
- *  - Otherwise, `REGISTRATION_INVITE_CODE` must be set AND must match the
- *    request's `inviteCode` exactly, or the request is rejected.
- *  - If the env var is unset, registration is disabled entirely — no code
- *    (correct-looking or otherwise) can pass, since there's nothing to match.
- *  - Exception: a fresh install with zero accounts always lets the first
- *    person register (they become the admin), otherwise nobody could ever
- *    sign in to a new deployment.
+ *  - The first profile on a fresh install (it becomes the admin).
+ *  - Anyone, while sign-ups are open (the default for a household server).
+ *  - An admin, always (Settings → Profiles).
  */
 
 export interface RegistrationGateInput {
-  /** True when the request is already authenticated as an admin. */
   isAdminCreating: boolean;
-  /** True when the database has no accounts yet (first-run setup). */
-  isFirstUser?: boolean;
-  /** `process.env.REGISTRATION_INVITE_CODE` — undefined/empty means registration is closed. */
-  requiredCode: string | undefined;
-  /** `inviteCode` from the request body. */
-  providedCode: string | undefined;
+  isFirstUser: boolean;
+  signupsOpen: boolean;
 }
 
 export interface RegistrationGateResult {
   allowed: boolean;
-  /** Present only when `allowed` is true — why the request was let through. */
-  reason?: "admin" | "first_user" | "invite_ok";
-  /** Present only when `allowed` is false — the client-facing error message. */
+  reason?: "admin" | "first_user" | "open";
   error?: string;
 }
 
-export const REGISTRATION_CLOSED_MESSAGE = "Registration is closed";
+export const REGISTRATION_CLOSED_MESSAGE = "New profiles are turned off on this server. Ask the admin to add you.";
 
 export function checkRegistrationGate(input: RegistrationGateInput): RegistrationGateResult {
-  if (input.isAdminCreating) {
-    return { allowed: true, reason: "admin" };
-  }
-  if (input.isFirstUser) {
-    return { allowed: true, reason: "first_user" };
-  }
-
-  const requiredCode = input.requiredCode;
-  if (!requiredCode) {
-    return { allowed: false, error: REGISTRATION_CLOSED_MESSAGE };
-  }
-
-  if (typeof input.providedCode !== "string" || input.providedCode !== requiredCode) {
-    return { allowed: false, error: REGISTRATION_CLOSED_MESSAGE };
-  }
-
-  return { allowed: true, reason: "invite_ok" };
+  if (input.isAdminCreating) return { allowed: true, reason: "admin" };
+  if (input.isFirstUser) return { allowed: true, reason: "first_user" };
+  if (input.signupsOpen) return { allowed: true, reason: "open" };
+  return { allowed: false, error: REGISTRATION_CLOSED_MESSAGE };
 }

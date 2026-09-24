@@ -1,19 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { motion } from "framer-motion";
-import { useSession, signIn, signOut } from "next-auth/react";
-import { useNavigate } from "@/hooks/use-navigate";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { signIn } from "next-auth/react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { motion, AnimatePresence } from "framer-motion";
+import { ArrowLeft, Check, Delete, Loader2, Plus, UserRound } from "lucide-react";
 import { toast } from "sonner";
-import { Loader2, KeyRound, User } from "lucide-react";
+import { BrandLockup } from "@/components/brand-mark";
+import { useNavigate } from "@/hooks/use-navigate";
 import { transitionEnter } from "@/lib/motion";
-import { BrandMark } from "@/components/brand-mark";
+import { cn } from "@/lib/utils";
+import { AVATAR_COLORS } from "@/lib/avatar-colors";
 
 export const LAST_PROFILE_KEY = "absolute-cinema:last-profile";
+
+const PIN_MIN = 4;
+const PIN_MAX = 10;
 
 /** Same-origin relative path only. Rejects protocol-relative, login loops, and schemes. */
 export function safeCallbackPath(raw: string | null | undefined): string {
@@ -55,15 +57,17 @@ export function writeLastProfile(name: string): void {
   }
 }
 
-const LOGIN_WASH_HEX =
-  "radial-gradient(58% 48% at 22% 18%, rgba(154, 58, 50, 0.42), transparent 62%)," +
-  "radial-gradient(52% 44% at 82% 76%, rgba(74, 69, 96, 0.40), transparent 60%)," +
-  "radial-gradient(90% 70% at 50% 50%, transparent 30%, rgba(28, 28, 34, 0.85) 100%)";
+interface ProfileSummary {
+  name: string;
+  avatarColor: string;
+}
 
-const LOGIN_WASH_OKLCH =
-  "radial-gradient(58% 48% at 22% 18%, oklch(0.42 0.14 25 / 0.42), transparent 62%)," +
-  "radial-gradient(52% 44% at 82% 76%, oklch(0.38 0.07 280 / 0.40), transparent 60%)," +
-  "radial-gradient(90% 70% at 50% 50%, transparent 30%, oklch(0.13 0.01 280 / 0.85) 100%)";
+interface ProfilesResponse {
+  firstRun: boolean;
+  signupsOpen: boolean;
+  pickerEnabled: boolean;
+  profiles: ProfileSummary[];
+}
 
 async function rateLimitMessage(name: string): Promise<string | null> {
   try {
@@ -73,21 +77,14 @@ async function rateLimitMessage(name: string): Promise<string | null> {
       body: JSON.stringify({ name }),
     });
     const json = (await res.json()) as { allowed?: boolean; message?: string };
-    if (json.allowed === false) {
-      return json.message ?? "Too many failed attempts. Try again in a few minutes.";
-    }
+    if (json.allowed === false) return json.message ?? "Too many attempts. Try again in a few minutes.";
   } catch {
-    // fall through to generic invalid credentials
+    // fall through to the generic message
   }
   return null;
 }
 
-interface LoginViewProps {
-  callbackUrl?: string;
-  error?: string;
-}
-
-function profileInitials(name: string): string {
+function initials(name: string): string {
   return name
     .split(/\s+/)
     .map((part) => part[0])
@@ -97,400 +94,477 @@ function profileInitials(name: string): string {
     .toUpperCase();
 }
 
-export function LoginView({ callbackUrl, error }: LoginViewProps) {
+export function ProfileAvatar({ name, color, size = "lg" }: { name: string; color: string; size?: "sm" | "md" | "lg" }) {
+  const dims = size === "lg" ? "h-20 w-20 text-3xl sm:h-32 sm:w-32 sm:text-4xl" : size === "md" ? "h-16 w-16 text-2xl" : "h-8 w-8 text-sm";
+  return (
+    <span
+      aria-hidden
+      className={cn("flex items-center justify-center rounded-[28%] font-display font-bold text-white shadow-lg", dims)}
+      style={{ background: `linear-gradient(145deg, ${color}, color-mix(in srgb, ${color} 55%, #000))` }}
+    >
+      {initials(name)}
+    </span>
+  );
+}
+
+type Screen = { kind: "pick" } | { kind: "pin"; profile: ProfileSummary } | { kind: "create" } | { kind: "manual" };
+
+export function LoginView({ callbackUrl, error }: { callbackUrl?: string; error?: string }) {
   const navigate = useNavigate();
-  const { data: session } = useSession();
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [useOtherProfile, setUseOtherProfile] = useState(false);
-  const [lastProfile, setLastProfile] = useState("");
-  const [loading, setLoading] = useState(false);
+  const qc = useQueryClient();
   const nextPath = safeCallbackPath(callbackUrl);
-  const sessionExpired = error === "SessionExpired";
+  const [screen, setScreen] = useState<Screen>({ kind: "pick" });
 
-  const [signinName, setSigninName] = useState("");
-  const [signinPin, setSigninPin] = useState("");
+  const { data, isLoading } = useQuery({
+    queryKey: ["profiles"],
+    queryFn: async (): Promise<ProfilesResponse> => {
+      const res = await fetch("/api/profiles", { cache: "no-store" });
+      return res.json();
+    },
+  });
 
-  const [signupName, setSignupName] = useState("");
-  const [signupPin, setSignupPin] = useState("");
-  const [signupPinConfirm, setSignupPinConfirm] = useState("");
-  const [signupInviteCode, setSignupInviteCode] = useState("");
-
-  const [registration, setRegistration] = useState<{ firstRun: boolean; inviteEnabled: boolean } | null>(null);
   useEffect(() => {
-    let cancelled = false;
-    fetch("/api/register")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((info: { firstRun: boolean; inviteEnabled: boolean } | null) => {
-        if (cancelled || !info) return;
-        setRegistration(info);
-        if (info.firstRun) setMode("signup");
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
+    if (error === "SessionExpired") toast.message("Your session expired. Pick your profile to continue.");
+  }, [error]);
+
+  useEffect(() => {
+    if (!data) return;
+    if (data.firstRun) setScreen({ kind: "create" });
+    else if (!data.pickerEnabled) setScreen({ kind: "manual" });
+  }, [data]);
+
+  const finish = useCallback(
+    (name: string) => {
+      writeLastProfile(name);
+      qc.clear();
+      // A full navigation so every server component re-renders for the new profile.
+      window.location.assign(nextPath);
+    },
+    [nextPath, qc]
+  );
+
+  return (
+    <div className="relative flex min-h-screen flex-col overflow-hidden bg-[#050508] text-white">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background:
+            "radial-gradient(55% 45% at 20% 15%, rgba(154,58,50,0.35), transparent 62%), radial-gradient(50% 42% at 85% 80%, rgba(74,69,96,0.38), transparent 60%)",
+        }}
+      />
+      <header className="relative z-10 px-6 pt-6 sm:px-10">
+        <BrandLockup />
+      </header>
+      <main className="relative z-10 flex flex-1 items-center justify-center px-4 py-10">
+        {isLoading || !data ? (
+          <Loader2 className="h-8 w-8 animate-spin text-white/60" />
+        ) : (
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={screen.kind + (screen.kind === "pin" ? screen.profile.name : "")}
+              initial={{ opacity: 0, y: 14 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={transitionEnter}
+              className="w-full"
+            >
+              {screen.kind === "pick" && (
+                <PickScreen
+                  data={data}
+                  onPick={(profile) => setScreen({ kind: "pin", profile })}
+                  onAdd={() => setScreen({ kind: "create" })}
+                  onManual={() => setScreen({ kind: "manual" })}
+                />
+              )}
+              {screen.kind === "pin" && (
+                <PinScreen profile={screen.profile} onBack={() => setScreen({ kind: "pick" })} onDone={finish} />
+              )}
+              {screen.kind === "create" && (
+                <CreateScreen
+                  firstRun={data.firstRun}
+                  existing={data.profiles.length}
+                  onBack={data.firstRun ? undefined : () => setScreen({ kind: "pick" })}
+                  onDone={finish}
+                />
+              )}
+              {screen.kind === "manual" && (
+                <ManualScreen
+                  canCreate={data.signupsOpen}
+                  onCreate={() => setScreen({ kind: "create" })}
+                  onBack={data.pickerEnabled ? () => setScreen({ kind: "pick" }) : undefined}
+                  onDone={finish}
+                />
+              )}
+            </motion.div>
+          </AnimatePresence>
+        )}
+      </main>
+      <footer className="relative z-10 pb-6 text-center text-xs text-white/40">
+        <button type="button" className="hover:text-white/70" onClick={() => navigate("/dmca")}>
+          DMCA
+        </button>
+      </footer>
+    </div>
+  );
+}
+
+function PickScreen({
+  data,
+  onPick,
+  onAdd,
+  onManual,
+}: {
+  data: ProfilesResponse;
+  onPick: (profile: ProfileSummary) => void;
+  onAdd: () => void;
+  onManual: () => void;
+}) {
+  const last = readLastProfile();
+  return (
+    <div className="mx-auto flex max-w-4xl flex-col items-center">
+      <h1 className="font-display text-3xl font-bold tracking-tight sm:text-5xl">Who&apos;s watching?</h1>
+      <ul className="mt-10 flex flex-wrap justify-center gap-x-3 gap-y-6 sm:gap-8">
+        {data.profiles.map((profile) => (
+          <li key={profile.name}>
+            <button
+              type="button"
+              onClick={() => onPick(profile)}
+              data-tv-first-focus={profile.name === last ? true : undefined}
+              className="group flex w-24 flex-col items-center gap-3 rounded-3xl p-1 focus-visible:outline-none sm:w-36"
+            >
+              <span className="rounded-[30%] ring-0 ring-white/80 ring-offset-4 ring-offset-[#050508] transition group-hover:scale-105 group-hover:ring-2 group-focus-visible:scale-105 group-focus-visible:ring-2">
+                <ProfileAvatar name={profile.name} color={profile.avatarColor} />
+              </span>
+              <span className="max-w-full truncate text-sm font-medium text-white/80 group-hover:text-white">{profile.name}</span>
+            </button>
+          </li>
+        ))}
+        {data.signupsOpen && (
+          <li>
+            <button
+              type="button"
+              onClick={onAdd}
+              className="group flex w-24 flex-col items-center gap-3 rounded-3xl p-1 focus-visible:outline-none sm:w-36"
+            >
+              <span className="flex h-20 w-20 items-center justify-center rounded-[28%] border-2 border-dashed border-white/25 text-white/60 transition group-hover:scale-105 group-hover:border-white/60 group-hover:text-white group-focus-visible:border-white sm:h-32 sm:w-32">
+                <Plus className="h-8 w-8 sm:h-10 sm:w-10" />
+              </span>
+              <span className="text-sm font-medium text-white/60 group-hover:text-white">Add profile</span>
+            </button>
+          </li>
+        )}
+      </ul>
+      <button type="button" onClick={onManual} className="mt-10 text-sm text-white/50 hover:text-white">
+        Sign in with a name instead
+      </button>
+    </div>
+  );
+}
+
+function PinPad({ value, onChange, onSubmit, busy }: { value: string; onChange: (v: string) => void; onSubmit: () => void; busy: boolean }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (busy) return;
+      if (/^[0-9]$/.test(e.key) && value.length < PIN_MAX) onChange(value + e.key);
+      else if (e.key === "Backspace") onChange(value.slice(0, -1));
+      else if (e.key === "Enter" && value.length >= PIN_MIN) onSubmit();
     };
-  }, []);
-  const firstRun = registration?.firstRun === true;
-  // Hide the sign-up path when it cannot succeed (no invite code configured).
-  const canSelfRegister = firstRun || registration?.inviteEnabled !== false;
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [value, onChange, onSubmit, busy]);
 
-  useEffect(() => {
-    const stored = readLastProfile();
-    if (!stored) return;
-    setLastProfile(stored);
-    setSigninName(stored);
-  }, []);
+  const key = (label: React.ReactNode, action: () => void, aria: string) => (
+    <button
+      type="button"
+      aria-label={aria}
+      disabled={busy}
+      onClick={action}
+      className="glass-icon h-16 w-16 text-xl font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 disabled:opacity-40 sm:h-[4.5rem] sm:w-[4.5rem]"
+    >
+      {label}
+    </button>
+  );
 
-  const showReturningTile = Boolean(lastProfile) && !useOtherProfile && mode === "signin";
-
-  if (session) {
-    return (
-      <div className="min-h-screen flex items-center justify-center px-4">
-        <Card className="max-w-md w-full rounded-2xl">
-          <CardHeader>
-            <CardTitle className="font-display">Already signed in</CardTitle>
-            <CardDescription>You're signed in as {session.user?.name}.</CardDescription>
-          </CardHeader>
-          <CardContent className="flex gap-2">
-            <Button onClick={() => navigate(nextPath)} className="flex-1 rounded-full">
-              {nextPath === "/" ? "Go home" : "Continue"}
-            </Button>
-            <Button onClick={() => signOut({ callbackUrl: "/login" })} variant="outline" className="rounded-full">
-              Sign out
-            </Button>
-          </CardContent>
-        </Card>
+  return (
+    <div className="flex flex-col items-center gap-6">
+      <div aria-live="polite" aria-label={`${value.length} digits entered`} className="flex h-4 items-center gap-3">
+        {Array.from({ length: Math.max(PIN_MIN, value.length) }).map((_, i) => (
+          <span key={i} className={cn("h-3.5 w-3.5 rounded-full transition", i < value.length ? "bg-white" : "bg-white/20")} />
+        ))}
       </div>
-    );
-  }
+      <div className="grid grid-cols-3 gap-3">
+        {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((d) => key(d, () => value.length < PIN_MAX && onChange(value + d), d))}
+        {key(<Delete className="h-5 w-5" />, () => onChange(value.slice(0, -1)), "Delete")}
+        {key("0", () => value.length < PIN_MAX && onChange(value + "0"), "0")}
+        {key(busy ? <Loader2 className="h-5 w-5 animate-spin" /> : <Check className="h-6 w-6" />, () => value.length >= PIN_MIN && onSubmit(), "Sign in")}
+      </div>
+    </div>
+  );
+}
 
-  const finishSignedIn = (name: string) => {
-    writeLastProfile(name);
-    setLastProfile(name);
-    toast.success("Signed in");
-    navigate(nextPath);
-  };
+function BackButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className="inline-flex items-center gap-1.5 text-sm text-white/60 hover:text-white">
+      <ArrowLeft className="h-4 w-4" /> Back
+    </button>
+  );
+}
 
-  const handleSignIn = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
+function PinScreen({ profile, onBack, onDone }: { profile: ProfileSummary; onBack: () => void; onDone: (name: string) => void }) {
+  const [pin, setPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [shake, setShake] = useState(0);
+  const [message, setMessage] = useState<string | null>(null);
 
-    const lockedBefore = await rateLimitMessage(signinName);
-    if (lockedBefore) {
-      setLoading(false);
-      toast.error(lockedBefore);
+  const submit = useCallback(async () => {
+    if (busy || pin.length < PIN_MIN) return;
+    setBusy(true);
+    setMessage(null);
+    const locked = await rateLimitMessage(profile.name);
+    if (locked) {
+      setBusy(false);
+      setMessage(locked);
       return;
     }
-
-    const res = await signIn("credentials", {
-      name: signinName,
-      pin: signinPin,
-      redirect: false,
-    });
-    setLoading(false);
+    const res = await signIn("credentials", { name: profile.name, pin, redirect: false });
     if (res?.error) {
-      const lockedAfter = await rateLimitMessage(signinName);
-      toast.error(lockedAfter ?? "Invalid name or PIN");
-    } else {
-      finishSignedIn(signinName);
-    }
-  };
-
-  const handleSignUp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (signupPin !== signupPinConfirm) {
-      toast.error("PINs don't match");
+      setBusy(false);
+      setPin("");
+      setShake((n) => n + 1);
+      setMessage((await rateLimitMessage(profile.name)) ?? "That PIN isn't right. Try again.");
       return;
     }
-    setLoading(true);
-    try {
-      const res = await fetch("/api/register", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: signupName,
-          pin: signupPin,
-          inviteCode: signupInviteCode,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        toast.error(json.error || "Failed to sign up");
-        setLoading(false);
-        return;
-      }
-      const r2 = await signIn("credentials", {
-        name: signupName,
-        pin: signupPin,
-        redirect: false,
-      });
-      setLoading(false);
-      if (r2?.error) {
-        toast.error("Account created — please sign in.");
-        setMode("signin");
-        setUseOtherProfile(false);
-        setSigninName(signupName);
-        writeLastProfile(signupName);
-        setLastProfile(signupName);
-      } else {
-        writeLastProfile(signupName);
-        setLastProfile(signupName);
-        toast.success(json.user?.isAdmin ? "Admin account created" : "Account created");
-        navigate(nextPath);
-      }
-    } catch (err: unknown) {
-      setLoading(false);
-      toast.error(err instanceof Error ? err.message : "Something went wrong");
+    onDone(profile.name);
+  }, [busy, pin, profile.name, onDone]);
+
+  return (
+    <div className="mx-auto flex max-w-sm flex-col items-center text-center">
+      <div className="mb-6 self-start">
+        <BackButton onClick={onBack} />
+      </div>
+      <ProfileAvatar name={profile.name} color={profile.avatarColor} size="md" />
+      <h1 className="mt-4 font-display text-2xl font-bold">{profile.name}</h1>
+      <p className="mt-1 text-sm text-white/60">Enter your PIN</p>
+      <motion.div key={shake} animate={shake ? { x: [0, -10, 10, -6, 6, 0] } : undefined} transition={{ duration: 0.35 }} className="mt-8">
+        <PinPad value={pin} onChange={setPin} onSubmit={() => void submit()} busy={busy} />
+      </motion.div>
+      <p role="alert" className="mt-5 min-h-5 text-sm text-red-300">
+        {message}
+      </p>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="block text-left">
+      <span className="mb-1.5 block text-sm font-medium text-white/80">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+const inputClass =
+  "h-12 w-full rounded-2xl border border-white/15 bg-white/[0.06] px-4 text-base text-white placeholder:text-white/35 focus:border-white/50 focus:outline-none";
+
+function CreateScreen({
+  firstRun,
+  existing,
+  onBack,
+  onDone,
+}: {
+  firstRun: boolean;
+  existing: number;
+  onBack?: () => void;
+  onDone: (name: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [pin, setPin] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [color, setColor] = useState(AVATAR_COLORS[existing % AVATAR_COLORS.length]!);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (pin !== confirm) return setMessage("The PINs don't match.");
+    setBusy(true);
+    setMessage(null);
+    const res = await fetch("/api/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name.trim(), pin, avatarColor: color }),
+    });
+    const json = (await res.json().catch(() => ({}))) as { error?: string };
+    if (!res.ok) {
+      setBusy(false);
+      return setMessage(json.error ?? "Couldn't create the profile.");
     }
+    const signedIn = await signIn("credentials", { name: name.trim(), pin, redirect: false });
+    if (signedIn?.error) {
+      setBusy(false);
+      return setMessage("Profile created — sign in to continue.");
+    }
+    onDone(name.trim());
+  };
+
+  const valid = name.trim().length >= 2 && /^\d{4,10}$/.test(pin) && confirm.length >= PIN_MIN;
+
+  return (
+    <form onSubmit={submit} className="mx-auto w-full max-w-sm">
+      {onBack && (
+        <div className="mb-6">
+          <BackButton onClick={onBack} />
+        </div>
+      )}
+      <div className="flex flex-col items-center text-center">
+        <ProfileAvatar name={name || "?"} color={color} size="md" />
+        <h1 className="mt-4 font-display text-2xl font-bold">{firstRun ? "Create your profile" : "Add a profile"}</h1>
+        <p className="mt-1 text-sm text-white/60">
+          {firstRun ? "This first profile manages the server." : "Just a name and a PIN."}
+        </p>
+      </div>
+      <div className="glass mt-8 space-y-4 rounded-3xl p-5">
+        <Field label="Name">
+          <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} maxLength={24} autoFocus placeholder="e.g. Alex" autoComplete="nickname" />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="PIN">
+            <input
+              className={inputClass}
+              type="password"
+              inputMode="numeric"
+              autoComplete="new-password"
+              value={pin}
+              onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, PIN_MAX))}
+              placeholder="4-10 digits"
+            />
+          </Field>
+          <Field label="Confirm PIN">
+            <input
+              className={inputClass}
+              type="password"
+              inputMode="numeric"
+              autoComplete="new-password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value.replace(/\D/g, "").slice(0, PIN_MAX))}
+              placeholder="Again"
+            />
+          </Field>
+        </div>
+        <div>
+          <span className="mb-2 block text-sm font-medium text-white/80">Colour</span>
+          <div className="flex flex-wrap gap-2.5">
+            {AVATAR_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                aria-label={`Colour ${c}`}
+                aria-pressed={color === c}
+                onClick={() => setColor(c)}
+                className={cn("h-9 w-9 rounded-full ring-offset-2 ring-offset-[#101014] transition", color === c && "ring-2 ring-white")}
+                style={{ background: c }}
+              />
+            ))}
+          </div>
+        </div>
+        {message && (
+          <p role="alert" className="text-sm text-red-300">
+            {message}
+          </p>
+        )}
+        <button
+          type="submit"
+          disabled={!valid || busy}
+          className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-white font-semibold text-black transition hover:bg-white/90 disabled:opacity-40"
+        >
+          {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+          {firstRun ? "Create and continue" : "Create profile"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function ManualScreen({
+  canCreate,
+  onCreate,
+  onBack,
+  onDone,
+}: {
+  canCreate: boolean;
+  onCreate: () => void;
+  onBack?: () => void;
+  onDone: (name: string) => void;
+}) {
+  const [name, setName] = useState(readLastProfile());
+  const [pin, setPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setMessage(null);
+    const locked = await rateLimitMessage(name);
+    if (locked) {
+      setBusy(false);
+      return setMessage(locked);
+    }
+    const res = await signIn("credentials", { name: name.trim(), pin, redirect: false });
+    if (res?.error) {
+      setBusy(false);
+      return setMessage((await rateLimitMessage(name)) ?? "That name and PIN don't match.");
+    }
+    onDone(name.trim());
   };
 
   return (
-    <div className="relative min-h-screen flex items-center justify-center overflow-hidden px-4 py-12">
-      {/*
-        Hex first (own layer) so Hisense / Chrome 76 still paints a wash when
-        the oklch layer is dropped as an invalid declaration.
-      */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 -z-10"
-        style={{ background: LOGIN_WASH_HEX }}
-      />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 -z-10"
-        style={{ background: LOGIN_WASH_OKLCH }}
-      />
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={transitionEnter}
-        className="w-full max-w-md"
-      >
-      {sessionExpired ? (
-        <div
-          role="status"
-          className="mb-4 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/80"
-        >
-          Your session expired. Sign in again.
+    <form onSubmit={submit} className="mx-auto w-full max-w-sm">
+      {onBack && (
+        <div className="mb-6">
+          <BackButton onClick={onBack} />
         </div>
-      ) : null}
-      <Card className="w-full rounded-2xl border-white/10">
-        <CardHeader className="text-center">
-          <div className="mx-auto mb-3 flex justify-center">
-            <BrandMark size="lg" />
-          </div>
-          <CardTitle className="font-display text-2xl tracking-tight">Absolute Cinema</CardTitle>
-          <CardDescription>
-            {showReturningTile
-              ? "Enter your PIN to continue."
-              : mode === "signup"
-                ? firstRun
-                  ? "Create the admin account for this server."
-                  : "Create a household profile with an invite code."
-                : "Pick a profile and enter the PIN."}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {mode === "signup" ? (
-            <form onSubmit={handleSignUp} className="space-y-3">
-              {firstRun ? null : (
-              <div className="space-y-1.5">
-                <Label htmlFor="su-invite">Invite code</Label>
-                <div className="relative">
-                  <KeyRound className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    id="su-invite"
-                    type="text"
-                    required
-                    value={signupInviteCode}
-                    onChange={(e) => setSignupInviteCode(e.target.value)}
-                    placeholder="Ask the owner for an invite code"
-                    className="pl-9"
-                  />
-                </div>
-              </div>
-              )}
-              <div className="space-y-1.5">
-                <Label htmlFor="su-name">Name</Label>
-                <div className="relative">
-                  <User className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    id="su-name"
-                    type="text"
-                    required
-                    autoFocus
-                    minLength={2}
-                    value={signupName}
-                    onChange={(e) => setSignupName(e.target.value)}
-                    placeholder="e.g. Alex"
-                    className="pl-9"
-                  />
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="su-pin">PIN (4-10 digits)</Label>
-                <div className="relative">
-                  <KeyRound className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    id="su-pin"
-                    type="password"
-                    inputMode="numeric"
-                    pattern="\d{4,10}"
-                    required
-                    value={signupPin}
-                    onChange={(e) => setSignupPin(e.target.value.replace(/\D/g, ""))}
-                    placeholder="Pick a PIN"
-                    className="pl-9"
-                  />
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="su-pin2">Confirm PIN</Label>
-                <div className="relative">
-                  <KeyRound className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    id="su-pin2"
-                    type="password"
-                    inputMode="numeric"
-                    pattern="\d{4,10}"
-                    required
-                    value={signupPinConfirm}
-                    onChange={(e) => setSignupPinConfirm(e.target.value.replace(/\D/g, ""))}
-                    placeholder="Re-enter PIN"
-                    className="pl-9"
-                  />
-                </div>
-              </div>
-              <Button type="submit" disabled={loading} className="w-full rounded-full">
-                {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}{" "}
-                {firstRun ? "Create admin account" : "Create account"}
-              </Button>
-              {firstRun ? null : (
-                <button
-                  type="button"
-                  className="w-full py-2 text-sm text-muted-foreground hover:text-foreground"
-                  onClick={() => setMode("signin")}
-                >
-                  Back to sign in
-                </button>
-              )}
-            </form>
-          ) : showReturningTile ? (
-            <form onSubmit={handleSignIn} className="space-y-4">
-              <div className="flex flex-col items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-6">
-                <div className="flex h-20 w-20 items-center justify-center rounded-full bg-primary text-2xl font-semibold text-primary-foreground">
-                  {profileInitials(lastProfile)}
-                </div>
-                <div className="font-display text-2xl font-semibold tracking-tight">{lastProfile}</div>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="signin-pin">PIN</Label>
-                <div className="relative">
-                  <KeyRound className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    id="signin-pin"
-                    type="password"
-                    inputMode="numeric"
-                    pattern="\d{4,10}"
-                    required
-                    autoFocus
-                    data-tv-first-focus
-                    value={signinPin}
-                    onChange={(e) => setSigninPin(e.target.value.replace(/\D/g, ""))}
-                    placeholder="4-10 digits"
-                    className="pl-9"
-                  />
-                </div>
-              </div>
-              <Button type="submit" disabled={loading} className="w-full rounded-full">
-                {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />} Sign in
-              </Button>
-              <button
-                type="button"
-                className="w-full py-2 text-sm text-muted-foreground hover:text-foreground"
-                onClick={() => {
-                  setUseOtherProfile(true);
-                  setSigninName("");
-                  setSigninPin("");
-                }}
-              >
-                Use a different profile
-              </button>
-              {canSelfRegister ? (
-                <button
-                  type="button"
-                  className="w-full py-1 text-sm text-muted-foreground hover:text-foreground"
-                  onClick={() => setMode("signup")}
-                >
-                  Create a household account
-                </button>
-              ) : null}
-            </form>
-          ) : (
-            <form onSubmit={handleSignIn} className="space-y-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="signin-name">Name</Label>
-                <div className="relative">
-                  <User className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    id="signin-name"
-                    type="text"
-                    required
-                    autoFocus
-                    value={signinName}
-                    onChange={(e) => setSigninName(e.target.value)}
-                    placeholder="e.g. Alex"
-                    className="pl-9"
-                  />
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="signin-pin-full">PIN</Label>
-                <div className="relative">
-                  <KeyRound className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    id="signin-pin-full"
-                    type="password"
-                    inputMode="numeric"
-                    pattern="\d{4,10}"
-                    required
-                    value={signinPin}
-                    onChange={(e) => setSigninPin(e.target.value.replace(/\D/g, ""))}
-                    placeholder="4-10 digits"
-                    className="pl-9"
-                  />
-                </div>
-              </div>
-              <Button type="submit" disabled={loading} className="w-full rounded-full">
-                {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />} Sign in
-              </Button>
-              {lastProfile ? (
-                <button
-                  type="button"
-                  className="w-full py-2 text-sm text-muted-foreground hover:text-foreground"
-                  onClick={() => {
-                    setUseOtherProfile(false);
-                    setSigninName(lastProfile);
-                    setSigninPin("");
-                  }}
-                >
-                  Back to {lastProfile}
-                </button>
-              ) : null}
-              {canSelfRegister ? (
-                <button
-                  type="button"
-                  className="w-full py-1 text-sm text-muted-foreground hover:text-foreground"
-                  onClick={() => setMode("signup")}
-                >
-                  Create a household account
-                </button>
-              ) : null}
-            </form>
-          )}
-        </CardContent>
-      </Card>
-      </motion.div>
-    </div>
+      )}
+      <div className="flex flex-col items-center text-center">
+        <span className="glass flex h-16 w-16 items-center justify-center rounded-[28%]">
+          <UserRound className="h-7 w-7" />
+        </span>
+        <h1 className="mt-4 font-display text-2xl font-bold">Sign in</h1>
+      </div>
+      <div className="glass mt-8 space-y-4 rounded-3xl p-5">
+        <Field label="Name">
+          <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} autoFocus autoComplete="username" />
+        </Field>
+        <Field label="PIN">
+          <input
+            className={inputClass}
+            type="password"
+            inputMode="numeric"
+            autoComplete="current-password"
+            value={pin}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, PIN_MAX))}
+          />
+        </Field>
+        {message && (
+          <p role="alert" className="text-sm text-red-300">
+            {message}
+          </p>
+        )}
+        <button
+          type="submit"
+          disabled={busy || !name.trim() || pin.length < PIN_MIN}
+          className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-white font-semibold text-black transition hover:bg-white/90 disabled:opacity-40"
+        >
+          {busy && <Loader2 className="h-4 w-4 animate-spin" />} Sign in
+        </button>
+        {canCreate && (
+          <button type="button" onClick={onCreate} className="w-full text-sm text-white/60 hover:text-white">
+            Create a new profile
+          </button>
+        )}
+      </div>
+    </form>
   );
 }

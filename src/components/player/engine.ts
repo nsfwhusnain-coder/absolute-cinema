@@ -48,6 +48,8 @@ export interface EngineHandlers {
 }
 
 const MANIFEST_TIMEOUT_MS = 20_000;
+/** Opening rendition when the viewer has not chosen a quality. */
+export const DEFAULT_START_HEIGHT = 1080;
 const FRAG_TIMEOUT_MS = 30_000;
 
 export type EngineKind = "hlsjs" | "native_hls" | "native_file";
@@ -64,8 +66,12 @@ export class MediaEngine {
     private readonly handlers: EngineHandlers
   ) {}
 
-  /** Tears down whatever was playing and starts `playable` at `startAt` seconds. */
-  async load(playable: Playable, startAt: number): Promise<void> {
+  /**
+   * Tears down whatever was playing and starts `playable` at `startAt` seconds.
+   * `startHeight` is the rendition to open on (the highest at or below it);
+   * adaptive switching takes over from there.
+   */
+  async load(playable: Playable, startAt: number, startHeight = DEFAULT_START_HEIGHT): Promise<void> {
     this.teardown();
     const generation = ++this.generation;
     this.networkRecoveries = 0;
@@ -98,9 +104,9 @@ export class MediaEngine {
       workerPath: HLS_WORKER_PATH,
       lowLatencyMode: false,
       startPosition: startAt > 0 ? startAt : -1,
-      startLevel: -1,
       testBandwidth: false,
-      startFragPrefetch: true,
+      // Off so the opening rendition chosen below is the one fetched first.
+      startFragPrefetch: false,
       capLevelToPlayerSize: false,
       abrEwmaDefaultEstimate: profile.abrInitialEstimateBps,
       abrMaxWithRealBitrate: true,
@@ -124,6 +130,10 @@ export class MediaEngine {
 
     hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
       if (generation !== this.generation) return;
+      // Open on a sharp rendition instead of hls.js's cautious lowest-first
+      // guess; ABR still drops lower if the connection cannot sustain it.
+      const start = openingLevel(data.levels, startHeight);
+      if (start >= 0) hls.startLevel = start;
       this.handlers.onLevels(toLevels(data.levels));
     });
     hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => {
@@ -209,6 +219,20 @@ export class MediaEngine {
     };
     video.addEventListener("loadedmetadata", apply, { once: true });
   }
+}
+
+/** Index of the highest rendition at or below `height` (the lowest one if none are). */
+export function openingLevel(levels: readonly { height: number }[], height: number): number {
+  let best = -1;
+  levels.forEach((level, index) => {
+    if (level.height > 0 && level.height <= height && (best < 0 || level.height > levels[best]!.height)) best = index;
+  });
+  if (best >= 0) return best;
+  let lowest = -1;
+  levels.forEach((level, index) => {
+    if (lowest < 0 || level.height < levels[lowest]!.height) lowest = index;
+  });
+  return lowest;
 }
 
 function toLevels(levels: Level[]): QualityLevel[] {

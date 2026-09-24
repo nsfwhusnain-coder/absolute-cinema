@@ -16,6 +16,7 @@ import { NoProvider } from "@/components/empty-states";
 import { toast } from "sonner";
 import { useSession } from "next-auth/react";
 import { tvQueryIndex } from "@/lib/playback/tv-index";
+import { getAutoplayNext } from "@/lib/player-preferences";
 
 /** Cancelable end-of-episode autoplay countdown (task 9). */
 const NEXT_EPISODE_COUNTDOWN_S = 10;
@@ -760,7 +761,7 @@ function NextEpisodeCountdown({
   onPlayNow: () => void;
 }) {
   const [remaining, setRemaining] = useState(NEXT_EPISODE_COUNTDOWN_S);
-  const [cancelled, setCancelled] = useState(false);
+  const [cancelled, setCancelled] = useState(() => !getAutoplayNext());
   const firedRef = useRef(false);
 
   useEffect(() => {

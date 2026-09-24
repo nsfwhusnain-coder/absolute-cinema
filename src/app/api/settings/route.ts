@@ -3,13 +3,14 @@ import { getAuthenticatedUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { DEFAULT_PROVIDER_ID, listProviders } from "@/lib/playback";
 import { FLAG_DEFAULTS, invalidateAppFlag } from "@/lib/feature-flags";
+import { PROFILE_PICKER_SETTING, SIGNUPS_OPEN_SETTING } from "@/lib/profiles";
 
 /**
- * Server-wide settings (TMDB API key override, playback provider, appearance).
+ * Server-wide settings (TMDB API key override, playback provider, profiles, flags).
  *
  * GET    /api/settings          — read all settings (admin sees full, user sees redacted)
  * POST   /api/settings          — update settings (admin only)
- *   body: { tmdb_api_key?, playback_provider?, theme?, accent_color?,
+ *   body: { tmdb_api_key?, playback_provider?, signups_open?, profile_picker?,
  *           flag_ui_bottom_nav?, flag_ui_hubs?, flag_playback_fast_path? }
  */
 
@@ -75,13 +76,7 @@ export async function POST(req: NextRequest) {
   if (!user?.isAdmin) return NextResponse.json({ error: "Admin only" }, { status: 403 });
 
   const body = (await req.json()) as Record<string, string | undefined>;
-  const allowed = [
-    "tmdb_api_key",
-    "playback_provider",
-    "theme",
-    "accent_color",
-    ...FLAG_KEYS,
-  ];
+  const allowed = ["tmdb_api_key", "playback_provider", SIGNUPS_OPEN_SETTING, PROFILE_PICKER_SETTING, ...FLAG_KEYS];
 
   for (const key of allowed) {
     const val = body[key];

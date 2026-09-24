@@ -20,16 +20,7 @@ const PREFERRED_AUDIO_LANG_KEY = "absolute-cinema:audio-lang";
 const AUDIO_PREFERENCE_KEY = "absolute-cinema:audio-preference";
 const SUBTITLE_PREFERENCE_KEY = "absolute-cinema:subtitle-preference";
 const FOUR_K_STARTUP_KEY = "absolute-cinema:four-k-startup";
-/**
- * Quality-floor policy. "adaptive" (default, Netflix-style): under sustained
- * bandwidth starvation, temporarily drop below the 1080 floor to keep video
- * playing, then climb back when the line recovers. "absolute": never below
- * 1080p — buffer at the floor indefinitely instead (the old "Absolute Cinema
- * 1080p" brand behavior).
- */
-const QUALITY_FLOOR_POLICY_KEY = "absolute-cinema:quality-floor-policy";
-export type QualityFloorPolicy = "adaptive" | "absolute";
-export const DEFAULT_FLOOR_POLICY: QualityFloorPolicy = "adaptive";
+const AUTOPLAY_NEXT_KEY = "absolute-cinema:autoplay-next";
 
 /**
  * Default stream preference key.
@@ -83,6 +74,25 @@ export function getSavedPlaybackSpeed(): number {
 export function setSavedPlaybackSpeed(speed: number): void {
   if (typeof window === "undefined") return;
   localStorage.setItem(PLAYBACK_SPEED_KEY, String(speed));
+}
+
+/** Start the next episode automatically when one ends (per device, default on). */
+export function getAutoplayNext(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    return localStorage.getItem(AUTOPLAY_NEXT_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+export function setAutoplayNext(enabled: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(AUTOPLAY_NEXT_KEY, enabled ? "on" : "off");
+  } catch {
+    /* private mode: the default stays in effect */
+  }
 }
 
 export const DEFAULT_AUDIO_LANGUAGE = "en";

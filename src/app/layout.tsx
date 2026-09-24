@@ -1,8 +1,7 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
-import { Toaster } from "@/components/ui/toaster";
-import { Toaster as SonnerToaster } from "@/components/ui/sonner";
+import { Toaster } from "@/components/ui/sonner";
 import { Providers } from "@/components/providers";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
@@ -10,6 +9,7 @@ import { PWARegister } from "@/components/pwa-register";
 import { TvSpatialNavigation } from "@/components/tv-spatial-navigation";
 import { tvDetectionBootstrapScript } from "@/lib/tv-detect";
 import { legacyStorageMigrationScript } from "@/lib/storage-migration";
+import { appearanceBootstrapScript } from "@/lib/appearance";
 
 const inter = localFont({
   src: "./fonts/inter-latin.woff2",
@@ -74,20 +74,20 @@ export default async function RootLayout({
   // first paint instead of popping in after a client-side /api/auth/session.
   const session = await getServerSession(authOptions).catch(() => null);
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" className="dark" data-material="clear" suppressHydrationWarning>
       <body
         className={`${inter.variable} ${montserrat.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
         {/* Must run before anything paints — it decides the root font size.
             See tvDetectionBootstrapScript() for why this cannot wait for React. */}
         <script dangerouslySetInnerHTML={{ __html: legacyStorageMigrationScript() }} />
+        <script dangerouslySetInnerHTML={{ __html: appearanceBootstrapScript() }} />
         <script dangerouslySetInnerHTML={{ __html: tvDetectionBootstrapScript() }} />
         <Providers session={session}>
           {children}
           <PWARegister />
         </Providers>
         <Toaster />
-        <SonnerToaster />
         <TvSpatialNavigation />
       </body>
     </html>

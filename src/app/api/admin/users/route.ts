@@ -30,6 +30,7 @@ export async function GET() {
       id: u.id,
       name: u.name,
       isAdmin: u.isAdmin,
+      avatarColor: u.avatarColor,
       createdAt: u.createdAt,
       watchlistCount: u._count.watchlist,
       progressCount: u._count.progress,

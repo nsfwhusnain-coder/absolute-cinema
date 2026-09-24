@@ -22,11 +22,11 @@ export interface ProfilePlaybackPreferences {
 }
 
 export const DEFAULT_PROFILE_PLAYBACK_PREFERENCES: ProfilePlaybackPreferences = {
-  playbackQuality: 2160,
+  playbackQuality: "auto",
   audioLanguage: "en",
   audioPreference: "original",
   subtitlePreference: "english",
-  fourKStartup: "maximum",
+  fourKStartup: "fast",
 };
 
 const PLAYBACK_QUALITY_SET = new Set<number>(PLAYBACK_QUALITY_HEIGHTS);

@@ -67,16 +67,30 @@ export const authOptions: NextAuthOptions = {
           id: user.id,
           name: user.name,
           isAdmin: user.isAdmin,
+          avatarColor: user.avatarColor,
         };
       },
     }),
   ],
   callbacks: {
-    async jwt({ token, user }) {
+    async jwt({ token, user, trigger }) {
       if (user) {
         token.id = user.id;
         token.isAdmin = user.isAdmin;
         token.name = user.name;
+        token.avatarColor = user.avatarColor;
+      } else if (trigger === "update" && token.id) {
+        // The client asks for a refresh after editing its profile; the values
+        // always come from the database, never from the client's payload.
+        const fresh = await db.user.findUnique({
+          where: { id: token.id as string },
+          select: { name: true, isAdmin: true, avatarColor: true },
+        });
+        if (fresh) {
+          token.name = fresh.name;
+          token.isAdmin = fresh.isAdmin;
+          token.avatarColor = fresh.avatarColor;
+        }
       }
       return token;
     },
@@ -85,6 +99,7 @@ export const authOptions: NextAuthOptions = {
         session.user.id = token.id as string;
         session.user.isAdmin = token.isAdmin as boolean;
         if (token.name) session.user.name = token.name as string;
+        session.user.avatarColor = token.avatarColor ?? "#e50914";
       }
       return session;
     },

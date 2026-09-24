@@ -1,16 +1,8 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import type { ReactNode, CSSProperties } from "react";
+import type { ReactNode } from "react";
 
-/** Shared clear glass material (nav pill family). */
-export const GLASS_PILL_STYLE: CSSProperties = {
-  background: "rgba(255,255,255,0.1)",
-  WebkitBackdropFilter: "blur(22px) saturate(180%) brightness(1.08)",
-  backdropFilter: "blur(22px) saturate(180%) brightness(1.08)",
-  boxShadow:
-    "inset 0 1px 0 rgba(255,255,255,0.35), inset 0 -0.5px 0 rgba(255,255,255,0.08), 0 8px 28px rgba(0,0,0,0.28)",
-};
 
 const FOCUS =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-transparent";
@@ -25,25 +17,10 @@ export function GlassPill({ children, className }: GlassPillRootProps) {
   return (
     <div
       className={cn(
-        "relative inline-flex h-12 shrink-0 items-center gap-0.5 rounded-full border border-white/20 p-1",
+        "glass relative inline-flex h-12 shrink-0 items-center gap-0.5 rounded-full p-1",
         className
       )}
-      style={GLASS_PILL_STYLE}
     >
-      <span
-        aria-hidden
-        className="pointer-events-none absolute inset-0 rounded-full"
-        style={{
-          padding: 1,
-          background:
-            "linear-gradient(160deg, rgba(255,255,255,0.5) 0%, rgba(255,255,255,0.08) 45%, rgba(255,255,255,0.18) 100%)",
-          WebkitMask:
-            "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
-          WebkitMaskComposite: "xor",
-          mask: "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
-          maskComposite: "exclude",
-        }}
-      />
       <div className="relative z-[1] flex items-center gap-0.5">{children}</div>
     </div>
   );

@@ -1,26 +1,13 @@
-import Link from "next/link";
 import { Film } from "lucide-react";
-import { buttonVariants } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { MessageCard } from "@/components/message-card";
 
-/**
- * Catches notFound() calls from inside the (main) group (e.g. an unknown
- * /browse/[category] slug) and unmatched routes under it. Renders inside
- * MainLayout so Navbar/Footer/MobileDock stay on screen.
- */
+/** Unknown titles, categories and routes inside the main layout. */
 export default function MainNotFound() {
   return (
-    <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4 px-4 pt-20 text-center">
-      <Film className="h-10 w-10 text-muted-foreground" aria-hidden />
-      <div>
-        <h1 className="font-display text-xl font-semibold">Nothing here</h1>
-        <p className="mt-1.5 max-w-sm text-sm text-muted-foreground">
-          That title or category doesn&apos;t exist, or the link is broken.
-        </p>
-      </div>
-      <Link href="/" className={cn(buttonVariants({ size: "lg" }), "rounded-full px-6")}>
-        Back to Home
-      </Link>
+    <div className="flex min-h-[70vh] items-center justify-center px-4 pt-20">
+      <MessageCard icon={<Film className="h-6 w-6" />} title="Nothing here" actions={[{ label: "Go home", href: "/", primary: true }]}>
+        That title or category doesn&apos;t exist, or the link is broken.
+      </MessageCard>
     </div>
   );
 }

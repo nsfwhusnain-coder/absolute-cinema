@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getProxyMetrics } from "@/lib/hls-proxy";
 import { getAuthenticatedUser } from "@/lib/auth";
+import { REMUXER_URL } from "@/lib/playback/remuxer";
 
 /** Derive scraper /health base from SCRAPER_URL (…/scrape → …/health). */
 function scraperHealthUrl(): string {
@@ -97,8 +98,26 @@ async function fetchScraperHealth(): Promise<{
   }
 }
 
+export interface RemuxerHealthDto {
+  status: "ok" | "off" | "error";
+  sessions: number;
+  runs: number;
+}
+
+async function fetchRemuxerHealth(): Promise<RemuxerHealthDto> {
+  if (process.env.REMUX_ENABLED === "0") return { status: "off", sessions: 0, runs: 0 };
+  try {
+    const res = await fetch(`${REMUXER_URL}/health`, { signal: AbortSignal.timeout(3000), cache: "no-store" });
+    if (!res.ok) return { status: "error", sessions: 0, runs: 0 };
+    const data = (await res.json()) as { sessions?: number; runs?: number };
+    return { status: "ok", sessions: data.sessions ?? 0, runs: data.runs ?? 0 };
+  } catch {
+    return { status: "error", sessions: 0, runs: 0 };
+  }
+}
+
 /**
- * this leaks scraper circuit-breaker state, cache byte totals,
+ * This exposes scraper circuit-breaker state, cache byte totals,
  * and DB health — internal ops detail that shouldn't be reachable by anyone
  * who finds the URL. Admin-only, matching /api/debrid/status.
  */
@@ -108,7 +127,7 @@ export async function GET() {
     return NextResponse.json({ error: "Admin only" }, { status: 403 });
   }
 
-  const [dbStatus, scraper] = await Promise.all([checkDb(), fetchScraperHealth()]);
+  const [dbStatus, scraper, remuxer] = await Promise.all([checkDb(), fetchScraperHealth(), fetchRemuxerHealth()]);
   const proxy = getProxyMetrics();
 
   const body = {
@@ -118,6 +137,7 @@ export async function GET() {
     scraper: scraper.status,
     /** Full scraper /health payload (circuits, pool, timings) when reachable */
     scraperHealth: scraper.health,
+    remuxer,
     proxy: {
       hits: proxy.hits,
       misses: proxy.misses,

@@ -1,10 +1,11 @@
 import path from "path";
 import type { NextConfig } from "next";
+import pkg from "./package.json";
 
 /**
  * Security response headers.
  *
- * No Content-Security-Policy: the player stack (hls.js/dash.js) needs blob:
+ * No Content-Security-Policy: the player stack (hls.js) needs blob:
  * workers and MSE, images come from TMDB's multi-subdomain CDN, and media can
  * be proxied through an optional Cloudflare worker, so a strict CSP would
  * need per-deployment tuning to avoid breaking playback.
@@ -22,6 +23,9 @@ const SECURITY_HEADERS = [
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  env: {
+    NEXT_PUBLIC_APP_VERSION: pkg.version,
+  },
   turbopack: {
     root: path.resolve(__dirname),
   },
