@@ -151,6 +151,8 @@ const RD_SLOTS: DebridSlot[] = [
  * this constant.
  */
 const RD_FAST_DEADLINE_MS = 1_500;
+/** Extra candidates resolved alongside the ones a slot pool still needs. */
+const POOL_HEDGE = 1;
 /** Full-resolve path bound — shared across every missing RD slot's resolve attempts (including any per-slot fallback to the next-ranked candidate). */
 const RD_FULL_DEADLINE_MS = 16_000;
 /** Per-call ceiling for a single `resolveTokenFreeRedirect`, clamped down further by whatever remains of the shared deadline. */
@@ -690,9 +692,13 @@ async function resolveRankedCandidatePool(
     Date.now() < deadline
   ) {
     const remainingNeeded = count - resolvedCandidates.length;
+    // Hedge by one: Torrentio marks many uncached releases as cached, and
+    // each dud costs a full resolve round-trip. Trying one extra candidate in
+    // parallel (keeping ranked order when choosing) cuts the serial wait
+    // without fanning out across the whole list.
     const batch = options.slice(
       cursor,
-      cursor + Math.min(RESOLVE_CONCURRENCY, remainingNeeded)
+      cursor + Math.min(RESOLVE_CONCURRENCY, remainingNeeded + POOL_HEDGE)
     );
     cursor += batch.length;
     const batchResults = await mapWithConcurrency(
