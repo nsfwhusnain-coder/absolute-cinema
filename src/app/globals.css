@@ -577,3 +577,103 @@ video::cue {
   border: 1px solid rgba(255, 255, 255, 0.15);
   box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.6);
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Material system.
+   Every floating surface (navbar pill, player controls, menus, toasts, dialogs,
+   error cards) uses one of these classes, so the theme switch in Settings
+   changes all of them together.
+     Clear (default): Apple-style frosted glass that picks up the colour behind it.
+     Solid:           opaque surfaces for maximum legibility and cheaper rendering.
+   ───────────────────────────────────────────────────────────────────────────── */
+:root {
+  --mat-fill: rgba(30, 30, 38, 0.38);
+  --mat-fill-strong: rgba(20, 20, 26, 0.64);
+  --mat-fill-hover: rgba(255, 255, 255, 0.12);
+  --mat-fill-active: rgba(255, 255, 255, 0.2);
+  --mat-stroke: rgba(255, 255, 255, 0.16);
+  --mat-highlight: rgba(255, 255, 255, 0.3);
+  --mat-blur: 28px;
+  --mat-saturate: 185%;
+  --mat-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
+}
+
+html[data-material="solid"] {
+  --mat-fill: #18181f;
+  --mat-fill-strong: #131318;
+  --mat-fill-hover: #24242c;
+  --mat-fill-active: #2e2e38;
+  --mat-stroke: rgba(255, 255, 255, 0.08);
+  --mat-highlight: rgba(255, 255, 255, 0.05);
+  --mat-blur: 0px;
+  --mat-saturate: 100%;
+  --mat-shadow: 0 14px 36px rgba(0, 0, 0, 0.55);
+}
+
+.glass,
+.glass-strong {
+  -webkit-backdrop-filter: blur(var(--mat-blur)) saturate(var(--mat-saturate));
+  backdrop-filter: blur(var(--mat-blur)) saturate(var(--mat-saturate));
+  border: 1px solid var(--mat-stroke);
+  box-shadow: inset 0 1px 0 var(--mat-highlight), var(--mat-shadow);
+}
+.glass {
+  background: var(--mat-fill);
+}
+.glass-strong {
+  background: var(--mat-fill-strong);
+}
+
+/* Round icon button on a glass disc. */
+.glass-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  color: #fff;
+  transition: background-color 150ms ease, transform 150ms ease;
+}
+.glass-icon:hover {
+  background: var(--mat-fill-hover);
+}
+.glass-icon:active {
+  transform: scale(0.94);
+}
+
+/* Browsers without backdrop-filter (and TVs, where it is disabled for speed)
+   get a denser fill so text stays legible. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass { background: rgba(22, 22, 28, 0.9); }
+  .glass-strong { background: rgba(18, 18, 24, 0.95); }
+}
+html[data-tv="1"] :where(.glass, .glass-strong) {
+  background: rgba(18, 18, 24, 0.9);
+}
+
+/* Player: volume slider and caption text. */
+.player-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 9999px;
+  background: linear-gradient(to right, #fff var(--fill, 0%), rgba(255, 255, 255, 0.25) var(--fill, 0%));
+  cursor: pointer;
+}
+.player-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 12px;
+  width: 12px;
+  border-radius: 9999px;
+  background: #fff;
+}
+.player-range::-moz-range-thumb {
+  height: 12px;
+  width: 12px;
+  border: 0;
+  border-radius: 9999px;
+  background: #fff;
+}
+.player-caption {
+  font-size: clamp(1rem, 2.4vw, 2.1rem);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}

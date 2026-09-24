@@ -2,21 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { shouldShowUpNext } from "@/components/player/up-next-window";
-import { usePlayerStore } from "@/stores/player-store";
+import { usePlayerState } from "@/components/player/store";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useNavigate } from "@/hooks/use-navigate";
 import { tmdbImageUrl, pickTitleLogoUrl, type TmdbImages } from "@/lib/tmdb";
 import { useMounted } from "@/hooks/use-mounted";
-import { VideoPlayer } from "@/components/video-player";
+import { Player } from "@/components/player/Player";
 import { AlertCircle, Loader2, ExternalLink, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { usePlayback, useWatchPlayback } from "@/hooks/use-playback";
+import { usePrefetchPlayback, useStreams } from "@/hooks/use-playback";
 import { NoProvider } from "@/components/empty-states";
 import { toast } from "sonner";
 import { useSession } from "next-auth/react";
-import type { PlaybackResponse, PlaybackSource } from "@/lib/playback/types";
-import { sourceId } from "@/lib/playback/server-names";
 import { tvQueryIndex } from "@/lib/playback/tv-index";
 
 /** Cancelable end-of-episode autoplay countdown (task 9). */
@@ -68,47 +66,6 @@ function resumeTvEpisode(
   return { season: Number(best.season), episode: Number(best.episode) };
 }
 
-function toPlaybackSources(playback: PlaybackResponse | undefined): PlaybackSource[] {
-  if (!playback?.sources?.length && !playback?.streamUrl) return [];
-  if (playback.sources?.length) return playback.sources;
-  const url = playback.streamUrl!;
-  return [
-    {
-      id: sourceId("Stream", "HLS"),
-      url,
-      provider: playback.providerId ?? "Stream",
-      quality: "auto",
-      label: "HLS",
-      type: url.includes(".m3u8") || url.includes("/playlist/")
-        ? "hls"
-        : url.includes(".mpd")
-          ? "dash"
-          : "hls",
-    },
-  ];
-}
-
-function playbackErrorMessage(
-  playback: PlaybackResponse | undefined,
-  err: Error | null,
-  opts?: { suppress?: boolean }
-): string | null {
-  if (opts?.suppress) return null;
-  // Progressive / soft-miss must never surface as a hard player error.
-  if (playback?.partial) return null;
-  if (err) {
-    const msg = err.message || "";
-    if (/no fast source/i.test(msg)) return null;
-    return msg || "Something went wrong loading streams";
-  }
-  if (playback?.status === "error") {
-    const msg = playback.message ?? "No stream available";
-    if (/no fast source/i.test(msg)) return null;
-    return msg;
-  }
-  return null;
-}
-
 interface SeasonMeta {
   season_number: number;
   episode_count: number;
@@ -142,9 +99,7 @@ function resolveNextEpisode(
   return null;
 }
 
-/**
- * Full-viewport LordFlix watch page — player only, no info junk below.
- */
+/** Full-viewport watch page: the player and nothing else. */
 export function WatchView({ mediaType, id, season, episode }: Props) {
   const navigate = useNavigate();
   const router = useRouter();
@@ -237,7 +192,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
       const res = await fetch(`/api/tmdb/tv/${id}/season/${tvSeason}`);
       if (!res.ok) return null;
       return res.json() as Promise<{
-        episodes?: Array<{ episode_number: number; runtime?: number | null }>;
+        episodes?: Array<{ episode_number: number; runtime?: number | null; name?: string }>;
       }>;
     },
     enabled: mounted && mediaType === "tv" && tvSeason != null,
@@ -301,46 +256,22 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
     }
   }, [progressList, id, mediaType, tvSeason, tvEpisode]);
 
-  const {
-    data: playback,
-    isLoading: playbackLoading,
-    isFetching: playbackFetching,
-    isSoftMiss,
-    isEnriching,
-    sourceCount,
-    retryFull,
-    error: playbackError,
-  } = useWatchPlayback({
+  const streams = useStreams({
     tmdbId: id,
     mediaType,
     season: tvSeason,
     episode: tvEpisode,
     enabled: mounted && tvParamsInUrl,
   });
-
-  const playbackSources = toPlaybackSources(playback);
-  // Soft-kept / probe-failed rows are switchable but not "found healthy" for hunting copy.
-  const playableSourceCount = playbackSources.filter(
-    (s) => s.verified !== false && s.probe?.ok !== false
-  ).length;
-  const sourcesLoading =
-    mounted &&
-    !!session &&
-    playbackSources.length === 0 &&
-    (playbackLoading || isSoftMiss || Boolean(playback?.partial));
-  const sourcesError = playbackErrorMessage(playback, playbackError as Error | null, {
-    // Soft-miss / progressive resolve must never paint a red hard error.
-    suppress: sourcesLoading || isSoftMiss || Boolean(playback?.partial),
-  });
-  // Background enrich flag for dock pulse / chip text ONLY.
-  // Playback starts on first source — this never blocks hasStream/play.
-  const isDiscoveringSources =
-    (isSoftMiss && playbackSources.length === 0) ||
-    (isEnriching && playbackSources.length > 0) ||
-    (playbackFetching && playbackSources.length === 0);
+  const playback = streams.response;
 
   const showPlayerShell = mounted && !!session;
   const baseTitle = meta?.title || meta?.name || playback?.title || "Untitled";
+  const episodeName = seasonMeta?.episodes?.find((e) => e.episode_number === tvEpisode)?.name;
+  const episodeLabel =
+    mediaType === "tv" && tvSeason != null && tvEpisode != null
+      ? `S${tvSeason} · E${tvEpisode}${episodeName ? ` · ${episodeName}` : ""}`
+      : undefined;
   const title =
     mediaType === "tv" && tvSeason != null && tvEpisode != null
       ? `${baseTitle} · S${tvSeason}E${tvEpisode}`
@@ -558,17 +489,12 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
   const hasNextEpisode = nextEpisodeTarget != null;
 
   // Fast-path only — no chrome change. Warms the next episode while this one plays.
-  usePlayback({
+  usePrefetchPlayback({
     tmdbId: id,
     mediaType: "tv",
     season: nextEpisodeTarget?.season,
     episode: nextEpisodeTarget?.episode,
-    enabled:
-      mounted &&
-      tvParamsInUrl &&
-      mediaType === "tv" &&
-      nextEpisodeTarget != null,
-    prefetch: true,
+    enabled: mounted && tvParamsInUrl && mediaType === "tv" && nextEpisodeTarget != null,
   });
 
   /**
@@ -631,15 +557,15 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
       const res = await fetch(endpoint, { method: "POST" });
       if (res.ok) {
         toast.success("Request sent");
-        void retryFull();
+        streams.refresh();
       } else toast.error("Request failed");
     } catch {
       toast.error("Request failed");
     }
   };
 
-  const backdrop = tmdbImageUrl(meta?.backdrop_path ?? playback?.poster, "original");
-  const artwork = tmdbImageUrl(meta?.poster_path, "original");
+  const backdrop = tmdbImageUrl(meta?.backdrop_path ?? playback?.poster, "w1280");
+  const logo = pickTitleLogoUrl(images, "w500");
 
   // Full-bleed inside watch/layout — no max-width shell; bars only from object-fit:contain
   return (
@@ -711,60 +637,51 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
         </div>
       ) : showPlayerShell ? (
         <div className="absolute inset-0 h-full w-full">
-          <VideoPlayer
+          <Player
             key={`${mediaType}-${id}-${tvSeason}-${tvEpisode}`}
-            sources={playbackSources}
-            sourcesLoading={sourcesLoading}
-            externalSubtitles={externalSubtitles}
-            sourcesError={sourcesError}
-            onRetrySources={() => void retryFull()}
-            isDiscoveringSources={isDiscoveringSources}
-            profileQuality={playback?.preferences?.playbackQuality}
-            profileAudioPreference={playback?.preferences?.audioPreference}
-            profileAudioLanguage={playback?.preferences?.audioLanguage}
-            profileSubtitlePreference={playback?.preferences?.subtitlePreference}
-            profileFourKStartup={playback?.preferences?.fourKStartup}
-            remuxAvailable={playback?.remuxAvailable !== false}
-            originalLanguage={meta?.original_language ?? null}
-            refreshNonce={playback?.refreshNonce}
-            sourceCount={
-              playableSourceCount > 0
-                ? playableSourceCount
-                : sourceCount || playbackSources.length
-            }
-            poster={backdrop}
-            artwork={artwork}
-            title={title}
-            mediaType={mediaType}
+            sources={streams.sources}
+            discovering={streams.discovering}
+            remuxAvailable={streams.remuxAvailable}
+            title={{
+              tmdbId: id,
+              mediaType,
+              season: tvSeason,
+              episode: tvEpisode,
+              originalLanguage: meta?.original_language ?? null,
+            }}
+            displayTitle={baseTitle}
+            episodeLabel={episodeLabel}
+            backdrop={backdrop}
+            logo={logo}
             initialTime={savedTime}
+            fallbackDurationS={tmdbRuntimeSeconds}
+            audio={{
+              preference: streams.preferences?.audioPreference ?? "original",
+              language: streams.preferences?.audioLanguage ?? "en",
+            }}
+            subtitlePreference={streams.preferences?.subtitlePreference ?? "english"}
+            externalSubtitles={externalSubtitles}
             onProgress={onProgress}
             onEnded={onEnded}
-            fallbackDurationS={tmdbRuntimeSeconds}
-            hasNextEpisode={mediaType === "tv" && hasNextEpisode}
-            onNextEpisode={goToNextEpisode}
-            nextEpisodeTarget={nextEpisodeTarget}
             onBack={leaveWatch}
-            onTitleClick={() => navigate(`/${mediaType}/${id}`)}
-            tvId={mediaType === "tv" ? id : undefined}
-            tmdbId={id}
-            tvSeasons={
-              mediaType === "tv"
-                ? ((meta?.seasons as SeasonMeta[] | undefined) ?? [])
-                    .filter((s) => s.season_number >= 0)
-                    .map((s) => ({
-                      season_number: s.season_number,
-                      name:
-                        s.name ||
-                        (s.season_number === 0
-                          ? "Specials"
-                          : `Season ${s.season_number}`),
-                      episode_count: s.episode_count,
-                    }))
+            onRefreshSources={streams.refresh}
+            tv={
+              mediaType === "tv" && tvSeason != null && tvEpisode != null
+                ? {
+                    seasons: ((meta?.seasons as SeasonMeta[] | undefined) ?? [])
+                      .filter((s) => s.season_number >= 0 && s.episode_count > 0)
+                      .map((s) => ({
+                        season_number: s.season_number,
+                        name: s.season_number === 0 ? "Specials" : `Season ${s.season_number}`,
+                        episode_count: s.episode_count,
+                      })),
+                    season: tvSeason,
+                    episode: tvEpisode,
+                    onSelectEpisode: selectEpisode,
+                    onNextEpisode: hasNextEpisode ? goToNextEpisode : undefined,
+                  }
                 : undefined
             }
-            tvSeason={tvSeason}
-            tvEpisode={tvEpisode}
-            onSelectEpisode={mediaType === "tv" ? selectEpisode : undefined}
           />
           {mediaType === "tv" && nextEpisodeTarget && (
             <UpNextGate
@@ -810,13 +727,10 @@ function UpNextGate({
   fallbackDurationS: number;
   onPlayNow: () => void;
 }) {
-  const currentTime = usePlayerStore((s) => s.currentTime);
-  const duration = usePlayerStore((s) => s.duration);
-  const durationProvisional = usePlayerStore((s) => s.durationProvisional);
+  const currentTime = usePlayerState((s) => s.currentTime);
+  const duration = usePlayerState((s) => s.duration);
 
-  const visible =
-    ended ||
-    shouldShowUpNext(currentTime, duration, durationProvisional, fallbackDurationS);
+  const visible = ended || shouldShowUpNext(currentTime, duration, false, fallbackDurationS);
   if (!visible) return null;
 
   return (
@@ -867,7 +781,7 @@ function NextEpisodeCountdown({
       : `Play Episode ${target.episode}`;
 
   return (
-    <div className="absolute bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-2xl border border-white/10 bg-black/90 px-6 py-4 shadow-2xl">
+    <div className="glass-strong absolute bottom-32 right-4 z-40 w-72 rounded-3xl p-4 text-white sm:right-8">
       <div className="mb-2 text-center text-sm font-medium text-white">
         {cancelled ? "Up next" : `Next episode in ${remaining}…`}
       </div>

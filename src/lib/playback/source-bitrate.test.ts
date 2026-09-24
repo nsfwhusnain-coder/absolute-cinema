@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
   compareBitrateAtEqualHeight,
-  isMeaningfullyRicherSource,
   normalizedBitrate,
   pickDefaultSource,
   sortSourcesForPicker,
@@ -56,48 +55,6 @@ describe("compareBitrateAtEqualHeight", () => {
     const silent = source({ id: "silent" });
     const declared = source({ id: "declared", bitrateBps: 9_000_000 });
     expect(compareBitrateAtEqualHeight(silent, declared)).toBeGreaterThan(0);
-  });
-
-  it("keeps the cold-switch threshold even though total ordering is exact", () => {
-    const current = source({ id: "current", bitrateBps: 5_000_000 });
-    const close = source({ id: "close", bitrateBps: 5_600_000 });
-    const richer = source({ id: "richer", bitrateBps: 7_000_000 });
-    expect(isMeaningfullyRicherSource(current, close)).toBe(false);
-    expect(isMeaningfullyRicherSource(current, richer)).toBe(true);
-  });
-
-  it("only calls the candidate richer when resolution matches", () => {
-    const lean1080 = source({ id: "lean", bitrateBps: 2_000_000 });
-    const rich1080 = source({ id: "rich", bitrateBps: 10_000_000 });
-    const rich720 = source({
-      id: "rich-720",
-      maxHeight: 720,
-      quality: "720p",
-      bitrateBps: 12_000_000,
-    });
-
-    expect(isMeaningfullyRicherSource(lean1080, rich1080)).toBe(true);
-    expect(isMeaningfullyRicherSource(lean1080, rich720)).toBe(false);
-  });
-
-  it("only upgrades an unknown-rate cold source for a strong sustainable rate", () => {
-    const unknown = source({ id: "unknown" });
-    const ordinary = source({ id: "ordinary", bitrateBps: 4_000_000 });
-    const strong = source({ id: "strong", bitrateBps: 8_000_000 });
-    const starving = source({
-      id: "starving",
-      bitrateBps: 12_000_000,
-      probe: {
-        ok: true,
-        ttfbMs: 100,
-        bytesPerSec: 500_000,
-        speedScore: 80,
-      },
-    });
-
-    expect(isMeaningfullyRicherSource(unknown, ordinary)).toBe(false);
-    expect(isMeaningfullyRicherSource(unknown, strong)).toBe(true);
-    expect(isMeaningfullyRicherSource(unknown, starving)).toBe(false);
   });
 });
 

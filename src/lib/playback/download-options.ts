@@ -1,5 +1,4 @@
 import type { PlaybackSource } from "./types";
-import { formatBitrateMbps } from "./stream-info";
 import { formatResolutionLabel, sourceMaxHeight } from "./source-quality";
 import { sourceAudioLanguageCode } from "./source-facts";
 
@@ -200,4 +199,12 @@ export function downloadFilename(
   const ext = option.containerLabel.toLowerCase() === "mkv" ? "mkv" : "mp4";
   const base = safe || "absolute-cinema";
   return `${base} ${option.label}.${ext}`;
+}
+
+function formatBitrateMbps(bps: number): string | null {
+  if (!Number.isFinite(bps) || bps <= 0) return null;
+  const mbps = bps / 1_000_000;
+  if (mbps >= 10) return `${mbps.toFixed(1)} Mbps`;
+  if (mbps >= 1) return `${mbps.toFixed(2)} Mbps`;
+  return `${Math.round(bps / 1000)} kbps`;
 }

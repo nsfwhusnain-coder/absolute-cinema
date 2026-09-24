@@ -1,28 +1,21 @@
-const TRANSCODER_URL =
-  process.env.TRANSCODER_INTERNAL_URL || "http://127.0.0.1:3040";
+import { REMUXER_URL } from "./remuxer";
+
 const REMUX_HEALTH_TIMEOUT_MS = 400;
 
-interface TranscoderHealth {
-  activeRemuxes?: number;
-  startingRemuxes?: number;
-  remuxMaxConcurrent?: number;
-}
-
-/** Fail open — a health miss must not block Ultra from trying remux. */
+/**
+ * Whether MKV sources can be offered. Capacity is enforced by the remuxer
+ * itself (it refuses a session and the player moves on), so this only checks
+ * that remuxing is enabled and the service is up. Fails open on a slow probe.
+ */
 export async function remuxHasCapacity(): Promise<boolean> {
+  if (process.env.REMUX_ENABLED === "0") return false;
   try {
-    const response = await fetch(`${TRANSCODER_URL}/health`, {
+    const response = await fetch(`${REMUXER_URL}/health`, {
       cache: "no-store",
       signal: AbortSignal.timeout(REMUX_HEALTH_TIMEOUT_MS),
     });
-    if (!response.ok) return true;
-    const health = (await response.json()) as TranscoderHealth;
-    const active = Number(health.activeRemuxes ?? 0);
-    const starting = Number(health.startingRemuxes ?? 0);
-    const max = Number(health.remuxMaxConcurrent ?? 0);
-    if (!Number.isFinite(max) || max <= 0) return true;
-    return active + starting < max;
-  } catch {
-    return true;
+    return response.ok;
+  } catch (err) {
+    return err instanceof DOMException && err.name === "TimeoutError";
   }
 }

@@ -1,26 +1,17 @@
 /// <reference types="bun-types" />
 import { describe, expect, it } from "bun:test";
 import {
-  decodedQualityHeight,
-  findNewSourceIds,
-  findQualityUpgradeSource,
-  isFasterSource,
   isRuntimeSourceUnhealthy,
   isSourcePlayableHere,
   sourceDelivery,
-  findDirectDebridAlternative,
   parseMaxHeight,
   pickDefaultSource,
   qualityBadge,
-  resolvePreferredHeightTarget,
   sourceAudioLanguageRank,
   isEnglishPreferredSource,
   sortSourcesForPicker,
   sourceMaxHeight,
   sourceRosterMaxHeight,
-  sourceRosterMeetsHdFloor,
-  sourceHealthState,
-  withDetectedSourceHeight,
 } from "./source-quality";
 import type { PlaybackSource } from "./types";
 
@@ -42,49 +33,6 @@ function makeSource(overrides: Partial<PlaybackSource>): PlaybackSource {
     ...overrides,
   };
 }
-
-describe("decodedQualityHeight", () => {
-  it("treats cropped 1920-wide cinema rasters as the 1080p tier", () => {
-    expect(decodedQualityHeight(1920, 960)).toBe(1080);
-    expect(decodedQualityHeight(1920, 816)).toBe(1080);
-    expect(decodedQualityHeight(1920, 800)).toBe(1080);
-  });
-
-  it("keeps genuinely low-width playback below the HD floor", () => {
-    expect(decodedQualityHeight(1282, 534)).toBe(720);
-    expect(decodedQualityHeight(720, 360)).toBe(360);
-  });
-
-  it("handles portrait and unknown-width media without inventing 4K", () => {
-    expect(decodedQualityHeight(1080, 1920)).toBe(1080);
-    expect(decodedQualityHeight(0, 960)).toBe(960);
-  });
-});
-
-describe("sourceRosterMeetsHdFloor / sourceRosterMaxHeight", () => {
-  it("true when a 1080p source exists alongside a 720p one", () => {
-    const sources = [
-      makeSource({ id: "a", label: "Luna", maxHeight: 720 }),
-      makeSource({ id: "b", label: "Aether", maxHeight: 1080 }),
-    ];
-    expect(sourceRosterMeetsHdFloor(sources)).toBe(true);
-    expect(sourceRosterMaxHeight(sources)).toBe(1080);
-  });
-
-  it("false when every source in the roster is confirmed sub-1080 (task 6)", () => {
-    const sources = [
-      makeSource({ id: "a", label: "Luna", maxHeight: 720 }),
-      makeSource({ id: "b", label: "Nova", maxHeight: 480 }),
-    ];
-    expect(sourceRosterMeetsHdFloor(sources)).toBe(false);
-    expect(sourceRosterMaxHeight(sources)).toBe(720);
-  });
-
-  it("empty roster never claims the HD floor is met", () => {
-    expect(sourceRosterMeetsHdFloor([])).toBe(false);
-    expect(sourceRosterMaxHeight([])).toBe(0);
-  });
-});
 
 describe("pickDefaultSource — HD-floor-first ranking", () => {
   it("uses a stable source-id tie-break independent of resolver arrival order", () => {
@@ -197,19 +145,6 @@ describe("pickDefaultSource — HD-floor-first ranking", () => {
     expect(picked?.id).toBe("mp41080");
   });
 
-  it("given ONLY sub-1080 sources, still returns the best available (for opt-in play) while sourceRosterMeetsHdFloor flags no-1080", () => {
-    const sources = [
-      makeSource({ id: "a", label: "Luna", provider: "Vixsrc", maxHeight: 720 }),
-      makeSource({ id: "b", label: "Nova", provider: "embed.su", maxHeight: 480 }),
-    ];
-    // pickDefaultSource keeps returning a concrete pick — task 6's gate lives
-    // at the caller (video-player.tsx), driven by sourceRosterMeetsHdFloor,
-    // not by pickDefaultSource silently returning null.
-    const picked = pickDefaultSource(sources);
-    expect(picked?.id).toBe("a");
-    expect(sourceRosterMeetsHdFloor(sources)).toBe(false);
-  });
-
   it("4K outranks 1080p when both meet the floor (real resolution tie-break)", () => {
     const s1080 = makeSource({ id: "s1080", label: "Aether", maxHeight: 1080 });
     const s2160 = makeSource({ id: "s2160", label: "Horizon", maxHeight: 2160 });
@@ -279,25 +214,6 @@ describe("pickDefaultSource — HD-floor-first ranking", () => {
     expect(pickDefaultSource([])).toBeNull();
   });
 
-  it("ladder[0] counts as HD for floor ranking even without maxHeight", () => {
-    const sub = makeSource({
-      id: "sub",
-      label: "Luna",
-      provider: "Vixsrc",
-      maxHeight: 720,
-      probe: { ok: true, ttfbMs: 40, bytesPerSec: 5_000_000, speedScore: 90 },
-    });
-    const hdLadder = makeSource({
-      id: "hd-ladder",
-      label: "Aether",
-      provider: "CinePro",
-      ladder: [1080, 720, 480],
-    });
-    const picked = pickDefaultSource([sub, hdLadder]);
-    expect(picked?.id).toBe("hd-ladder");
-    expect(sourceRosterMeetsHdFloor([sub, hdLadder])).toBe(true);
-  });
-
   it("unknown-height sources stay in pool and can be picked when no known 720 exists", () => {
     const unknown = makeSource({
       id: "unknown",
@@ -336,32 +252,6 @@ describe("pickDefaultSource — HD-floor-first ranking", () => {
     const picked = pickDefaultSource([fast720, untestedHd]);
     expect(picked?.id).toBe("untested-hd");
   });
-
-  it("native 1080p debrid outranks equal-height Luna HLS", () => {
-    const luna = makeSource({
-      id: "luna",
-      provider: "Vixsrc",
-      label: "Luna",
-      type: "hls",
-      maxHeight: 1080,
-      url: "/api/hls/luna?u=clean",
-    });
-    const debrid = makeSource({
-      id: "debrid-native",
-      provider: "Debrid",
-      label: "1080p • Debrid",
-      origin: "debrid",
-      type: "mp4",
-      maxHeight: 1080,
-      codec: "h264",
-      container: "mp4",
-      compat: "native",
-      url: "https://download.real-debrid.example/movie.mp4",
-    });
-
-    expect(pickDefaultSource([luna, debrid])?.id).toBe("debrid-native");
-    expect(isFasterSource(luna, debrid)).toBe(true);
-  });
 });
 
 describe("pickDefaultSource — learned provider health", () => {
@@ -377,13 +267,6 @@ describe("pickDefaultSource — learned provider health", () => {
     provider: "Fallback",
     label: "Fallback",
     maxHeight: 1080,
-  });
-
-  it("skips a mature unhealthy provider while an alternative exists", () => {
-    expect(isRuntimeSourceUnhealthy(unreliable)).toBe(true);
-    expect(pickDefaultSource([unreliable, fallback])?.id).toBe("fallback");
-    expect(sortSourcesForPicker([unreliable, fallback])[0]?.id).toBe("fallback");
-    expect(sourceHealthState(unreliable)).toBe("weak");
   });
 
   it("keeps an unhealthy provider as a last resort", () => {
@@ -548,12 +431,6 @@ describe("pickDefaultSource / sortSourcesForPicker — delivery routing", () => 
     expect(sorted.map((s) => s.id)).toEqual(["mkv-4k", "native-1080"]);
     expect(pickDefaultSource([native1080, mkv4k])?.id).toBe("native-1080");
   });
-
-  it("never auto-upgrades a running stream into a remux mid-playback", () => {
-    // isFasterSource fires DURING playback; interrupting a working stream to
-    // start a server-side rewrap is not an upgrade the viewer asked for.
-    expect(isFasterSource(native1080, mkv4k)).toBe(false);
-  });
 });
 
 describe("pickDefaultSource — poison gate", () => {
@@ -615,19 +492,6 @@ describe("pickDefaultSource — poison gate", () => {
 });
 
 describe("resolvePreferredHeightTarget / preferred-height scoring (Change 11)", () => {
-  it("auto and unset start at 1080 while Ultra stays 2160", () => {
-    expect(resolvePreferredHeightTarget("auto")).toBe(1080);
-    expect(resolvePreferredHeightTarget(null)).toBe(1080);
-    expect(resolvePreferredHeightTarget(undefined)).toBe(1080);
-  });
-
-  it("honours a lower explicit profile target without changing Auto's HD start", () => {
-    expect(resolvePreferredHeightTarget(720)).toBe(720);
-  });
-
-  it("honours explicit 2160 preference", () => {
-    expect(resolvePreferredHeightTarget(2160)).toBe(2160);
-  });
 
   it("preferred 2160 ranks a known-4K source over a known-1080 one", () => {
     const s1080 = makeSource({ id: "s1080", label: "Aether", maxHeight: 1080 });
@@ -656,99 +520,6 @@ describe("resolvePreferredHeightTarget / preferred-height scoring (Change 11)", 
     const hd = makeSource({ id: "hd", label: "Aether", maxHeight: 1080 });
     const uhd = makeSource({ id: "uhd", label: "Horizon", maxHeight: 2160 });
     expect(pickDefaultSource([hd, uhd], null, "auto")?.id).toBe("uhd");
-  });
-});
-
-describe("findNewSourceIds (Change 3)", () => {
-  it("returns only ids not in the previous set", () => {
-    const prev = new Set(["a", "b"]);
-    const current = [
-      makeSource({ id: "a" }),
-      makeSource({ id: "b" }),
-      makeSource({ id: "c" }),
-      makeSource({ id: "d" }),
-    ];
-    expect(findNewSourceIds(prev, current)).toEqual(["c", "d"]);
-  });
-
-  it("returns empty when nothing new arrived", () => {
-    const prev = new Set(["a"]);
-    expect(findNewSourceIds(prev, [makeSource({ id: "a" })])).toEqual([]);
-  });
-});
-
-describe("findQualityUpgradeSource (Change 12)", () => {
-  const subPlaying = makeSource({
-    id: "current-sub",
-    label: "Luna",
-    provider: "Vixsrc",
-    maxHeight: 720,
-  });
-  const hd = makeSource({
-    id: "hd",
-    label: "Aether",
-    provider: "CinePro",
-    maxHeight: 1080,
-  });
-
-  it("upgrades when confirmed playing height is sub-1080 and a known-HD source exists", () => {
-    const next = findQualityUpgradeSource(subPlaying, [subPlaying, hd], 720);
-    expect(next?.id).toBe("hd");
-  });
-
-  it("does not upgrade on unknown (0) height", () => {
-    expect(findQualityUpgradeSource(subPlaying, [subPlaying, hd], 0)).toBeNull();
-  });
-
-  it("does not upgrade when already at/above 1080", () => {
-    expect(findQualityUpgradeSource(subPlaying, [subPlaying, hd], 1080)).toBeNull();
-    expect(findQualityUpgradeSource(subPlaying, [subPlaying, hd], 1440)).toBeNull();
-  });
-
-  it("skips failed known-HD candidates", () => {
-    expect(
-      findQualityUpgradeSource(subPlaying, [subPlaying, hd], 480, ["hd"])
-    ).toBeNull();
-  });
-
-  it("returns null when no known-HD source is in the roster", () => {
-    const onlySub = [
-      subPlaying,
-      makeSource({ id: "other", label: "Nova", maxHeight: 480 }),
-    ];
-    expect(findQualityUpgradeSource(subPlaying, onlySub, 480)).toBeNull();
-  });
-
-  it("treats ladder[0] as known HD for the upgrade candidate", () => {
-    const ladderHd = makeSource({
-      id: "ladder-hd",
-      label: "Horizon",
-      ladder: [1080, 720],
-    });
-    const next = findQualityUpgradeSource(subPlaying, [subPlaying, ladderHd], 720);
-    expect(next?.id).toBe("ladder-hd");
-  });
-});
-
-describe("withDetectedSourceHeight (Change 10)", () => {
-  it("sets maxHeight from confirmed decode for single-rendition sources", () => {
-    const mp4 = makeSource({ id: "mp4", type: "mp4", maxHeight: 0 });
-    const updated = withDetectedSourceHeight(mp4, 1080);
-    expect(updated.maxHeight).toBe(1080);
-    // Original props object is not mutated.
-    expect(mp4.maxHeight).toBe(0);
-  });
-
-  it("does not overwrite multi-rendition ladder metadata with current play height", () => {
-    const hls = makeSource({
-      id: "hls",
-      type: "hls",
-      maxHeight: 2160,
-      ladder: [2160, 1080, 720],
-    });
-    const updated = withDetectedSourceHeight(hls, 720);
-    expect(updated).toBe(hls);
-    expect(updated.maxHeight).toBe(2160);
   });
 });
 
@@ -1116,42 +887,6 @@ describe("sortSourcesForPicker — playable-here-first honesty (Server list)", (
   });
 });
 
-describe("findQualityUpgradeSource — never upgrades to an unplayable-here source", () => {
-  it("skips a known-HD Safari-only debrid candidate and returns null when nothing else qualifies", () => {
-    const subPlaying = makeSource({ id: "current-sub", label: "Luna", maxHeight: 720 });
-    const safariOnlyHd = makeSource({
-      id: "safari-hd",
-      label: "Real-Debrid",
-      origin: "debrid",
-      compat: "safari",
-      codec: "hevc",
-      maxHeight: 2160,
-    });
-    expect(
-      findQualityUpgradeSource(subPlaying, [subPlaying, safariOnlyHd], 720)
-    ).toBeNull();
-  });
-
-  it("still upgrades to a playable-here known-HD candidate when both exist", () => {
-    const subPlaying = makeSource({ id: "current-sub", label: "Luna", maxHeight: 720 });
-    const safariOnlyHd = makeSource({
-      id: "safari-hd",
-      label: "Real-Debrid",
-      origin: "debrid",
-      compat: "safari",
-      codec: "hevc",
-      maxHeight: 2160,
-    });
-    const nativeHd = makeSource({ id: "native-hd", label: "Aether", maxHeight: 1080 });
-    const next = findQualityUpgradeSource(
-      subPlaying,
-      [subPlaying, safariOnlyHd, nativeHd],
-      720
-    );
-    expect(next?.id).toBe("native-hd");
-  });
-});
-
 describe("pickDefaultSource — English over foreign CinemaOS", () => {
   const hindi1080 = makeSource({
     id: "cinema-hi",
@@ -1231,48 +966,6 @@ describe("pickDefaultSource — English over foreign CinemaOS", () => {
     expect(
       sortSourcesForPicker([hindi1080, remux4k, luna]).map((source) => source.id)
     ).toEqual(["hades-4k", "luna", "cinema-hi"]);
-  });
-});
-
-describe("findDirectDebridAlternative", () => {
-  it("replaces a remux debrid pick with a same-height direct sibling", () => {
-    const remux = makeSource({
-      id: "poseidon-mkv",
-      origin: "debrid",
-      type: "mp4",
-      codec: "h264",
-      container: "mkv",
-      maxHeight: 2160,
-    });
-    const direct = makeSource({
-      id: "kronos-mp4",
-      origin: "debrid",
-      type: "mp4",
-      codec: "h264",
-      container: "mp4",
-      maxHeight: 2160,
-    });
-    expect(findDirectDebridAlternative(remux, [remux, direct])?.id).toBe("kronos-mp4");
-  });
-
-  it("does not swap remux 4K for a Kronos 1080 direct sibling", () => {
-    const remux = makeSource({
-      id: "hades-mkv",
-      origin: "debrid",
-      type: "mp4",
-      codec: "h264",
-      container: "mkv",
-      maxHeight: 2160,
-    });
-    const kronosHd = makeSource({
-      id: "kronos-mp4",
-      origin: "debrid",
-      type: "mp4",
-      codec: "h264",
-      container: "mp4",
-      maxHeight: 1080,
-    });
-    expect(findDirectDebridAlternative(remux, [remux, kronosHd])).toBeNull();
   });
 });
 

@@ -23,12 +23,6 @@ export interface DecidePlaybackOptions {
   remuxAvailable?: boolean;
 }
 
-export function shouldLockFourKStartup(
-  preferredHeight: "auto" | number | null | undefined
-): boolean {
-  return preferredHeight === 2160 || preferredHeight === "auto";
-}
-
 function failedSet(ids: readonly string[] | ReadonlySet<string> | undefined): ReadonlySet<string> {
   if (!ids) return new Set();
   if (ids instanceof Set) return ids;

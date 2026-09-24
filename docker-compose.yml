@@ -11,8 +11,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_PLAYBACK_RANDOM_ACCESS_REMUX: ${NEXT_PUBLIC_PLAYBACK_RANDOM_ACCESS_REMUX:-1}
     ports:
       # Only the web app is published. The stream scraper (:3030) stays
       # inside the container and must never be exposed.
@@ -22,17 +20,12 @@ services:
         required: false
     environment:
       - HOSTNAME=0.0.0.0
-      # Remux rewraps MKV releases (where most 4K lives) into a browser-playable
-      # container with `-c copy`: no re-encode, ~10x realtime, I/O bound.
+      # Remuxing serves MKV releases (where nearly all 4K lives) as seekable
+      # streams by rewrapping them, never re-encoding video. Set to 0 to disable.
       - REMUX_ENABLED=${REMUX_ENABLED:-1}
-      # Full re-encoding is CPU-heavy (a cold 4K HEVC job can use >10 cores),
-      # so it is off unless you opt in.
-      - TRANSCODER_ENABLED=${TRANSCODER_ENABLED:-0}
-      # Disk budget for remuxed files. Must be >= the per-job cap.
-      - TRANSCODER_CACHE_MAX_BYTES=${TRANSCODER_CACHE_MAX_BYTES:-107374182400}
-      - TRANSCODER_CACHE_TTL_MS=${TRANSCODER_CACHE_TTL_MS:-43200000}
-      - TRANSCODER_REMUX_MIN_FREE_BYTES=${TRANSCODER_REMUX_MIN_FREE_BYTES:-26843545600}
-      - TRANSCODER_REMUX_MAX_JOB_BYTES=${TRANSCODER_REMUX_MAX_JOB_BYTES:-103079215104}
+      # Disk the remux cache may use, and the free space it always leaves.
+      - REMUX_CACHE_MAX_BYTES=${REMUX_CACHE_MAX_BYTES:-53687091200}
+      - REMUX_MIN_FREE_BYTES=${REMUX_MIN_FREE_BYTES:-5368709120}
       # Warm headless-Chromium workers used by embed providers (1-4).
       - BROWSER_POOL_SIZE=${BROWSER_POOL_SIZE:-1}
       - PROVIDER_CINEPRO=${PROVIDER_CINEPRO:-0}
@@ -43,7 +36,7 @@ services:
       # Which servers played each title (and at what quality), so the next
       # Play skips the search. Survives rebuilds.
       - ./data/source-memory:/app/data/source-memory
-      # Remuxed 4K files; regenerable, bounded by the settings above.
+      # Remux cache (regenerable, bounded by the settings above).
       - ./transcode-cache:/app/transcode-cache
     shm_size: "2gb"
     restart: unless-stopped

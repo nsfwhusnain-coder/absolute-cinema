@@ -31,17 +31,6 @@ const QUALITY_FLOOR_POLICY_KEY = "absolute-cinema:quality-floor-policy";
 export type QualityFloorPolicy = "adaptive" | "absolute";
 export const DEFAULT_FLOOR_POLICY: QualityFloorPolicy = "adaptive";
 
-export function getQualityFloorPolicy(): QualityFloorPolicy {
-  if (typeof window === "undefined") return DEFAULT_FLOOR_POLICY;
-  const raw = localStorage.getItem(QUALITY_FLOOR_POLICY_KEY);
-  return raw === "absolute" ? "absolute" : "adaptive";
-}
-
-export function setQualityFloorPolicy(policy: QualityFloorPolicy): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(QUALITY_FLOOR_POLICY_KEY, policy);
-}
-
 /**
  * Default stream preference key.
  * Empty → pure probe/rank pick (Aether/Horizon/Solstice beat Luna).

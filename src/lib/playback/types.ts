@@ -254,22 +254,6 @@ export interface PlaybackResolveContext {
   originalLanguage?: string | null;
 }
 
-/** Boundary exposed by mini-services/stream-scraper to the coordinator. */
-export interface FreeProviderResolver {
-  resolve(
-    request: PlaybackRequest,
-    context: PlaybackResolveContext
-  ): AsyncIterable<PlaybackCandidate>;
-}
-
-/** Boundary exposed by Torrentio/Comet-backed debrid discovery. */
-export interface DebridResolver {
-  resolve(
-    request: PlaybackRequest,
-    context: PlaybackResolveContext
-  ): AsyncIterable<PlaybackCandidate>;
-}
-
 export interface ClientPlaybackCapabilities {
   hevc: boolean;
   av1: boolean;
@@ -283,13 +267,6 @@ export interface ClientRankingContext {
   capabilities: ClientPlaybackCapabilities;
   qualityFloor: "auto" | number;
   fourKStartup: import("@/lib/profile-preferences").FourKStartupPreference;
-}
-
-export interface ClientRanker {
-  pick(
-    candidates: readonly PlaybackCandidate[],
-    context: ClientRankingContext
-  ): PlaybackCandidate | null;
 }
 
 export type PlayerFeedbackEvent =
@@ -330,10 +307,6 @@ export interface PlayerFeedback {
   episode?: number;
 }
 
-export interface PlayerFeedbackEmitter {
-  emit(feedback: PlayerFeedback): void;
-}
-
 export interface ProviderHealthSnapshot {
   successRate: number;
   sampleCount: number;
@@ -361,10 +334,3 @@ export type PlaybackCoordinatorEvent =
   | { type: "candidate"; candidate: PlaybackCandidate }
   | { type: "decision"; candidate: PlaybackCandidate; atMs: number }
   | { type: "complete"; atMs: number };
-
-export interface PlaybackCoordinator {
-  coordinate(
-    request: PlaybackRequest,
-    context: PlaybackResolveContext
-  ): AsyncIterable<PlaybackCoordinatorEvent>;
-}

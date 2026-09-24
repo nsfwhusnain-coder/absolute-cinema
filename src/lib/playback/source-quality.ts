@@ -23,23 +23,6 @@ export {
   sourceAudioLanguageRank,
 } from "./source-facts";
 
-/**
- * Live-transcode target cap (task: transcode-target policy). 4K live
- * transcoding on the owner's single shared VAAPI encoder is slow-starting
- * (~0.9x realtime — see mini-services/transcoder/index.ts) so anything
- * routed through /api/transcode is capped to this height regardless of the
- * source's real ceiling: a 4K source that must be RE-ENCODED becomes a
- * smooth, universal 1080p H.264 ABR ladder that starts reasonably fast.
- *
- * Scope note: this cap applies to re-encoding only. It does NOT apply to the
- * remux route (`sourceDelivery` -> "remux"), which is a stream copy — no
- * decoder, no encoder, so there is nothing to be slow and nothing to gain by
- * downscaling. That is why a 4K MKV now plays at its real 4K where it
- * previously could only ever arrive at this cap. Shared with video-player.tsx
- * so the actual encode height and the badge/UI claim can never drift apart.
- */
-export const TRANSCODE_MAX_HEIGHT = 1080;
-
 const RESOLUTION_PATTERNS = [
   /\b2160p\b/i,
   /\b4k\b/i,
@@ -64,132 +47,6 @@ export const RUNTIME_HEALTH_MIN_SUCCESS_RATE = 0.5;
 const RUNTIME_HEALTH_GOOD_SUCCESS_RATE = 0.75;
 /** Ignore tiny rate differences that would make otherwise-equal sources churn. */
 const RUNTIME_HEALTH_RATE_DEADBAND = 0.15;
-
-/**
- * Settings preferred quality → ranking / discovery target height.
- * `"auto"` starts at 1080p (same-stream ABR may still climb). Ultra is 2160.
- * The 1080p floor is still enforced by ranking tiers — Auto never prefers
- * known sub-HD over known HD.
- */
-export function resolvePreferredHeightTarget(
-  pref: "auto" | number | null | undefined
-): number {
-  if (pref == null || pref === "auto") return 1080;
-  return pref;
-}
-
-/** True when source metadata (maxHeight / ladder / label) claims ≥ target. */
-export function sourceMeetsHeight(
-  source: PlaybackSource,
-  targetHeight: number
-): boolean {
-  return sourceMaxHeight(source) >= targetHeight;
-}
-
-/**
- * IDs present in `current` but not yet seen in `previous`.
- * Used for the non-blocking "New source available" nudge (Change 3).
- */
-export function findNewSourceIds(
-  previousIds: ReadonlySet<string> | Iterable<string>,
-  current: ReadonlyArray<{ id: string }>
-): string[] {
-  const prev =
-    previousIds instanceof Set ? previousIds : new Set(previousIds);
-  const out: string[] = [];
-  for (const s of current) {
-    if (!prev.has(s.id)) out.push(s.id);
-  }
-  return out;
-}
-
-/**
- * Post-play quality upgrade (Change 12): only when **confirmed** decode height
- * is below the HD floor AND another non-failed source has **known** ≥floor
- * metadata. Never upgrades on unknown (0) height. Caller must also gate on
- * auto-selected source + once-per-session.
- */
-export function findQualityUpgradeSource(
-  current: PlaybackSource,
-  sources: PlaybackSource[],
-  confirmedPlayingHeight: number,
-  failedIds: ReadonlySet<string> | ReadonlyArray<string> = [],
-  options?: {
-    preferredProvider?: string | null;
-    preferredHeight?: "auto" | number | null;
-    hdFloor?: number;
-  }
-): PlaybackSource | null {
-  const floor = options?.hdFloor ?? HD_FLOOR_HEIGHT;
-  // Unknown (0) or already meeting floor → no upgrade.
-  if (confirmedPlayingHeight <= 0 || confirmedPlayingHeight >= floor) {
-    return null;
-  }
-
-  const failed =
-    failedIds instanceof Set ? failedIds : new Set(failedIds);
-
-  const candidates = sources.filter(
-    (s) =>
-      s.id !== current.id &&
-      !failed.has(s.id) &&
-      sourceMaxHeight(s) >= floor &&
-      // Never auto-upgrade to a release this browser can't decode (task 2).
-      isSourcePlayableHere(s)
-  );
-  if (!candidates.length) return null;
-
-  return pickDefaultSource(
-    candidates,
-    options?.preferredProvider,
-    options?.preferredHeight
-  );
-}
-
-/**
- * Merge a confirmed decode height into source metadata for badge honesty
- * (Change 10 — MP4 / native single-rendition). Never invents a multi-rung
- * ladder; multi-rendition adaptive sources keep their probed max/ladder
- * (playing height is not the source ceiling).
- */
-export function withDetectedSourceHeight(
-  source: PlaybackSource,
-  detectedHeight: number
-): PlaybackSource {
-  if (detectedHeight <= 0) return source;
-  if (isMultiRendition(source)) return source;
-  if ((source.maxHeight ?? 0) === detectedHeight) return source;
-  return { ...source, maxHeight: detectedHeight };
-}
-
-/**
- * Merge a client-measured background health probe into a source that has no
- * server-side probe yet (Server-list honesty — bounded background probing).
- * Never overwrites a probe the server already measured: the full-scrape
- * latency probe is authoritative real-CDN data; the client-side reachability
- * check only fills the gap so the Server list's health dot is never a
- * permanent "unknown" for a source the server never got around to probing.
- */
-export function withClientHealthProbe(
-  source: PlaybackSource,
-  probe: SourceProbeMetrics
-): PlaybackSource {
-  if (source.probe != null) return source;
-  return { ...source, probe };
-}
-
-/** Coarse latency → speedScore band for the client-side background health
- * probe (same 0-100 scale as the server's measured `speedScore`). Latency
- * thresholds are deliberately generous — this measures browser-observed
- * round trip to a proxied/CDN URL over a home connection, not a datacenter
- * link, so it should not out-penalize a merely-average connection. */
-export function speedScoreFromLatencyMs(ttfbMs: number): number {
-  if (ttfbMs <= 150) return 95;
-  if (ttfbMs <= 400) return 80;
-  if (ttfbMs <= 900) return 60;
-  if (ttfbMs <= 2000) return 40;
-  return 20;
-}
 
 export type SourceHealthState = "healthy" | "checking" | "weak";
 
@@ -236,29 +93,6 @@ function compareRuntimeHealth(
   }
   const rateDelta = bHealth.successRate - aHealth.successRate;
   return Math.abs(rateDelta) >= RUNTIME_HEALTH_RATE_DEADBAND ? rateDelta : 0;
-}
-
-/**
- * Non-active health classification for the Server list's dot indicator.
- * "checking" = no probe yet — unproven, but never disproven either, so it
- * renders neutrally rather than as broken (matches `autoPlayPool`'s "unknown
- * ranks above known sub-HD" honesty rule elsewhere in this file).
- * "weak" = soft-kept (failed segment verify), a probe that came back
- * unhealthy, or a hard runtime failure this session (`forceWeak`) — visibly
- * marked and sorted last by `sortSourcesForPicker`, but still manually
- * selectable (never silently hidden, just never auto-picked).
- */
-export function sourceHealthState(
-  source: PlaybackSource,
-  forceWeak = false
-): SourceHealthState {
-  if (forceWeak) return "weak";
-  if (isRuntimeSourceUnhealthy(source)) return "weak";
-  if (source.verified === false) return "weak";
-  if (source.probe?.ok === false) return "weak";
-  if (source.probe?.ok === true) return "healthy";
-  if (hasGoodRuntimeHealth(source)) return "healthy";
-  return "checking";
 }
 
 export function parseMaxHeight(text: string): number {
@@ -309,38 +143,6 @@ export function formatResolutionLabel(height: number): string {
   if (height >= 2160) return "4K";
   if (height > 0) return `${height}p`;
   return "Auto";
-}
-
-/**
- * Convert decoded raster dimensions to the familiar 16:9 quality tier.
- *
- * Cropped cinema encodes commonly decode at 1920×800/816/960 while still
- * carrying the full horizontal detail of a 1080p release. Treating the raw
- * height as 800/816/960 falsely triggered a post-play "HD upgrade" and tore
- * down healthy 1920-wide playback for label-only sources that could decode
- * as low as 720×360. Width establishes the nominal tier for landscape
- * video; portrait video uses its shorter horizontal edge.
- */
-export function decodedQualityHeight(width: number, height: number): number {
-  if (height <= 0) return 0;
-  if (width <= 0) return height;
-  if (height > width) return width;
-
-  const widthTier =
-    width >= 3_800
-      ? 2160
-      : width >= 2_500
-        ? 1440
-        : width >= 1_900
-          ? 1080
-          : width >= 1_260
-            ? 720
-            : width >= 840
-              ? 480
-              : width >= 630
-                ? 360
-                : 0;
-  return Math.max(height, widthTier);
 }
 
 /** Badge the source's real advertised height. Decode-incompatible releases
@@ -535,49 +337,6 @@ export function isSourcePlayableHere(source: PlaybackSource): boolean {
 }
 
 /**
- * When the user picks a remux-only debrid row, switch to a same-height
- * progressive sibling instead of waiting on the packer.
- *
- * Same height only — a Hades remux 4K must not be swapped for Kronos 1080.
- * No sibling at this tier → null so the remux pick stays (and prewarms).
- */
-export function findDirectDebridAlternative(
-  source: PlaybackSource,
-  roster: readonly PlaybackSource[]
-): PlaybackSource | null {
-  if (source.origin !== "debrid" || sourceDelivery(source) !== "remux") {
-    return null;
-  }
-  const height = sourceMaxHeight(source);
-  return (
-    roster.find((row) => {
-      if (row.origin !== "debrid" || row.id === source.id) return false;
-      if (sourceDelivery(row) !== "direct") return false;
-      const rowHeight = sourceMaxHeight(row);
-      if (height >= UHD_TIER_HEIGHT && rowHeight >= UHD_TIER_HEIGHT) return true;
-      return height > 0 && rowHeight === height;
-    }) ?? null
-  );
-}
-
-/**
- * Human-readable reason for inventory that exists but cannot be decoded on
- * this device. Keeping the release visible is important: otherwise the same
- * server response appears to contain 4K in Safari/webOS and no 4K in Chrome,
- * when the real difference is only the browser's codec support.
- */
-export function sourceUnavailableReason(source: PlaybackSource): string | null {
-  if (isSourcePlayableHere(source)) return null;
-  if (source.codec === "hevc" || isHevcSource(source)) {
-    return "HEVC is not supported by this browser";
-  }
-  if (source.codec === "av1") {
-    return "AV1 is not supported by this browser";
-  }
-  return "This video codec is not supported by this browser";
-}
-
-/**
  * Order between two delivery routes, as a comparator fragment
  * (negative = `a` first, 0 = no opinion).
  *
@@ -608,15 +367,6 @@ function compareDelivery(
 
 function hevcPenalty(): number {
   return browserSupportsHevc() ? 0 : 40;
-}
-
-/** Picker / dock label: "Aether · 1080p HLS" */
-export function formatSourcePickerLabel(source: PlaybackSource): string {
-  const name = source.label?.trim() || source.provider || "Source";
-  const badge = qualityBadge(source);
-  const type =
-    source.type === "dash" ? "DASH" : source.type === "mp4" ? "MP4" : "HLS";
-  return `${name} · ${badge} ${type}`;
 }
 
 function isHlsSource(source: PlaybackSource): boolean {
@@ -826,26 +576,6 @@ function compareInsufficientBitrate(a: PlaybackSource, b: PlaybackSource): numbe
   return aInsufficient - bInsufficient;
 }
 
-/** True only when `candidate` is a meaningfully richer encode at the same resolution. */
-export function isMeaningfullyRicherSource(
-  current: PlaybackSource,
-  candidate: PlaybackSource
-): boolean {
-  const height = sourceMaxHeight(current);
-  if (height !== sourceMaxHeight(candidate)) return false;
-  const currentRate = normalizedBitrate(current);
-  const candidateRate = normalizedBitrate(candidate);
-  const clearsRichnessThreshold =
-    currentRate > 0
-      ? candidateRate >= currentRate * BITRATE_RICHNESS_SWITCH_RATIO
-      : candidateRate >= unknownRateSwitchFloor(height);
-  return (
-    candidateRate > 0 &&
-    clearsRichnessThreshold &&
-    bitrateSustainabilityRank(candidate) >= 0
-  );
-}
-
 /** Bounded score contribution — richer encode scores higher inside its tier. */
 function bitrateScoreBonus(source: PlaybackSource): number {
   const rate = normalizedBitrate(source);
@@ -1005,15 +735,6 @@ function matchesPreference(source: PlaybackSource, pref: string): boolean {
   return false;
 }
 
-export function preferenceKey(source: PlaybackSource): string {
-  const serverLabel = source.label.trim();
-  const generic = ["hls", "dash", "mp4", "stream", "auto", "luna"];
-  if (serverLabel && !generic.includes(serverLabel.toLowerCase())) {
-    return `${source.provider}|${serverLabel}`;
-  }
-  return source.provider;
-}
-
 function isLunaSource(source: PlaybackSource): boolean {
   const p = source.provider.toLowerCase();
   const l = source.label.toLowerCase();
@@ -1036,30 +757,6 @@ export function isFastCdnSource(source: PlaybackSource): boolean {
     isSolsticeSource(source) ||
     isPulseSource(source)
   );
-}
-
-/**
- * True when `candidate` is a strict CDN upgrade from `current`.
- * Uses measured probe scores when present; else Luna → Solstice/Pulse name heuristic.
- */
-export function isFasterSource(current: PlaybackSource, candidate: PlaybackSource): boolean {
-  if (current.id === candidate.id) return false;
-  // "direct", not merely playable: this fires MID-PLAYBACK, and interrupting a
-  // stream that is already running to start a server-side rewrap is not an
-  // upgrade the viewer asked for. A remux only ever gets chosen up front, by
-  // pickDefaultSource, where its resolution gain is weighed openly.
-  if (
-    candidate.origin === "debrid" &&
-    current.origin !== "debrid" &&
-    sourceDelivery(candidate) === "direct"
-  ) {
-    return true;
-  }
-  if (candidate.probe?.ok && current.probe?.ok) {
-    return candidate.probe.speedScore >= current.probe.speedScore + 10;
-  }
-  if (candidate.probe?.ok && !current.probe?.ok) return true;
-  return isSlowCdnSource(current) && isFastCdnSource(candidate);
 }
 
 /**
@@ -1250,16 +947,6 @@ export function sourceRosterMaxHeight(sources: PlaybackSource[]): number {
   return sources.reduce((max, s) => Math.max(max, sourceMaxHeight(s)), 0);
 }
 
-/**
- * True when at least one source in the roster genuinely offers >=1080p.
- * Used to gate the auto-default (task 5: never silently default to a
- * sub-1080 source when an HD one exists) and the honest "1080p isn't
- * available for this title" notice (task 6) when none do.
- */
-export function sourceRosterMeetsHdFloor(sources: PlaybackSource[]): boolean {
-  return sourceRosterMaxHeight(sources) >= HD_FLOOR_HEIGHT;
-}
-
 export function pickDefaultSource(
   sources: PlaybackSource[],
   preferredProvider?: string | null,
@@ -1431,8 +1118,4 @@ export function pickDefaultSource(
     return scoreOrder !== 0 ? scoreOrder : a.id.localeCompare(b.id);
   });
   return sorted[0] ?? null;
-}
-
-export function hasResolutionHint(text: string): boolean {
-  return RESOLUTION_PATTERNS.some((re) => re.test(text));
 }
