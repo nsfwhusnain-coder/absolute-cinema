@@ -147,7 +147,6 @@ export function SeekBar({
           style={{ left: Math.min(Math.max(hover.x, 80), (barRef.current?.clientWidth ?? 160) - 80) }}
         >
           {frame && (
-            // eslint-disable-next-line @next/next/no-img-element
             <img src={frame} alt="" className="glass h-[90px] w-40 rounded-xl object-cover" />
           )}
           <span className="glass rounded-full px-2.5 py-1 text-xs font-medium tabular-nums text-white">
@@ -298,13 +297,11 @@ export function LoadingOverlay({
   return (
     <div className="absolute inset-0 z-10 flex items-center justify-center overflow-hidden bg-black">
       {backdrop && (
-        // eslint-disable-next-line @next/next/no-img-element
         <img src={backdrop} alt="" className="absolute inset-0 h-full w-full scale-105 object-cover opacity-40 blur-2xl" />
       )}
       <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-black/60" />
       <div className="relative flex max-w-lg flex-col items-center gap-5 px-6 text-center">
         {logo ? (
-          // eslint-disable-next-line @next/next/no-img-element
           <img src={logo} alt={title} className="max-h-28 w-auto max-w-[80vw] object-contain drop-shadow-2xl" />
         ) : (
           <h1 className="font-display text-3xl font-bold text-white drop-shadow sm:text-4xl">{title}</h1>

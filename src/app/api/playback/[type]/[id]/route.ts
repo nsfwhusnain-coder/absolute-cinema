@@ -188,7 +188,7 @@ export async function GET(
   const qualityHint = profilePreferences.playbackQuality;
   const decideOptions = {
     preferredHeight: qualityHint,
-    fourKStartup: profilePreferences.fourKStartup,
+    fourKStartup: "fast",
     remuxAvailable,
   } as const;
   const sourceCacheIdentity = {

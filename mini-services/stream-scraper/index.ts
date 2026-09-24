@@ -2844,6 +2844,11 @@ function rosterDiscoveryPending(sources: SourceEntry[]): boolean {
   );
 }
 
+/** The fast-path cache key for the same title and preferences as a full key. */
+function siblingFastKey(fullKey: string): string | null {
+  return fullKey.endsWith(":full") ? `${fullKey.slice(0, -":full".length)}:fast` : null;
+}
+
 function mergeIntoCache(key: string, entries: SourceEntry[]): ScrapeResult | null {
   const existing = getCached(key);
   const combined = [...(existing?.sources ?? []), ...entries];
@@ -3157,7 +3162,19 @@ const inflightScrapes = new Map<string, Promise<ScrapeResult>>();
 const inflightPrimaryResults = new Map<string, ScrapeResult>();
 const PRIMARY_POLL_MS = 100;
 
-async function awaitPrimaryOrDone(titleId: string, pending: Promise<ScrapeResult>): Promise<ScrapeResult> {
+/**
+ * How long a fast request rides on an in-flight scrape before running its own
+ * quick race. The full scrape's first stage can take several seconds when a
+ * slow provider holds it, while the fast race answers in one or two.
+ */
+const FAST_COALESCE_WAIT_MS = 2_000;
+
+async function awaitPrimaryOrDone(
+  titleId: string,
+  pending: Promise<ScrapeResult>,
+  maxWaitMs = Number.POSITIVE_INFINITY
+): Promise<ScrapeResult | null> {
+  const deadline = Date.now() + maxWaitMs;
   let done: ScrapeResult | null = null;
   pending.then(
     (result) => {
@@ -3170,6 +3187,7 @@ async function awaitPrimaryOrDone(titleId: string, pending: Promise<ScrapeResult
   while (!done) {
     const primary = inflightPrimaryResults.get(titleId);
     if (primary?.sources.length) return primary;
+    if (Date.now() >= deadline) return null;
     await new Promise((resolve) => setTimeout(resolve, PRIMARY_POLL_MS));
   }
   return done;
@@ -3309,8 +3327,8 @@ async function scrapeStream(
   if (!options.noCache) {
     const pending = inflightScrapes.get(titleId);
     if (pending) {
-      const shared = options.fast ? await awaitPrimaryOrDone(titleId, pending) : await pending;
-      if (shared.sources.length) {
+      const shared = options.fast ? await awaitPrimaryOrDone(titleId, pending, FAST_COALESCE_WAIT_MS) : await pending;
+      if (shared?.sources.length) {
         logAt("info", `[cache] coalesced ${key} onto in-flight ${titleId}`);
         // A primary result stays partial so the client keeps polling for the
         // enriched roster; a finished scrape is final.
@@ -3330,7 +3348,9 @@ async function scrapeStream(
     scrapeStarted,
     expectedDurationPromise
   );
-  inflightScrapes.set(titleId, unresolved);
+  // A fast race that gave up waiting runs alongside the in-flight scrape;
+  // later requests keep coalescing onto that one.
+  if (!inflightScrapes.has(titleId)) inflightScrapes.set(titleId, unresolved);
   try {
     return await unresolved;
   } finally {
@@ -3467,6 +3487,12 @@ async function executeUnresolvedScrape(
     {
       firstHitGraceMs: FULL_FIRST_GRACE_MS,
       maxWaitMs: FULL_API_MAX_WAIT_MS,
+      // Share each hit with the fast cache right away: the player re-asks the
+      // fast endpoint while this resolve is still settling and probing.
+      onEntries: (_provider, entries) => {
+        const fastKey = siblingFastKey(key);
+        if (fastKey) mergeIntoCache(fastKey, entries);
+      },
       onLateEntries: (provider, entries) => {
         const late = mergeIntoCache(key, entries);
         if (late) {

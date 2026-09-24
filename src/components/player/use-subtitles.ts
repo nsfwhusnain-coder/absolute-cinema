@@ -50,21 +50,6 @@ export function useSubtitles(
     return out;
   }, []);
 
-  const refreshOptions = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    const options: SubtitleOption[] = [
-      ...embeddedTracks(video).map((e) => e.option),
-      ...external.map((x) => ({ id: x.id, label: x.label, language: x.language, origin: "external" as const })),
-    ];
-    store.getState().set({ subtitles: options });
-    if (!userChose.current && store.getState().activeSubtitle === null && preference !== "off") {
-      const pick = options.find((o) => isEnglish(o.language) && o.origin === "embedded") ?? options.find((o) => isEnglish(o.language));
-      if (pick) select(pick.id, false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoRef, external, preference, embeddedTracks, store]);
-
   const select = useCallback(
     (id: string | null, byUser = true) => {
       const video = videoRef.current;
@@ -105,6 +90,20 @@ export function useSubtitles(
     },
     [videoRef, external, embeddedTracks, store]
   );
+
+  const refreshOptions = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const options: SubtitleOption[] = [
+      ...embeddedTracks(video).map((e) => e.option),
+      ...external.map((x) => ({ id: x.id, label: x.label, language: x.language, origin: "external" as const })),
+    ];
+    store.getState().set({ subtitles: options });
+    if (!userChose.current && store.getState().activeSubtitle === null && preference !== "off") {
+      const pick = options.find((o) => isEnglish(o.language) && o.origin === "embedded") ?? options.find((o) => isEnglish(o.language));
+      if (pick) select(pick.id, false);
+    }
+  }, [videoRef, external, preference, embeddedTracks, store, select]);
 
   useEffect(() => {
     const video = videoRef.current;

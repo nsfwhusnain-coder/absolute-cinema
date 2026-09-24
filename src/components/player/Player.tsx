@@ -218,11 +218,12 @@ export function Player(props: PlayerProps) {
   const playable = useMemo(() => playableHere(props.sources, props.remuxAvailable), [props.sources, props.remuxAvailable]);
   const heights = useMemo(() => qualityChoices(props.sources, props.remuxAvailable), [props.sources, props.remuxAvailable]);
   const nowHeight = state.decodedHeight ? normalizeHeight(state.decodedHeight) : 0;
+  // Duration only feeds size estimates, so whole minutes are precise enough and
+  // avoid rebuilding the list on every timeupdate.
+  const durationMinutes = Math.round(state.duration / 60);
   const downloads = useMemo(
-    () => buildDownloadOptions(props.sources, state.duration).filter((o) => o.downloadable),
-    // Duration only matters for size estimates; recomputing per second is wasteful.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [props.sources, Math.round(state.duration / 60)]
+    () => buildDownloadOptions(props.sources, durationMinutes * 60).filter((o) => o.downloadable),
+    [props.sources, durationMinutes]
   );
   const downloadHref = (option: (typeof downloads)[number]) => {
     const params = new URLSearchParams({
@@ -269,7 +270,6 @@ export function Player(props: PlayerProps) {
         style={videoFilter ? { filter: videoFilter } : undefined}
         playsInline
         preload="auto"
-        crossOrigin="anonymous"
         x-webkit-airplay="allow"
       />
       <video ref={scoutRef} className="hidden" muted playsInline aria-hidden />

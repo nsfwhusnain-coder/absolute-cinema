@@ -31,6 +31,13 @@ const FULL_TIMEOUT_MS = 45_000;
 const POLL_INTERVAL_MS = 3_000;
 /** …but stop after this long either way. */
 const POLL_WINDOW_MS = 30_000;
+/**
+ * Until the full answer lands, re-ask the fast endpoint this often. Providers
+ * that answer after the first reply are merged into the server's fast cache,
+ * so each re-ask is a cheap cache hit that brings them to the player seconds
+ * before the full resolve (which also waits on probes) returns.
+ */
+const FAST_REPOLL_MS = 2_000;
 
 export function playbackQueryKey(mediaType: MediaType, tmdbId: number, season: number | undefined, episode: number | undefined, fast: boolean) {
   return ["playback", mediaType, tmdbId, season, episode, fast ? "fast" : "full", getPlaybackDiscoveryPreferenceKey()] as const;
@@ -115,6 +122,8 @@ export function useStreams({ tmdbId, mediaType, season, episode, enabled = true 
     staleTime: 0,
     refetchOnMount: "always",
     refetchOnWindowFocus: false,
+    refetchInterval: () =>
+      qc.getQueryState(playbackQueryKey(mediaType, tmdbId, season, episode, false))?.dataUpdatedAt ? false : FAST_REPOLL_MS,
     ...(seed ? { initialData: seed.data, initialDataUpdatedAt: seed.updatedAt } : {}),
   });
 

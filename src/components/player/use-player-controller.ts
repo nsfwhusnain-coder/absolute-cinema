@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, type RefObject } from "react";
 import type { PlaybackSource } from "@/lib/playback/types";
 import {
   initialOrchestratorState,
+  onAwaitRefresh,
   onFirstFrame,
   onPlaybackError,
   onRetryAll,
@@ -22,10 +23,12 @@ import { usePlayerState } from "./store";
 
 /** No first frame within this long means the source is not going to start. */
 const START_TIMEOUT_MS = 20_000;
-/** Remux sessions open, index and produce their first segment before a frame exists. */
-const REMUX_START_TIMEOUT_MS = 45_000;
-/** Buffering this long with no progress while playing counts as a failure. */
-const STALL_TIMEOUT_MS = 25_000;
+/** Remux sessions open, index and produce their first segment before a frame exists (cold 4K measured at up to ~11s). */
+const REMUX_START_TIMEOUT_MS = 25_000;
+/** Buffering this long with no progress while playing means the server is too slow. */
+const STALL_TIMEOUT_MS = 12_000;
+/** A retry of a source that was already playing gets less patience than a cold start. */
+const RECOVERY_TIMEOUT_MS = 15_000;
 const PROGRESS_REPORT_MS = 10_000;
 /** Watch time that proves a source works (feeds per-title source memory). */
 const SUSTAINED_PLAY_MS = 90_000;
@@ -54,6 +57,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
   const engineRef = useRef<MediaEngine | null>(null);
   const startTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stallTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recheckTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachAbort = useRef<AbortController | null>(null);
   const attemptStartedAt = useRef(0);
   const playedOnSourceMs = useRef(0);
@@ -62,6 +66,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
   const lastTimeUpdate = useRef(0);
   const positionRef = useRef(options.initialTime);
   const remuxDuration = useRef<number | null>(null);
+  /** One automatic roster refresh is tried before an error is shown. */
+  const autoRefreshed = useRef(false);
   const store = usePlayerState;
 
   const sourceById = useCallback((id: string | null) => optionsRef.current.sources.find((s) => s.id === id), []);
@@ -74,8 +80,10 @@ export function usePlayerController(options: PlayerControllerOptions) {
   const clearTimers = useCallback(() => {
     if (startTimer.current) clearTimeout(startTimer.current);
     if (stallTimer.current) clearTimeout(stallTimer.current);
+    if (recheckTimer.current) clearTimeout(recheckTimer.current);
     startTimer.current = null;
     stallTimer.current = null;
+    recheckTimer.current = null;
   }, []);
 
   const reportSustained = useCallback(() => {
@@ -109,21 +117,21 @@ export function usePlayerController(options: PlayerControllerOptions) {
   );
 
   const playbackFailed = useCallback(
-    (reason: string) => {
+    (reason: string, kind: "error" | "stall" = "error") => {
       const state = orchestrator.current;
       if (state.phase === "starting") return startFailed(reason);
       if (state.phase !== "playing" && state.phase !== "recovering") return;
       const source = sourceById(state.activeId);
       if (source) emitPlayerFeedback({ event: "stall", sourceId: source.id, provider: source.provider, reason, engine: engineRef.current?.kind });
       if (state.retries >= 1) optionsRef.current.onRefreshSources();
-      apply(onPlaybackError(state, optionsRef.current.sources, reason, ranker(), Date.now()));
+      apply(onPlaybackError(state, optionsRef.current.sources, reason, ranker(), Date.now(), kind));
     },
     [apply, ranker, sourceById, startFailed]
   );
 
   const armStall = useCallback(() => {
     if (stallTimer.current) clearTimeout(stallTimer.current);
-    stallTimer.current = setTimeout(() => playbackFailed("stall"), STALL_TIMEOUT_MS);
+    stallTimer.current = setTimeout(() => playbackFailed("stall", "stall"), STALL_TIMEOUT_MS);
   }, [playbackFailed]);
 
   const execute = useCallback(
@@ -131,10 +139,25 @@ export function usePlayerController(options: PlayerControllerOptions) {
       const s = store.getState();
       if (command.type === "wait") {
         s.set({ failureMessage: null });
+        if (command.recheckInMs) {
+          if (recheckTimer.current) clearTimeout(recheckTimer.current);
+          recheckTimer.current = setTimeout(() => {
+            recheckTimer.current = null;
+            const { sources, discovering } = optionsRef.current;
+            apply(onRoster(orchestrator.current, sources, discovering, ranker(), Date.now()));
+          }, command.recheckInMs);
+        }
         return;
       }
       if (command.type === "fail") {
         clearTimers();
+        if (!autoRefreshed.current) {
+          autoRefreshed.current = true;
+          orchestrator.current = onAwaitRefresh(orchestrator.current);
+          s.set({ phase: "resolving" });
+          optionsRef.current.onRefreshSources();
+          return;
+        }
         engineRef.current?.destroy();
         s.set({ failureMessage: command.message, buffering: false, playing: false });
         return;
@@ -160,11 +183,13 @@ export function usePlayerController(options: PlayerControllerOptions) {
         if (abort.signal.aborted) return;
         remuxDuration.current = resolved.durationS ?? null;
         s.set({ dynamicRange: resolved.dynamicRange ?? "SDR" });
+        const recovering = orchestrator.current.phase === "recovering";
         startTimer.current = setTimeout(
-          () => (orchestrator.current.phase === "starting" ? startFailed("timeout") : playbackFailed("timeout")),
-          resolved.remux ? REMUX_START_TIMEOUT_MS : START_TIMEOUT_MS
+          () => (orchestrator.current.phase === "starting" ? startFailed("timeout") : playbackFailed("timeout", "stall")),
+          resolved.remux ? REMUX_START_TIMEOUT_MS : recovering ? RECOVERY_TIMEOUT_MS : START_TIMEOUT_MS
         );
-        await engine.load(resolved.playable, startAt);
+        const choice = store.getState().qualityChoice;
+        await engine.load(resolved.playable, startAt, choice === "auto" ? undefined : choice);
         if (abort.signal.aborted) return;
         video.playbackRate = s.rate;
         video.play().catch((err: unknown) => {
@@ -181,7 +206,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
         else playbackFailed(reason);
       }
     },
-    [clearTimers, playbackFailed, reportSustained, sourceById, startFailed, store, videoRef]
+    [apply, clearTimers, playbackFailed, ranker, reportSustained, sourceById, startFailed, store, videoRef]
   );
   executeRef.current = execute;
 

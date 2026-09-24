@@ -32,11 +32,25 @@ export function playableHere(sources: readonly PlaybackSource[], remuxAvailable:
  * source; a height narrows to sources at that height (or the closest below)
  * before ranking, so choosing 1080p never quietly starts a 4K stream.
  */
+/** The server has seen this source fail recently: its probe failed or its provider is cooling down. */
+export function isSuspect(source: PlaybackSource, now = Date.now()): boolean {
+  if (source.probe?.ok === false) return true;
+  return (source.runtimeHealth?.cooldownUntil ?? 0) > now;
+}
+
+/** A start below this waits briefly for something better (see LOW_QUALITY_GRACE_MS). */
+const GOOD_START_HEIGHT = 1080;
+
 export function createRanker(quality: "auto" | number, remuxAvailable: boolean, preferredProvider: string): Ranker {
   return {
+    targetHeight: quality === "auto" ? GOOD_START_HEIGHT : Math.min(quality, GOOD_START_HEIGHT),
+    isSuspect: (source) => isSuspect(source),
     pick(candidates) {
-      const pool = playableHere(candidates, remuxAvailable);
-      if (!pool.length) return null;
+      const playable = playableHere(candidates, remuxAvailable);
+      if (!playable.length) return null;
+      // Sources the server has seen failing are a last resort, not a first try.
+      const healthy = playable.filter((s) => !isSuspect(s));
+      const pool = healthy.length ? healthy : playable;
       let narrowed = pool;
       if (quality !== "auto") {
         const heights = [...new Set(pool.map(sourceMaxHeight))].filter((h) => h > 0 && h <= quality);
@@ -81,7 +95,7 @@ export interface ResolvedPlayable {
   remux: boolean;
 }
 
-const VOD_OPEN_TIMEOUT_MS = 35_000;
+const VOD_OPEN_TIMEOUT_MS = 15_000;
 
 /** Turns a source into something the engine can load (opening a remux session when needed). */
 export async function resolvePlayable(

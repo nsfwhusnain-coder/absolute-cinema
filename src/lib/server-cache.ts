@@ -58,39 +58,18 @@ export async function cachedFetch<T>(
 
 /**
  * Per-user playback response cache (proxy URLs embed HLS session ids).
- * Complete resolves: 3m warm. Empty partial: short. Playable partial: 45s.
+ * Complete resolves: 3m warm. Partial answers only absorb duplicate and
+ * parallel requests: the player re-asks every 2-3s while discovery runs, and
+ * each re-ask must reach the enriched scraper cache.
  */
 const playbackStore = new Map<string, { value: unknown; until: number }>();
 /** Match the 3m scraper TTL so expired signed links are never kept for 20m. */
 export const PLAYBACK_TTL_MS = 3 * 60 * 1000;
-/** Empty partial — short so a genuine soft-miss hunt can advance. */
-export const PLAYBACK_PARTIAL_TTL_MS = 1_500;
-/** Partial with playable sources — long enough that a stray refetch is a cache hit. */
-export const PLAYBACK_PARTIAL_WITH_SOURCES_TTL_MS = 45 * 1000;
-/**
- * Partial AND still thin. The client polls such a roster every 5s
- * (`watchPlaybackPollInterval`), so caching the thin answer for the full 45s
- * turned every one of those polls into a cache hit and the viewer stayed on the
- * cold roster for the whole session. Short enough that a poll re-reads the
- * enriched scraper cache, long enough to absorb duplicate/parallel requests.
- */
-export const PLAYBACK_PARTIAL_THIN_TTL_MS = 6 * 1000;
-/** Mirrors the scraper's PARTIAL_CLEAR_MIN / client SOURCE_POLL_HEALTHY_MIN. */
-export const PLAYBACK_THIN_ROSTER_MAX = 5;
+/** Any partial answer: shorter than the client's 2s re-ask, so each re-ask sees new sources. */
+export const PLAYBACK_PARTIAL_TTL_MS = 1_000;
 
-export function playbackResponseTtlMs(result: {
-  partial?: boolean;
-  sources?: unknown[] | null;
-  streamUrl?: string | null;
-}): number {
-  const sourceCount = result.sources?.length ?? 0;
-  const hasSources = Boolean(sourceCount > 0 || result.streamUrl);
-  if (result.partial && !hasSources) return PLAYBACK_PARTIAL_TTL_MS;
-  if (result.partial && sourceCount < PLAYBACK_THIN_ROSTER_MAX) {
-    return PLAYBACK_PARTIAL_THIN_TTL_MS;
-  }
-  if (result.partial) return PLAYBACK_PARTIAL_WITH_SOURCES_TTL_MS;
-  return PLAYBACK_TTL_MS;
+export function playbackResponseTtlMs(result: { partial?: boolean }): number {
+  return result.partial ? PLAYBACK_PARTIAL_TTL_MS : PLAYBACK_TTL_MS;
 }
 
 export function getCachedPlayback<T>(key: string): T | null {

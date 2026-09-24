@@ -30,6 +30,8 @@ export async function raceProviderArms<T>(
     firstHitGraceMs: number;
     maxWaitMs: number;
     onLateEntries?: (provider: string, entries: T[]) => void;
+    /** Every hit as it lands, on time or late (for progressive publishing). */
+    onEntries?: (provider: string, entries: T[]) => void;
     onOutcome?: (outcome: ProviderRaceOutcome) => void;
   }
 ): Promise<ProviderRaceResult<T>> {
@@ -77,6 +79,7 @@ export async function raceProviderArms<T>(
             late,
           });
           if (!result.length) return;
+          options.onEntries?.(arm.provider, result);
           if (late) {
             options.onLateEntries?.(arm.provider, result);
             return;

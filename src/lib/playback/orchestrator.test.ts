@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { PlaybackSource } from "./types";
 import {
+  LOW_QUALITY_GRACE_MS,
   PLAYED_FAIL_COOLDOWN_MS,
   START_FAIL_COOLDOWN_MS,
   initialOrchestratorState,
@@ -10,6 +11,7 @@ import {
   onRoster,
   onStartFailed,
   onUserSelect,
+  onAwaitRefresh,
   type OrchestratorState,
   type Ranker,
 } from "./orchestrator";
@@ -26,6 +28,42 @@ function playing(on: PlaybackSource, sources = [A, B, C]): OrchestratorState {
 }
 
 describe("orchestrator", () => {
+  describe("low-quality start grace", () => {
+    const low: PlaybackSource = { ...src("low"), quality: "480p", label: "low • 480p" };
+    const hd: PlaybackSource = { ...src("hd"), quality: "1080p" };
+    const picky: Ranker = { pick: (c) => [...c].sort((x, y) => parseInt(y.quality) - parseInt(x.quality))[0] ?? null, targetHeight: 1080 };
+
+    it("waits briefly while only a low-quality source has been found", () => {
+      const { state, command } = onRoster(initialOrchestratorState, [low], true, picky, T0);
+      expect(command).toEqual({ type: "wait", recheckInMs: LOW_QUALITY_GRACE_MS });
+      expect(state.firstCandidateAt).toBe(T0);
+      const later = onRoster(state, [low], true, picky, T0 + 2_000);
+      expect(later.command).toEqual({ type: "wait", recheckInMs: LOW_QUALITY_GRACE_MS - 2_000 });
+    });
+
+    it("starts the better source if it arrives within the grace", () => {
+      const waiting = onRoster(initialOrchestratorState, [low], true, picky, T0).state;
+      expect(onRoster(waiting, [low, hd], true, picky, T0 + 1_000).command).toMatchObject({ type: "attach", sourceId: "hd" });
+    });
+
+    it("starts the low-quality source once the grace runs out or the search ends", () => {
+      const waiting = onRoster(initialOrchestratorState, [low], true, picky, T0).state;
+      expect(onRoster(waiting, [low], true, picky, T0 + LOW_QUALITY_GRACE_MS).command).toMatchObject({ type: "attach", sourceId: "low" });
+      expect(onRoster(waiting, [low], false, picky, T0 + 1).command).toMatchObject({ type: "attach", sourceId: "low" });
+    });
+
+    it("waits briefly to replace a source the server has seen failing", () => {
+      const flaky: Ranker = { ...picky, isSuspect: (s) => s.id === "hd" };
+      expect(onRoster(initialOrchestratorState, [hd], true, flaky, T0).command.type).toBe("wait");
+      expect(onRoster(initialOrchestratorState, [hd], false, flaky, T0).command).toMatchObject({ type: "attach", sourceId: "hd" });
+    });
+
+    it("does not wait when the viewer asked for low quality", () => {
+      const saver: Ranker = { ...picky, targetHeight: 480 };
+      expect(onRoster(initialOrchestratorState, [low], true, saver, T0).command).toMatchObject({ type: "attach", sourceId: "low" });
+    });
+  });
+
   it("starts on the best source when the roster arrives", () => {
     const { state, command } = onRoster(initialOrchestratorState, [A, B], false, ranker, T0);
     expect(state.phase).toBe("starting");
@@ -99,4 +137,37 @@ describe("orchestrator", () => {
     const reset = onRetryAll(failed.state);
     expect(onRoster(reset, [A], false, ranker, T0).command).toMatchObject({ sourceId: "a" });
   });
+
+  it("upgrades once to a higher resolution that arrives before the first frame", () => {
+    const hd = { ...src("hd"), maxHeight: 1080 };
+    const uhd = { ...src("uhd"), maxHeight: 2160 };
+    const starting = onRoster(initialOrchestratorState, [hd], true, ranker, T0).state;
+    const byHeight: Ranker = { pick: (c) => [...c].sort((a, b) => (b.maxHeight ?? 0) - (a.maxHeight ?? 0))[0] ?? null };
+    const upgraded = onRoster(starting, [hd, uhd], true, byHeight, T0);
+    expect(upgraded.command).toMatchObject({ type: "attach", sourceId: "uhd" });
+    // Not twice, and never once playing.
+    const again = onRoster(upgraded.state, [hd, uhd, { ...src("x"), maxHeight: 4320 }], true, byHeight, T0);
+    expect(again.command.type).toBe("none");
+    const playingState = onFirstFrame(starting);
+    expect(onRoster(playingState, [hd, uhd], true, byHeight, T0).command.type).toBe("none");
+  });
+
+  it("can wait for a refreshed roster instead of failing, keeping cooldowns", () => {
+    const failed = onStartFailed(onRoster(initialOrchestratorState, [A], false, ranker, T0).state, [A], "x", false, ranker, T0);
+    const waiting = onAwaitRefresh(failed.state);
+    expect(waiting.phase).toBe("resolving");
+    expect(onRoster(waiting, [A, B], false, ranker, T0).command).toMatchObject({ sourceId: "b" });
+  });
+
+  it("moves straight to another server when the current one stalls", () => {
+    const stalled = onPlaybackError(playing(A), [A, B], "stall", ranker, T0, "stall");
+    expect(stalled.command).toMatchObject({ type: "attach", sourceId: "b", keepPosition: true });
+    expect((stalled.command as { notice?: string }).notice).toContain("too slow");
+  });
+
+  it("retries a stalled server when it is the only one", () => {
+    const stalled = onPlaybackError(playing(A, [A]), [A], "stall", ranker, T0, "stall");
+    expect(stalled.command).toMatchObject({ type: "attach", sourceId: "a", keepPosition: true });
+  });
 });
+

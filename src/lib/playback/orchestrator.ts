@@ -2,12 +2,17 @@
  * Source orchestration for the player — a small, pure state machine.
  *
  * Rules (the "it just plays" contract):
- *  - Start on the best source that can play on this device.
+ *  - Start on the best source that can play on this device. While the search
+ *    is still running and only low-quality or known-unreliable sources have
+ *    turned up, wait a few seconds for a better one: whatever starts is kept
+ *    for the whole title.
  *  - Once a source is playing it stays: new sources arriving, better ones
  *    included, never cause an automatic switch.
- *  - A failure while playing first retries the SAME source at the same
- *    position (twice). Only after that does playback move to the next source,
- *    still at the same position.
+ *  - An error while playing (a dropped connection, a decode hiccup) first
+ *    retries the SAME source at the same position, twice, before moving on.
+ *  - A stall (buffering that does not recover) means the server is too slow:
+ *    playback moves straight to the next comparable source at the same
+ *    position, and only retries the same one when there is nothing else.
  *  - A failed source cools down for a while; it is never marked permanently
  *    dead, and one that already played in this session cools down briefly.
  *  - A source the viewer picked by hand is honoured; if it fails, playback
@@ -23,6 +28,8 @@ export type Phase = "resolving" | "starting" | "playing" | "recovering" | "faile
 export const START_FAIL_COOLDOWN_MS = 90_000;
 export const PLAYED_FAIL_COOLDOWN_MS = 30_000;
 export const SAME_SOURCE_RETRIES = 2;
+/** Longest a start waits for a better source than the ones found so far. */
+export const LOW_QUALITY_GRACE_MS = 5_000;
 
 export interface SourceHealth {
   failures: number;
@@ -42,17 +49,25 @@ export interface OrchestratorState {
   everPlayed: boolean;
   /** Last user-visible reason for a failure/switch. */
   lastReason: string | null;
+  /** A better source already replaced the one being started once. */
+  upgradedBeforeStart: boolean;
+  /** When the first playable source turned up (for the low-quality grace). */
+  firstCandidateAt: number | null;
 }
 
 export type Command =
   | { type: "attach"; sourceId: string; keepPosition: boolean; refresh: boolean; notice?: string }
-  | { type: "wait" }
+  | { type: "wait"; recheckInMs?: number }
   | { type: "fail"; message: string }
   | { type: "none" };
 
 export interface Ranker {
   /** Best source to start among `candidates` (already filtered for health). */
   pick(candidates: readonly PlaybackSource[]): PlaybackSource | null;
+  /** Height worth waiting briefly for when only lower ones have been found. */
+  targetHeight?: number;
+  /** Known-unreliable sources are also worth waiting briefly to replace. */
+  isSuspect?(source: PlaybackSource): boolean;
 }
 
 export const initialOrchestratorState: OrchestratorState = {
@@ -63,6 +78,8 @@ export const initialOrchestratorState: OrchestratorState = {
   pinned: false,
   everPlayed: false,
   lastReason: null,
+  upgradedBeforeStart: false,
+  firstCandidateAt: null,
 };
 
 export function isCoolingDown(health: SourceHealth | undefined, now: number): boolean {
@@ -78,6 +95,12 @@ function eligible(state: OrchestratorState, sources: readonly PlaybackSource[], 
 function recordFailure(state: OrchestratorState, id: string, now: number): Record<string, SourceHealth> {
   const prev = state.health[id] ?? { failures: 0, lastFailAt: 0, played: false };
   return { ...state.health, [id]: { ...prev, failures: prev.failures + 1, lastFailAt: now } };
+}
+
+function heightOf(source: PlaybackSource): number {
+  if (source.maxHeight && source.maxHeight > 0) return source.maxHeight;
+  const parsed = Number.parseInt(source.quality, 10);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function label(source: PlaybackSource | undefined): string {
@@ -99,6 +122,12 @@ export function onRoster(
 ): Transition {
   if (state.phase === "resolving" || state.phase === "failed") {
     const best = ranker.pick(eligible(state, sources, now));
+    const weak = best && (heightOf(best) < (ranker.targetHeight ?? 0) || ranker.isSuspect?.(best) === true);
+    if (best && weak && discovering && state.phase === "resolving" && !state.everPlayed) {
+      const since = state.firstCandidateAt ?? now;
+      const left = LOW_QUALITY_GRACE_MS - (now - since);
+      if (left > 0) return { state: { ...state, firstCandidateAt: since }, command: { type: "wait", recheckInMs: left } };
+    }
     if (best) {
       return {
         state: { ...state, phase: "starting", activeId: best.id, retries: 0, lastReason: null },
@@ -119,6 +148,19 @@ export function onRoster(
   // The active source vanished from a refreshed roster before it started.
   if (state.phase === "starting" && state.activeId && !sources.some((s) => s.id === state.activeId)) {
     return onStartFailed(state, sources, "source withdrawn", discovering, ranker, now);
+  }
+  // Nothing is on screen yet, so a clearly better source that has just
+  // arrived can replace the one still loading at no cost. Once only, and
+  // never after the first frame or against the viewer's own pick.
+  if (state.phase === "starting" && !state.everPlayed && !state.pinned && !state.upgradedBeforeStart && state.activeId) {
+    const active = sources.find((s) => s.id === state.activeId);
+    const best = ranker.pick(eligible(state, sources, now));
+    if (active && best && best.id !== active.id && heightOf(best) > heightOf(active)) {
+      return {
+        state: { ...state, activeId: best.id, upgradedBeforeStart: true },
+        command: { type: "attach", sourceId: best.id, keepPosition: false, refresh: false },
+      };
+    }
   }
   return { state, command: { type: "none" } };
 }
@@ -170,11 +212,14 @@ export function onPlaybackError(
   sources: readonly PlaybackSource[],
   reason: string,
   ranker: Ranker,
-  now: number
+  now: number,
+  kind: "error" | "stall" = "error"
 ): Transition {
   const id = state.activeId;
   if (!id) return { state, command: { type: "none" } };
-  if (state.retries < SAME_SOURCE_RETRIES) {
+  const alternative = ranker.pick(eligible(state, sources, now, id));
+  const retryFirst = kind === "error" || !alternative;
+  if (retryFirst && state.retries < SAME_SOURCE_RETRIES) {
     return {
       state: { ...state, phase: "recovering", retries: state.retries + 1, lastReason: reason },
       command: { type: "attach", sourceId: id, keepPosition: true, refresh: state.retries > 0 },
@@ -183,7 +228,7 @@ export function onPlaybackError(
   const health = recordFailure(state, id, now);
   const next: OrchestratorState = { ...state, health, retries: 0, pinned: false, lastReason: reason };
   const current = sources.find((s) => s.id === id);
-  const best = ranker.pick(eligible(next, sources, now, id));
+  const best = kind === "stall" ? alternative : ranker.pick(eligible(next, sources, now, id));
   if (best) {
     return {
       state: { ...next, phase: "starting", activeId: best.id },
@@ -192,7 +237,10 @@ export function onPlaybackError(
         sourceId: best.id,
         keepPosition: true,
         refresh: false,
-        notice: `${label(current)} stopped responding — continuing on ${label(best)}`,
+        notice:
+          kind === "stall"
+            ? `${label(current)} was too slow — continuing on ${label(best)}`
+            : `${label(current)} stopped responding — continuing on ${label(best)}`,
       },
     };
   }
@@ -221,7 +269,12 @@ export function onUserSelect(state: OrchestratorState, sourceId: string): Transi
 
 /** "Try again" after a hard failure: forget cooldowns and start over. */
 export function onRetryAll(state: OrchestratorState): OrchestratorState {
-  return { ...state, phase: "resolving", activeId: null, health: {}, retries: 0, pinned: false };
+  return { ...state, phase: "resolving", activeId: null, health: {}, retries: 0, pinned: false, upgradedBeforeStart: false, firstCandidateAt: null };
+}
+
+/** Wait for a refreshed roster instead of failing (sources that failed stay cooled down). */
+export function onAwaitRefresh(state: OrchestratorState): OrchestratorState {
+  return { ...state, phase: "resolving", activeId: null };
 }
 
 function failureMessage(state: OrchestratorState): string {

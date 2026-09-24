@@ -44,7 +44,7 @@ const RUN_IDLE_MS = 3 * 60 * 1000;
 /** Whole sessions (and their files) are removed after this long unused. */
 const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
 const SEGMENT_WAIT_MS = 45_000;
-const INIT_WAIT_MS = 30_000;
+const INIT_WAIT_MS = 20_000;
 const POLL_MS = 100;
 const MAX_RUNS_PER_SESSION = 2;
 const MAX_FAILED_RUNS_PER_SEGMENT = 2;
