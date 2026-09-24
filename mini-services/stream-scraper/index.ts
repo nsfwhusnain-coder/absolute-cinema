@@ -3335,6 +3335,13 @@ async function scrapeStream(
         const fromPrimary = shared === inflightPrimaryResults.get(titleId);
         return { ...shared, partial: fromPrimary ? true : undefined };
       }
+      // While we waited, the in-flight resolve may have published hits into
+      // this fast cache; answer with those rather than racing again.
+      const published = options.fast ? getCached(key) : null;
+      if (published?.sources.length) {
+        logAt("info", `[cache] fast ${key} answered from in-flight hits (${published.sources.length})`);
+        return { ...published, partial: true };
+      }
     }
   }
 
