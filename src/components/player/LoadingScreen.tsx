@@ -198,7 +198,7 @@ export function LoadingScreen({
       aria-label={`Loading ${displayTitle}. ${phaseCopy}`}
     >
       {washSrc ? (
-        // eslint-disable-next-line @next/next/no-img-element
+         
         <img src={washSrc} alt="" className="bloom-wash" draggable={false} />
       ) : null}
       <div className="bloom-aurora" aria-hidden />
@@ -209,7 +209,7 @@ export function LoadingScreen({
           <div className="bloom-card" data-art={artReady ? "ready" : "loading"}>
             <span className="bloom-card-sheen" aria-hidden />
             {previewSrc && previewSrc !== posterSrc ? (
-              // eslint-disable-next-line @next/next/no-img-element
+               
               <img
                 src={previewSrc}
                 alt=""
@@ -217,7 +217,7 @@ export function LoadingScreen({
                 draggable={false}
               />
             ) : null}
-            {/* eslint-disable-next-line @next/next/no-img-element */}
+            { }
             <img
               src={posterSrc}
               alt=""

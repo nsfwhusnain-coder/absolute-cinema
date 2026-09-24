@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { PRIMARY_NAV, isNavPathActive } from "@/lib/nav";
 import { NavLettermark } from "@/components/brand-mark";
 import { useSession } from "next-auth/react";
+import { useEffect, useState } from "react";
 
 const FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-transparent";
@@ -23,6 +24,30 @@ const NAV_PILL_GLASS: React.CSSProperties = {
     "inset 0 1px 0 rgba(255,255,255,0.35), inset 0 -0.5px 0 rgba(255,255,255,0.08), 0 8px 28px rgba(0,0,0,0.28)",
 };
 
+const SCROLL_SCRIM_THRESHOLD_PX = 24;
+
+/** True once the page has scrolled past the hero edge; updates only on threshold crossings. */
+function useScrolledPast(threshold: number): boolean {
+  const [past, setPast] = useState(false);
+  useEffect(() => {
+    let frame = 0;
+    const check = () => {
+      frame = 0;
+      setPast(window.scrollY > threshold);
+    };
+    const onScroll = () => {
+      if (!frame) frame = requestAnimationFrame(check);
+    };
+    check();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [threshold]);
+  return past;
+}
+
 interface NavbarProps {
   bottomNavEnabled?: boolean;
   hubsEnabled?: boolean;
@@ -38,6 +63,7 @@ export function Navbar({ bottomNavEnabled = true, hubsEnabled = true }: NavbarPr
   // while Next prerenders /_not-found - destructuring it directly broke the
   // build there. Read defensively; no provider means no session.
   const sessionStatus = useSession()?.status;
+  const scrolled = useScrolledPast(SCROLL_SCRIM_THRESHOLD_PX);
 
   if (pathname.startsWith("/watch")) return null;
 
@@ -57,6 +83,14 @@ export function Navbar({ bottomNavEnabled = true, hubsEnabled = true }: NavbarPr
       className="pointer-events-none fixed inset-x-0 top-0 z-50 w-full"
       style={{ background: "none", backdropFilter: "none", WebkitBackdropFilter: "none" }}
     >
+      {/* Scrim keeps the logo and pill legible over rails once scrolled. */}
+      <div
+        aria-hidden
+        className={cn(
+          "pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-[#050508] via-[#050508]/75 to-transparent transition-opacity duration-300",
+          scrolled ? "opacity-100" : "opacity-0",
+        )}
+      />
       <div className="relative z-10 mx-auto flex h-[72px] max-w-none items-center justify-between gap-4 pl-5 pr-5 sm:pl-6 sm:pr-7 lg:pr-8">
         {/* Island A — logo lockup */}
         <Link

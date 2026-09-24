@@ -380,7 +380,7 @@ function StatusRow({ label, ok, okLabel, badLabel }: { label: string; ok: boolea
     <div className="flex items-center justify-between">
       <span className="text-sm">{label}</span>
       {ok ? (
-        <Badge className="bg-primary/15 text-primary hover:bg-primary/20">
+        <Badge className="bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/20">
           <CheckCircle2 className="h-3 w-3 mr-1" /> {okLabel}
         </Badge>
       ) : (
@@ -1588,15 +1588,72 @@ function UserManagementSection() {
     onError: () => toast.error("Failed to delete user"),
   });
 
+  const [newName, setNewName] = useState("");
+  const [newPin, setNewPin] = useState("");
+  const addUser = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newName.trim(), pin: newPin }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(body.error || "Failed to add profile");
+    },
+    onSuccess: () => {
+      toast.success(`Added ${newName.trim()}`);
+      setNewName("");
+      setNewPin("");
+      qc.invalidateQueries({ queryKey: ["admin", "users"] });
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
   return (
     <Card className="rounded-2xl">
       <CardHeader>
         <CardTitle className="font-display flex items-center gap-2 text-base">
-          <Users className="h-4 w-4 text-primary" /> Family Members
+          <Users className="h-4 w-4 text-primary" /> Profiles
         </CardTitle>
-        <CardDescription>Everyone who has signed up. Delete a user to wipe their watchlist and progress.</CardDescription>
+        <CardDescription>
+          Everyone who can sign in. Each profile has its own list, progress and PIN. Deleting a
+          profile wipes its watchlist and progress.
+        </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
+        <form
+          className="flex flex-col gap-2 sm:flex-row"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (newName.trim().length >= 2 && /^\d{4,10}$/.test(newPin)) addUser.mutate();
+          }}
+        >
+          <Input
+            aria-label="New profile name"
+            placeholder="Name"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            className="sm:flex-1"
+          />
+          <Input
+            aria-label="New profile PIN"
+            placeholder="PIN (4-10 digits)"
+            type="password"
+            inputMode="numeric"
+            value={newPin}
+            onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ""))}
+            className="sm:w-44"
+          />
+          <Button
+            type="submit"
+            size="sm"
+            className="h-10 rounded-full"
+            disabled={addUser.isPending || newName.trim().length < 2 || !/^\d{4,10}$/.test(newPin)}
+          >
+            {addUser.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            Add profile
+          </Button>
+        </form>
         {isLoading ? (
           <div className="space-y-2">
             {Array.from({ length: 3 }).map((_, i) => (

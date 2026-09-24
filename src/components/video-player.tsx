@@ -1,5 +1,6 @@
 "use client";
 
+import { SourceQuarantine } from "@/lib/playback/source-quarantine";
 import { useEffect, useRef, useCallback, useState, useMemo } from "react";
 import type { PlaybackSource, SourceProbeMetrics } from "@/lib/playback/types";
 import {
@@ -947,6 +948,8 @@ export function VideoPlayer({
   }, [sources]);
   const [failedSourceIds, setFailedSourceIds] = useState<string[]>([]);
   const failedSourceIdsRef = useRef<Set<string>>(new Set());
+  // Survives the failed-set resets below; see source-quarantine.ts.
+  const quarantineRef = useRef(new SourceQuarantine());
   const resumeAtRef = useRef(0);
   const initialTimeAppliedRef = useRef(false);
   const initialRemuxStart = PLAYBACK_RANDOM_ACCESS_REMUX_ENABLED
@@ -1596,6 +1599,7 @@ export function VideoPlayer({
   useEffect(() => {
     invalidateSourceAttempt();
     failedSourceIdsRef.current.clear();
+    quarantineRef.current.reset();
     durationRefreshRequestedRef.current = false;
     setFailedSourceIds([]);
     userSelectedSourceRef.current = false;
@@ -1733,7 +1737,12 @@ export function VideoPlayer({
     // everPlayed/autoUpgraded lockouts below. This is not a source SWITCH, it's
     // the current source catching up to a renewed signed URL; refusing it here
     // is what left the player silently re-requesting a dead 410 link forever.
-    if (stillValid && activeSource && pendingUrlRefreshRef.current) {
+    if (
+      stillValid &&
+      activeSource &&
+      pendingUrlRefreshRef.current &&
+      !quarantineRef.current.has(activeSource.id)
+    ) {
       const refreshed = orderedSources.find((s) => s.id === activeSource.id);
       if (refreshed) {
         invalidateSourceAttempt();
@@ -1758,11 +1767,13 @@ export function VideoPlayer({
     // (or higher) source. After first healthy play, sticky unless active failed.
     const preferred = getPreferredProvider();
     const preferredHeight = qualityTargetRef.current;
-    let remaining = orderedSources.filter((s) => !failedSourceIdsRef.current.has(s.id));
+    const eligible = quarantineRef.current.filter(orderedSources);
+    if (!eligible.length) return;
+    let remaining = eligible.filter((s) => !failedSourceIdsRef.current.has(s.id));
     if (!remaining.length && isDiscoveringRef.current) {
-      remaining = orderedSources;
+      remaining = eligible;
     }
-    const pool = remaining.length ? remaining : orderedSources;
+    const pool = remaining.length ? remaining : eligible;
     const selection = selectActiveSource({
       roster: pool,
       active: activeSource,
@@ -2234,7 +2245,9 @@ export function VideoPlayer({
 
   const tryNextSource = useCallback(() => {
     if (activeSource) markSourceFailed(activeSource.id);
-    const available = orderedSources.filter((s) => !failedSourceIdsRef.current.has(s.id));
+    const available = quarantineRef.current
+      .filter(orderedSources)
+      .filter((s) => !failedSourceIdsRef.current.has(s.id));
     const next = decidePlayback(available, {
       preferredProvider: getPreferredProvider(),
       preferredHeight: qualityTargetRef.current,
@@ -2469,8 +2482,15 @@ export function VideoPlayer({
         reason,
       });
       markSourceFailed(attempt.sourceId);
+      quarantineRef.current.recordFailure(attempt.sourceId);
       // Fatal media/network failure → next source now. Never wait for enrich.
       if (tryNextSourceRef.current()) return true;
+      if (quarantineRef.current.filter(orderedSourcesRef.current).length === 0) {
+        // Every server has failed repeatedly: stop instead of cycling them.
+        setBuffering(false);
+        setError(ALL_SOURCES_FAILED_MSG);
+        return true;
+      }
       // Only hold for more sources if we have literally nothing left to try
       // AND enrich is still open — otherwise surface hard error immediately.
       // Read roster via ref so this callback stays stable across enrich polls.
