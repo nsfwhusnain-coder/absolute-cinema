@@ -639,6 +639,11 @@ html[data-material="solid"] {
     inset 0 -1px 0 rgba(255, 255, 255, 0.06),
     0 20px 50px rgba(0, 0, 0, 0.35);
 }
+/* Solid means no frosted surfaces anywhere, including one-off blurred chips. */
+html[data-material="solid"] [class*="backdrop-blur"] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
 html[data-material="solid"] .glass-clear {
   background: var(--mat-fill-strong);
   -webkit-backdrop-filter: none;

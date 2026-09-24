@@ -482,7 +482,7 @@ function DetailContent({
         </div>
 
         {/* Right-side floating info card */}
-        <aside className="absolute bottom-8 right-4 z-10 hidden w-52 rounded-2xl border border-white/10 bg-black/55 p-4 text-sm backdrop-blur-md sm:bottom-12 sm:right-6 sm:block lg:right-8">
+        <aside className="absolute bottom-8 right-4 z-10 hidden w-52 glass-clear rounded-2xl p-4 text-sm sm:bottom-12 sm:right-6 sm:block lg:right-8">
           {data.runtime ? (
             <InfoCardRow icon={<Clock className="h-3.5 w-3.5" />} label="Runtime" value={`${data.runtime} min`} />
           ) : null}

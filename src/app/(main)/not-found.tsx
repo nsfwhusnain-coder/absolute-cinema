@@ -1,5 +1,8 @@
+import type { Metadata } from "next";
 import { Film } from "lucide-react";
 import { MessageCard } from "@/components/message-card";
+
+export const metadata: Metadata = { title: "Page not found" };
 
 /** Unknown titles, categories and routes inside the main layout. */
 export default function MainNotFound() {

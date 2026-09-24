@@ -244,7 +244,7 @@ export function PersonView({ id, initialPerson, initialCredits }: Props) {
 
         <header
           data-tv-safe
-          className="flex flex-col gap-6 rounded-2xl border border-white/10 bg-white/[0.04] p-6 backdrop-blur-xl md:flex-row md:items-start"
+          className="flex flex-col gap-6 glass rounded-2xl p-6 md:flex-row md:items-start"
         >
           <div className="relative h-40 w-40 shrink-0 overflow-hidden rounded-full bg-muted ring-1 ring-white/15">
             {photo && !photoFailed ? (

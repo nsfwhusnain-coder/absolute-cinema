@@ -229,7 +229,9 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
     staleTime: 10 * 60 * 1000,
   });
 
-  const { data: progressList } = useQuery({
+  // Always fresh here: a cached list from before the last episode was left
+  // would start it from the beginning instead of where the viewer stopped.
+  const { data: progressList, isFetched: progressLoaded } = useQuery({
     queryKey: ["progress"],
     queryFn: async () => {
       const res = await fetch("/api/progress");
@@ -237,6 +239,8 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
       return res.json() as Promise<ProgressItem[]>;
     },
     enabled: mounted && !!session,
+    staleTime: 0,
+    refetchOnMount: "always",
   });
 
   const tvParamsInUrl =
@@ -295,7 +299,9 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
   });
   const playback = streams.response;
 
-  const showPlayerShell = mounted && !!session;
+  // Wait for the saved position (a fraction of a second) so the player starts
+  // where the viewer left off rather than at 0 and jumping.
+  const showPlayerShell = mounted && !!session && progressLoaded;
   const baseTitle = meta?.title || meta?.name || playback?.title || "Untitled";
   const { data: skipData } = useQuery({
     queryKey: ["skip-times", id, tvSeason, tvEpisode],

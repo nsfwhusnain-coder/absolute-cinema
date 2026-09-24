@@ -126,7 +126,7 @@ export function MovieRow({
           <button
             type="button"
             onClick={() => scrollByDir(-1)}
-            className="absolute left-2 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/25 bg-black/50 text-white backdrop-blur-md transition-opacity hover:bg-black/70"
+            className="absolute left-2 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center glass-clear rounded-full text-white transition-opacity hover:bg-white/20"
             style={{ left: RAIL_PAD_LEFT }}
             aria-label="Scroll left"
           >
@@ -137,7 +137,7 @@ export function MovieRow({
           <button
             type="button"
             onClick={() => scrollByDir(1)}
-            className="absolute right-2 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/25 bg-black/50 text-white backdrop-blur-md transition-opacity hover:bg-black/70"
+            className="absolute right-2 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center glass-clear rounded-full text-white transition-opacity hover:bg-white/20"
             aria-label="Scroll right"
           >
             <ChevronRight className="h-5 w-5" aria-hidden />

@@ -257,6 +257,10 @@ export function usePlayerController(options: PlayerControllerOptions) {
     video.volume = store.getState().volume;
     return () => {
       reportSustained();
+      // Leaving the player: record exactly where the viewer stopped, not the
+      // last periodic report (which can be seconds or a whole seek behind).
+      const duration = remuxDuration.current ?? (Number.isFinite(video.duration) ? video.duration : 0);
+      if (orchestrator.current.everPlayed && duration > 0) optionsRef.current.onProgress(positionRef.current, duration);
       clearTimers();
       attachAbort.current?.abort();
       engine.destroy();
@@ -336,6 +340,14 @@ export function usePlayerController(options: PlayerControllerOptions) {
     const onSeeking = () => {
       lastSeekAt.current = Date.now();
     };
+    // A jump is a meaningful new position: save it without waiting for the next report.
+    const onSeeked = () => {
+      const duration = effectiveDuration(video);
+      if (orchestrator.current.everPlayed && duration > 0) {
+        lastProgressAt.current = Date.now();
+        optionsRef.current.onProgress(video.currentTime, duration);
+      }
+    };
     // Playback keeps pausing to buffer: this server cannot keep up. Try another
     // one at the same point; if that happened before, also step quality down.
     const moveToSmootherSource = () => {
@@ -374,6 +386,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("waiting", onWaiting);
     video.addEventListener("seeking", onSeeking);
+    video.addEventListener("seeked", onSeeked);
     video.addEventListener("pause", onPause);
     video.addEventListener("loadedmetadata", onMeta);
     video.addEventListener("durationchange", onMeta);
@@ -386,6 +399,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("seeking", onSeeking);
+      video.removeEventListener("seeked", onSeeked);
       video.removeEventListener("pause", onPause);
       video.removeEventListener("loadedmetadata", onMeta);
       video.removeEventListener("durationchange", onMeta);
