@@ -1,0 +1,579 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-inter);
+  --font-display: var(--font-montserrat);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* Light theme (fallback / "light" option) */
+:root {
+  --radius: 1rem;
+  /* Hex first: Hisense VIDAA / Chrome 76 cannot parse oklch() and would
+     otherwise paint default black text or drop the color entirely. */
+  --background: #fafafa;
+  --background: oklch(0.99 0.002 280);
+  --foreground: #2c2c34;
+  --foreground: oklch(0.18 0.01 280);
+  --card: #ffffff;
+  --card: oklch(1 0 0);
+  --card-foreground: #2c2c34;
+  --card-foreground: oklch(0.18 0.01 280);
+  --popover: #ffffff;
+  --popover: oklch(1 0 0);
+  --popover-foreground: #2c2c34;
+  --popover-foreground: oklch(0.18 0.01 280);
+  --primary: #c43c32;
+  --primary: oklch(0.55 0.22 25);          /* crimson red */
+  --primary-foreground: #fafafa;
+  --primary-foreground: oklch(0.98 0.005 280);
+  --secondary: #eeeeef;
+  --secondary: oklch(0.94 0.005 280);
+  --secondary-foreground: #2c2c34;
+  --secondary-foreground: oklch(0.18 0.01 280);
+  --muted: #eeeeef;
+  --muted: oklch(0.94 0.005 280);
+  --muted-foreground: #6e6e78;
+  --muted-foreground: oklch(0.45 0.01 280);
+  --accent: #e8e8ec;
+  --accent: oklch(0.92 0.01 280);
+  --accent-foreground: #2c2c34;
+  --accent-foreground: oklch(0.18 0.01 280);
+  --destructive: #c43c32;
+  --destructive: oklch(0.55 0.24 25);
+  --border: rgba(0, 0, 0, 0.1);
+  --border: oklch(0 0 0 / 10%);
+  --input: rgba(0, 0, 0, 0.14);
+  --input: oklch(0 0 0 / 14%);
+  /* Neutral on purpose. This was oklch(0.55 0.22 25) against a --destructive of
+     oklch(0.55 0.24 25): the same hue, 0.02 apart in chroma and indistinguishable
+     in use. Every focused field therefore drew what reads as an error ring, which
+     on the sign-in form greets a new user with a form that looks already rejected.
+     Crimson stays reserved for the primary action and genuine validation. */
+  --ring: oklch(0.55 0.02 280);
+  --chart-1: oklch(0.62 0.22 25);
+  --chart-2: oklch(0.7 0.18 50);
+  --chart-3: oklch(0.6 0.15 100);
+  --chart-4: oklch(0.55 0.2 320);
+  --chart-5: oklch(0.7 0.2 200);
+  --sidebar: oklch(0.97 0.003 280);
+  --sidebar-foreground: oklch(0.18 0.01 280);
+  --sidebar-primary: oklch(0.55 0.22 25);
+  --sidebar-primary-foreground: oklch(0.98 0.005 280);
+  --sidebar-accent: oklch(0.92 0.01 280);
+  --sidebar-accent-foreground: oklch(0.18 0.01 280);
+  --sidebar-border: oklch(0 0 0 / 10%);
+  --sidebar-ring: oklch(0.55 0.22 25);
+}
+
+.dark {
+  /* Deep near-black base (closer to a true dark theatre black than the previous
+     dark-navy tone). Surface elevation steps are spaced further apart than a typical
+     dark theme so cards/pills/popovers visibly lift off the background instead of
+     blending into it. */
+  /* Page canvas — exact hex so hero bottom scrim can match with zero seam */
+  --background: #0a0a0f;
+  --canvas: #0a0a0f;
+  --foreground: #f4f4f6;
+  --foreground: oklch(0.97 0.003 280);
+  --card: #1c1c24;
+  --card: oklch(0.13 0.006 280);
+  --card-foreground: #f4f4f6;
+  --card-foreground: oklch(0.97 0.003 280);
+  --popover: #202028;
+  --popover: oklch(0.15 0.007 280);
+  --popover-foreground: #f4f4f6;
+  --popover-foreground: oklch(0.97 0.003 280);
+  --primary: #e04a3c;
+  --primary: oklch(0.62 0.24 25);
+  --primary-foreground: #fafafa;
+  --primary-foreground: oklch(0.98 0.005 280);
+  --secondary: #2a2a32;
+  --secondary: oklch(0.19 0.008 280);
+  --secondary-foreground: #f4f4f6;
+  --secondary-foreground: oklch(0.97 0.003 280);
+  --muted: #2a2a32;
+  --muted: oklch(0.19 0.008 280);
+  --muted-foreground: #b4b4bc;
+  --muted-foreground: oklch(0.7 0.008 280);
+  --accent: #32323c;
+  --accent: oklch(0.23 0.01 280);
+  --accent-foreground: #f4f4f6;
+  --accent-foreground: oklch(0.97 0.003 280);
+  --destructive: #e85a4a;
+  --destructive: oklch(0.7 0.24 22);
+  --border: rgba(255, 255, 255, 0.12);
+  --border: oklch(1 0 0 / 12%);
+  --input: rgba(255, 255, 255, 0.14);
+  --input: oklch(1 0 0 / 14%);
+  --ring: #c8c8d0;
+  --ring: oklch(0.78 0.02 280);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  /* Hide scrollbars on horizontal rows but keep functionality */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  /* Custom scrollbar for vertical lists */
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: oklch(1 0 0 / 0.15);
+    border-radius: 3px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: oklch(1 0 0 / 0.25);
+  }
+}
+
+/*
+ * Framer Motion components respect prefers-reduced-motion via
+ * <MotionConfig reducedMotion="user"> (providers.tsx). This covers everything
+ * else: Tailwind's animate-spin/animate-pulse/animate-in utilities and any
+ * plain CSS transitions, which MotionConfig has no reach into.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* The player container itself enters fullscreen. Give it an explicit dynamic
+   viewport box so display-mode/monitor changes cannot preserve its old parent
+   percentage height. Keep the WebKit selector for Safari-based living-room
+   browsers. */
+.player-shell:fullscreen,
+.player-shell:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  min-width: 100vw;
+  min-height: 100vh;
+  min-height: 100dvh;
+  max-width: none;
+  max-height: none;
+}
+
+/* Keep fullscreen controls clear of notches, rounded TV overscan and mobile
+   home indicators. `max()` preserves the existing desktop spacing when the
+   safe-area inset is zero. */
+.player-controls-top {
+  height: calc(3.5rem + env(safe-area-inset-top));
+  padding-top: env(safe-area-inset-top);
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
+}
+
+.player-controls-bottom-row {
+  padding-left: max(0.75rem, env(safe-area-inset-left));
+  padding-right: max(0.75rem, env(safe-area-inset-right));
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
+.player-settings-dock,
+.player-shortcuts-panel {
+  bottom: calc(4rem + env(safe-area-inset-bottom));
+  max-height: calc(
+    100dvh - 5rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)
+  );
+}
+
+.player-episodes-panel {
+  bottom: calc(3.75rem + env(safe-area-inset-bottom));
+}
+
+@media (min-width: 640px) {
+  .player-controls-top {
+    padding-left: max(1.25rem, env(safe-area-inset-left));
+    padding-right: max(1.25rem, env(safe-area-inset-right));
+  }
+
+  .player-controls-bottom-row {
+    padding-left: max(1.25rem, env(safe-area-inset-left));
+    padding-right: max(1.25rem, env(safe-area-inset-right));
+  }
+
+  .player-settings-dock,
+  .player-shortcuts-panel {
+    bottom: calc(3.5rem + env(safe-area-inset-bottom));
+  }
+}
+
+/* Living-room focus must be visible from several metres away. The TV marker is
+   only installed for webOS/Tizen/Android-TV style user agents (or ?tv=1), so
+   mouse/touch layouts keep their compact controls. */
+/* ── Baseline keyboard focus ────────────────────────────────────────────────
+   A focus ring existed only under html[data-tv="1"], so a keyboard user on a
+   laptop got no indicator at all: measured on the live sign-in form, the
+   focused input reported outline "none" and a fully transparent box-shadow.
+   That is a WCAG 2.4.7 failure on every non-TV device.
+
+   :focus-visible rather than :focus, so a pointer click does not draw a ring
+   the mouse user never asked for. The TV rule further down is stronger and
+   still wins there — this is the floor, not a replacement. */
+:where(a[href], button, input, select, textarea, summary, [role="button"],
+  [role="slider"], [role="tab"], [role="option"], [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid rgb(255 255 255 / 0.9);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* On light surfaces a white ring disappears; pair it with a dark halo so the
+   indicator survives either ground without needing per-component overrides. */
+@media (prefers-color-scheme: light) {
+  :where(a[href], button, input, select, textarea, summary, [role="button"],
+    [role="slider"], [role="tab"], [role="option"], [tabindex]:not([tabindex="-1"])):focus-visible {
+    outline-color: rgb(0 0 0 / 0.82);
+  }
+}
+
+html[data-tv="1"] :where(button, a[href], [role="button"], [role="slider"], input, select):focus-visible {
+  outline: 3px solid rgb(255 255 255 / 0.95) !important;
+  outline-offset: 4px;
+  box-shadow: 0 0 0 7px rgb(239 68 68 / 0.72);
+}
+
+html[data-tv="1"] .player-shell .player-controls-bottom-row button,
+html[data-tv="1"] .player-shell .player-controls-top button {
+  min-width: 3.25rem;
+  min-height: 3.25rem;
+}
+
+html[data-tv="1"] {
+  scroll-behavior: smooth;
+}
+
+/* ── Television layout ──────────────────────────────────────────────────────
+   Measured on the live site at 1920x1080: the sign-in card rendered at the same
+   physical size as on a laptop — about 23% of screen width — body copy stayed at
+   14-16px, and 8 elements sat below 14px. At three metres that is unreadable,
+   and the nav pill sat roughly 35px from the top and right edges, inside the
+   3-5% band televisions commonly overscan and simply do not display.
+
+   Both are fixed here rather than per-component, because the device class is
+   already known: tv-spatial-navigation.tsx sets html[data-tv="1"] whenever
+   isTvLikeDevice() is true. Everything below is scoped to that and cannot
+   affect a desktop or phone. */
+
+/* Type scale. Rem-based sizing across the app means one root bump lifts
+   everything proportionally, rather than chasing individual components.
+
+   The flat 20px this replaces silently assumed a 1920 CSS-pixel viewport. A 4K
+   panel that reports its full 3840 — Android TV and Google TV browsers do;
+   webOS instead reports 1920 at devicePixelRatio 2 — got that same 20px spread
+   across twice the width, so every glyph rendered at half its intended
+   physical size. Deriving the root size from the viewport is ratio-agnostic
+   and fixes both panels at once: it lands on exactly 20px at 1920, 40px at
+   3840, and the two are the same apparent size from a sofa.
+
+   Chrome 76 on Hisense VIDAA does not implement clamp(). A clamp-only rule
+   is discarded and the set falls back to 16px laptop type — the "weird tiny
+   text" report. 20px is the sofa-readable fallback; clamp upgrades it. */
+html[data-tv="1"] {
+  font-size: 20px;
+}
+
+@media (min-width: 2560px) {
+  html[data-tv="1"] {
+    font-size: 28px;
+  }
+}
+
+@media (min-width: 3200px) {
+  html[data-tv="1"] {
+    font-size: 36px;
+  }
+}
+
+@supports (font-size: clamp(1px, 1vw, 2px)) {
+  html[data-tv="1"] {
+    font-size: clamp(18px, calc(100vw / 96), 40px);
+  }
+}
+
+/*
+ * Variable Inter / Montserrat (font-weight: 100 900) is what next/font ships.
+ * Hisense VIDAA and other living-room Chromiums either reject the face or
+ * lock the wght axis at 100, so titles look hairline, stretched, or like a
+ * default serif. System UI faces are already on the panel and stay upright.
+ */
+html[data-tv="1"] {
+  --font-inter: Roboto, "Noto Sans", "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-montserrat: Roboto, "Noto Sans", "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-geist-mono: ui-monospace, "Roboto Mono", Menlo, Consolas, monospace;
+  --font-sans: Roboto, "Noto Sans", "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-display: Roboto, "Noto Sans", "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+html[data-tv="1"] body {
+  font-family: Roboto, "Noto Sans", "Segoe UI", Helvetica, Arial, sans-serif;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  font-synthesis: none;
+  font-feature-settings: normal;
+  font-variation-settings: normal;
+  font-kerning: normal;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #f4f4f6;
+  color: var(--foreground);
+}
+
+/* Sub-normal weights and tight tracking do not survive three metres. */
+html[data-tv="1"] :where(.font-thin, .font-extralight, .font-light) {
+  font-weight: 400;
+}
+
+html[data-tv="1"] :where(.font-display, h1, h2, h3) {
+  font-family: Roboto, "Noto Sans", "Segoe UI", Helvetica, Arial, sans-serif;
+  font-weight: 700;
+  letter-spacing: 0.015em;
+  line-height: 1.2;
+}
+
+html[data-tv="1"] :where(.tracking-tight, .tracking-tighter) {
+  letter-spacing: 0.01em;
+}
+
+/* CSS filter drop-shadows smear glyphs on TV scalers. A real text-shadow
+   stays sharp. */
+html[data-tv="1"] .drop-shadow {
+  filter: none;
+  text-shadow: 0 2px 10px rgb(0 0 0 / 0.7);
+}
+
+/* Secondary copy at oklch(0.7) over this canvas measures about 5:1 — fine on a
+   monitor, marginal once a television's gamma and its picture mode have had
+   their say. */
+html[data-tv="1"].dark {
+  --muted-foreground: #d0d0d6;
+  --muted-foreground: oklch(0.82 0.006 280);
+}
+
+/* ── Television performance ─────────────────────────────────────────────────
+   backdrop-filter is the most expensive thing a TV browser can be handed: it
+   re-samples everything beneath the element, every frame, and this app asks
+   for it in fifty places. Every one of them already sits on a dark translucent
+   backing, so removing the live blur costs almost nothing to look at and takes
+   the entire per-frame cost with it. */
+html[data-tv="1"] * {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/* The brand mark is the one place that needs its fill restored by hand.
+   brand-mark.css already carries the right colour in an `@supports not
+   (backdrop-filter)` block — but that tests for the *feature*, and a television
+   has it and is merely being told not to spend it here, so the fallback never
+   fires. Without this the mark degrades to a 12%-white square. */
+html[data-tv="1"] :where(.ab-glass, .ab-glass-pill) {
+  background: rgba(18, 18, 24, 0.6);
+}
+
+/* The two backings thin enough to have been leaning on that blur for contrast. */
+html[data-tv="1"] .bg-black\/40 {
+  background-color: rgb(0 0 0 / 0.72);
+}
+
+html[data-tv="1"] .bg-black\/50 {
+  background-color: rgb(0 0 0 / 0.78);
+}
+
+/* Wide-radius shadows are re-rasterised whenever the element moves, which on a
+   focus-driven interface is constantly. Keep the lift, drop the radius. */
+html[data-tv="1"] :where(.shadow-2xl, .shadow-xl) {
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.55);
+}
+
+/* Title-safe inset. Nothing interactive or informational may sit inside the
+   band a television can clip. Applied as scroll padding and to the fixed
+   chrome, not as a body margin, so full-bleed hero artwork still reaches the
+   physical edge — losing a few pixels of a backdrop is fine, losing the
+   navigation is not. */
+html[data-tv="1"] body {
+  scroll-padding: 5vh 5vw;
+}
+
+html[data-tv="1"] header.fixed,
+html[data-tv="1"] nav.fixed,
+html[data-tv="1"] [data-tv-safe] {
+  padding-top: max(2.5vh, 1rem);
+  padding-right: max(3vw, 1rem);
+  padding-left: max(3vw, 1rem);
+}
+
+/* Caption and metadata sizes, floored so nothing falls below what is legible
+   from a sofa.
+
+   The pixel-valued classes are the important half. A `text-[10px]` is an
+   absolute size: it ignores the root entirely, so while the rest of the page
+   doubled on a 4K panel that caption stayed at ten physical pixels — invisible
+   at three metres, and a large part of why the type read as broken rather than
+   merely small. Only 10px and 11px were covered before; the app also uses 12,
+   13 and 15, and the rem-valued arbitraries sit below the floor too. */
+html[data-tv="1"] :where(
+    .text-xs,
+    .text-\[10px\],
+    .text-\[11px\],
+    .text-\[12px\],
+    .text-\[0\.7rem\],
+    .text-\[0\.75rem\]
+  ) {
+  font-size: 0.85rem;
+}
+
+html[data-tv="1"] :where(.text-\[13px\], .text-\[0\.8rem\]) {
+  font-size: 0.9rem;
+}
+
+html[data-tv="1"] :where(.text-sm, .text-\[15px\], .text-\[0\.9rem\]) {
+  font-size: 0.95rem;
+}
+
+/* The sign-in card is a fixed max-width column that looked lost on a 65-inch
+   panel. Widen it in proportion rather than leaving 80% of the screen empty. */
+html[data-tv="1"] .max-w-md {
+  max-width: 34rem;
+}
+
+@keyframes hero-slide-fill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.hero-ken {
+  will-change: transform;
+}
+
+/* Slow Ken Burns — lives the whole slide, never eases out and freezes. */
+@keyframes hero-drift-a {
+  from {
+    transform: scale(1.03) translate3d(0, 0, 0);
+  }
+  to {
+    transform: scale(1.085) translate3d(1.6%, -1.4%, 0);
+  }
+}
+
+@keyframes hero-drift-b {
+  from {
+    transform: scale(1.03) translate3d(0, 0, 0);
+  }
+  to {
+    transform: scale(1.08) translate3d(-1.5%, 1.1%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-slide-fill,
+  [style*="hero-slide-fill"],
+  .hero-ken {
+    animation: none !important;
+    transform: none !important;
+  }
+}
+
+/* Living-room SoCs should not run Ken Burns. Same kill as reduced-motion. */
+html[data-tv="1"] .hero-ken {
+  animation: none !important;
+  transform: none !important;
+  will-change: auto;
+}
+
+/* Overflow menus stay in the spatial graph and stay visible on TV. */
+html[data-tv="1"] [data-card-overflow] {
+  opacity: 1 !important;
+  width: 3rem;
+  height: 3rem;
+}
+
+/* Living-room catalog: keep legal, drop social lockups. */
+html[data-tv="1"] .footer-social {
+  display: none;
+}
+
+/* High-legibility Cinema Subtitles */
+video::cue {
+  background-color: rgba(0, 0, 0, 0.85);
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: var(--subtitle-font-size, 1.25rem);
+  line-height: 1.45;
+  font-weight: 500;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95), 0 0 10px rgba(0, 0, 0, 0.8);
+  border-radius: 6px;
+  padding: 0.25em 0.6em;
+  white-space: pre-line;
+}
+
+.player-tooltip-glass {
+  background: rgba(15, 15, 20, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.6);
+}

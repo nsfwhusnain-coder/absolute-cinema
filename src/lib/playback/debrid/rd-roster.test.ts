@@ -1,0 +1,742 @@
+/// <reference types="bun-types" />
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import { clearMediaValidationCache } from "./media-validation";
+
+/**
+ * Real-Debrid RICH ROSTER regression coverage (see index.ts): RD is the
+ * fast, high-volume, PRIMARY engine — a title should surface up to 5
+ * distinct honestly-tagged sources (best native, up to 3 more native 1080p,
+ * best Safari-only 4K). An MKV/HEVC release is KEPT (no longer dropped —
+ * see torrentio.ts's module header) and, when it's the top-ranked candidate
+ * in its class, wins a slot honestly tagged `container: "mkv"` so the
+ * client's `isSourcePlayableHere` (source-quality.ts) can route it through
+ * /api/transcode rather than ever claiming it plays natively. Also covers
+ * the fast/prefetch path: a cold cache resolves exactly one native pick
+ * within its own bounded deadline and backgrounds the rest; a warm cache
+ * returns near-instantly with no network.
+ *
+ * Two boundaries are exercised for real, mirroring the existing conventions
+ * in this folder: a genuine local HTTP server (`Bun.serve`, same technique as
+ * token-safety.test.ts) stands in for Torrentio's resolve-proxy redirect, so
+ * `resolveTokenFreeRedirect`'s actual redirect-follow logic runs unmocked;
+ * `@/lib/tmdb` and `./cached-stream` are mocked (same in-memory-map technique
+ * as torbox-standalone.test.ts) so no real TMDB call or SQLite DB is needed.
+ */
+
+const FAKE_TOKEN = "test-rd-token";
+const IMDB = "tt9999999";
+
+const cacheStore = new Map<string, unknown>();
+function cacheKey(key: {
+  imdbId: string;
+  mediaType: string;
+  season?: number;
+  episode?: number;
+  quality: string;
+  provider: string;
+}): string {
+  return `${key.imdbId}|${key.mediaType}|${key.season ?? 0}|${key.episode ?? 0}|${key.quality}|${key.provider}`;
+}
+
+mock.module("@/lib/tmdb", () => ({
+  tmdb: { externalIds: async () => ({ id: 1, imdb_id: IMDB }) },
+}));
+mock.module("./cached-stream", () => ({
+  getFreshCachedStream: async (key: Parameters<typeof cacheKey>[0]) => cacheStore.get(cacheKey(key)) ?? null,
+  invalidateCachedStream: async (key: Parameters<typeof cacheKey>[0]) => {
+    cacheStore.delete(cacheKey(key));
+  },
+  upsertCachedStream: async (key: Parameters<typeof cacheKey>[0], record: unknown) => {
+    cacheStore.set(cacheKey(key), { ...(record as object) });
+  },
+}));
+
+type ResolveFn = typeof import("./index").resolveDebridSources;
+type ResolveFastFn = typeof import("./index").resolveFastDebridSources;
+type ResetSlotMissesFn = typeof import("./index").__resetRdSlotMissCacheForTests;
+
+const NATIVE_2160_HASH = "a".repeat(40);
+const SAFARI_2160_HASH = "b".repeat(40);
+const NATIVE_1080_HASHES = ["c".repeat(40), "d".repeat(40), "e".repeat(40)];
+const MKV_1080_HASH = "f".repeat(40);
+const SMALL_CLIP_HASH = "1".repeat(40);
+const FALLBACK_720_HASH = "7".repeat(40);
+const UNSUPPORTED_CONTAINER_HASH = "8".repeat(40);
+
+describe("Real-Debrid roster — full + fast paths", () => {
+  const originalFetch = globalThis.fetch;
+  const originalRd = process.env.REAL_DEBRID_API_TOKEN;
+  const originalTb = process.env.TORBOX_API_KEY;
+
+  let resolveDebridSources: ResolveFn;
+  let resolveFastDebridSources: ResolveFastFn;
+  let resetSlotMisses: ResetSlotMissesFn;
+  let server: ReturnType<typeof Bun.serve>;
+
+  beforeAll(async () => {
+    server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const { pathname } = new URL(req.url);
+        const m = pathname.match(/^\/resolve\/realdebrid\/[^/]+\/([^/]+)\/null\/\d+\/.*$/);
+        if (m) {
+          const hash = (m[1] ?? "").toLowerCase();
+          const extension =
+            hash === UNSUPPORTED_CONTAINER_HASH ? "m2ts" : "mp4";
+          return new Response(null, {
+            status: 302,
+            headers: { Location: `/cdn/${hash}.${extension}` },
+          });
+        }
+        if (pathname.startsWith("/cdn/")) {
+          if (req.headers.has("range")) {
+            const totalBytes = pathname.includes(SMALL_CLIP_HASH)
+              ? 1_184_727
+              : 2 * 1024 * 1024 * 1024;
+            return new Response(new Uint8Array([0]), {
+              status: 206,
+              headers: {
+                "Content-Range": `bytes 0-0/${totalBytes}`,
+                "Content-Length": "1",
+              },
+            });
+          }
+          return new Response("ok", { status: 200 });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    // Dynamic import AFTER the mock.module calls so index.ts + torrentio.ts
+    // bind the mocked tmdb / cached-stream.
+    ({
+      resolveDebridSources,
+      resolveFastDebridSources,
+      __resetRdSlotMissCacheForTests: resetSlotMisses,
+    } = await import("./index"));
+  });
+
+  afterAll(() => {
+    server.stop(true);
+    mock.restore();
+  });
+
+  beforeEach(() => {
+    process.env.REAL_DEBRID_API_TOKEN = FAKE_TOKEN;
+    delete process.env.TORBOX_API_KEY;
+    cacheStore.clear();
+    clearMediaValidationCache();
+    resetSlotMisses();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalRd === undefined) delete process.env.REAL_DEBRID_API_TOKEN;
+    else process.env.REAL_DEBRID_API_TOKEN = originalRd;
+    if (originalTb === undefined) delete process.env.TORBOX_API_KEY;
+    else process.env.TORBOX_API_KEY = originalTb;
+  });
+
+  function resolveProxyUrl(hash: string, fileIdx: number, filename: string): string {
+    return `http://127.0.0.1:${server.port}/resolve/realdebrid/${FAKE_TOKEN}/${hash}/null/${fileIdx}/${filename}`;
+  }
+
+  /** Routes Torrentio's JSON endpoint to a synthetic response; everything else (the local resolve-proxy server) goes out over the real loopback fetch. */
+  function mockTorrentioStreams(
+    streams: unknown[],
+    onTorrentioRequest?: () => void
+  ): void {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("torrentio") && url.includes("/stream/")) {
+        onTorrentioRequest?.();
+        return new Response(JSON.stringify({ streams }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("download.real-debrid.com") && init?.headers) {
+        return new Response(new Uint8Array([0]), {
+          status: 206,
+          headers: {
+            "Content-Range": `bytes 0-0/${2 * 1024 * 1024 * 1024}`,
+            "Content-Length": "1",
+          },
+        });
+      }
+      return originalFetch(input as never, init);
+    }) as unknown as typeof fetch;
+  }
+
+  function buildStreams(): unknown[] {
+    return [
+      {
+        title: "Movie.2024.2160p.WEB-DL.H264-GRP\n👤 40 💾 20 GB ⚙️ X",
+        infoHash: NATIVE_2160_HASH,
+        fileIdx: 0,
+        url: resolveProxyUrl(NATIVE_2160_HASH, 0, "movie.2160p.h264.mp4"),
+      },
+      {
+        title: "Movie.2024.2160p.UHD.BluRay.x265.HDR-GRP\n👤 90 💾 40 GB ⚙️ X",
+        infoHash: SAFARI_2160_HASH,
+        fileIdx: 0,
+        url: resolveProxyUrl(SAFARI_2160_HASH, 0, "movie.2160p.hevc.hdr.mp4"),
+      },
+      ...NATIVE_1080_HASHES.map((hash, i) => ({
+        title: `Movie.2024.1080p.WEB-DL.H264-GRP${i}\n👤 ${30 - i * 5} 💾 3 GB ⚙️ X`,
+        infoHash: hash,
+        fileIdx: 0,
+        url: resolveProxyUrl(hash, 0, `movie.1080p.${i}.h264.mp4`),
+      })),
+      {
+        // A genuine high-bitrate H.264-in-MKV release. The video codec is
+        // natively decodable and the container is remuxed without re-encoding,
+        // so its richer same-resolution source is valid premium inventory.
+        title: "Movie.2024.1080p.BluRay.x264-GRP.mkv\n👤 999 💾 5 GB ⚙️ X",
+        infoHash: MKV_1080_HASH,
+        fileIdx: 0,
+        url: resolveProxyUrl(MKV_1080_HASH, 0, "movie.1080p.mkv"),
+      },
+    ];
+  }
+
+  it("full path: resolves the richest roster including remux-cached MKV", async () => {
+    mockTorrentioStreams(buildStreams());
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+
+    expect(sources.length).toBeGreaterThanOrEqual(6);
+
+    const native2160 = sources.filter((s) => s.compat === "native" && s.maxHeight === 2160);
+    const safari2160 = sources.filter((s) => s.maxHeight === 2160 && s.id.includes("safari-2160"));
+    const native1080 = sources.filter((s) => s.id.includes("native-1080"));
+    const remux1080 = sources.filter((s) => s.id.includes("safari-1080"));
+    expect(native2160.length).toBe(1);
+    expect(safari2160.length).toBe(1);
+    expect(native1080.length).toBe(3);
+    expect(remux1080.length).toBe(1);
+
+    // Native Kronos slots stay instant MP4. The H.264 MKV is Oceanus remux.
+    expect(new Set(native1080.map((s) => s.url)).size).toBe(3);
+    expect(native1080.some((s) => s.url.includes(MKV_1080_HASH))).toBe(false);
+    expect(remux1080[0]?.url.includes(MKV_1080_HASH)).toBe(true);
+
+    // Honest tagging.
+    expect(safari2160[0]?.codec).toBe("hevc");
+    for (const s of sources) {
+      expect(s.origin).toBe("debrid");
+      expect(s.type).toBe("mp4");
+      expect(s.provider).toBe("Debrid");
+    }
+  });
+
+  it("full path: duplicate Torrentio hashes cannot occupy separate cold-roster slots", async () => {
+    const streams = buildStreams() as Array<Record<string, unknown>>;
+    const original = streams.find((stream) => stream.infoHash === NATIVE_1080_HASHES[0]);
+    if (original) delete original.infoHash;
+    streams.push({
+      title: "Movie.2024.1080p.WEB-DL.H264-DUPLICATE\n👤 29 💾 3 GB ⚙️ X",
+      fileIdx: 0,
+      // Same hash embedded in a different filename/resolve URL, with the
+      // explicit infoHash omitted just like the live Torrentio response.
+      url: resolveProxyUrl(NATIVE_1080_HASHES[0], 0, "movie.1080p.duplicate.h264.mp4"),
+    });
+    mockTorrentioStreams(streams);
+
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(sources.length).toBeGreaterThanOrEqual(6);
+    expect(new Set(sources.map((source) => source.url)).size).toBeGreaterThanOrEqual(6);
+  });
+
+  it("full path: preserves native rank order when the first cold candidate fails validation", async () => {
+    for (const slot of ["native-2160", "safari-2160"] as const) {
+      cacheStore.set(`${IMDB}|movie|0|0|${slot}|realdebrid`, {
+        title: `Cached ${slot}`,
+        source: slot,
+        url: `http://127.0.0.1:${server.port}/cdn/cached-${slot}.mp4`,
+        compat: slot === "safari-2160" ? "safari" : "native",
+      });
+    }
+    const rankedGoodHashes = ["2".repeat(40), "3".repeat(40), "4".repeat(40)];
+    mockTorrentioStreams([
+      {
+        title: "Movie.2024.1080p.WEB-DL.H264.BAD.mp4\n👤 999 💾 3 GB",
+        infoHash: SMALL_CLIP_HASH,
+        fileIdx: 0,
+        url: resolveProxyUrl(
+          SMALL_CLIP_HASH,
+          0,
+          "movie.bad.1080p.h264.mp4"
+        ),
+      },
+      ...rankedGoodHashes.map((hash, index) => ({
+        title: `Movie.2024.1080p.WEB-DL.H264.GOOD${index}.mp4\n👤 ${
+          40 - index * 10
+        } 💾 3 GB`,
+        infoHash: hash,
+        fileIdx: 0,
+        url: resolveProxyUrl(hash, 0, `movie.good${index}.1080p.h264.mp4`),
+      })),
+    ]);
+
+    const sources = await resolveDebridSources({
+      tmdbId: 1,
+      mediaType: "movie",
+    });
+    const native1080 = sources
+      .filter((source) => source.id.includes("native-1080"))
+      .sort((a, b) => a.id.localeCompare(b.id));
+
+    expect(native1080).toHaveLength(3);
+    expect(native1080.map((source) => source.url)).toEqual(
+      rankedGoodHashes.map((hash) =>
+        expect.stringContaining(hash)
+      )
+    );
+  });
+
+  /** A richer same-class 4K release wins even when a leaner peer has more seeders. */
+  it("full path: the richest 4K HEVC release wins the safari-2160 slot", async () => {
+    const MKV_2160_HASH = "9".repeat(40);
+    mockTorrentioStreams([
+      {
+        title: "Movie.2024.2160p.WEB-DL.H264-GRP\n👤 40 💾 20 GB ⚙️ X",
+        infoHash: NATIVE_2160_HASH,
+        fileIdx: 0,
+        url: resolveProxyUrl(NATIVE_2160_HASH, 0, "movie.2160p.h264.mp4"),
+      },
+      {
+        // The 40 GB release is the richer same-class encode and must win even
+        // though the 12 GB alternative has many more seeders.
+        title: "Movie.2024.2160p.UHD.BluRay.x265.HDR-GRP\n👤 90 💾 40 GB ⚙️ X",
+        infoHash: SAFARI_2160_HASH,
+        fileIdx: 0,
+        url: resolveProxyUrl(SAFARI_2160_HASH, 0, "movie.2160p.hevc.hdr.mp4"),
+      },
+      {
+        // A valid MKV alternative remains discoverable, but its smaller file
+        // no longer wins purely for sitting near the old startup-size target.
+        title: "Movie.2024.2160p.UHD.BluRay.x265.HDR.mkv\n👤 500 💾 12 GB ⚙️ X",
+        infoHash: MKV_2160_HASH,
+        fileIdx: 0,
+        url: resolveProxyUrl(MKV_2160_HASH, 0, "movie.2160p.hevc.hdr.mkv"),
+      },
+    ]);
+
+    const sources = await resolveDebridSources({ tmdbId: 2, mediaType: "movie" });
+    const hades = sources.find((s) => s.id.endsWith("safari-2160"));
+    const remux4k = sources.filter((s) => s.compat === "safari" && s.maxHeight === 2160);
+
+    expect(remux4k.length).toBeGreaterThanOrEqual(1);
+    expect(hades?.url).toContain(SAFARI_2160_HASH);
+    expect(hades?.codec).toBe("hevc");
+  });
+
+  it("full path: HEVC 4K MKV still fills safari-2160 when no MP4 Ultra exists", async () => {
+    const MKV_2160_HASH = "9".repeat(40);
+    mockTorrentioStreams([
+      {
+        title: "Movie.2024.1080p.WEB-DL.H264-GRP\n👤 40 💾 3 GB ⚙️ X",
+        infoHash: NATIVE_1080_HASHES[0],
+        fileIdx: 0,
+        url: resolveProxyUrl(NATIVE_1080_HASHES[0], 0, "movie.1080p.h264.mp4"),
+      },
+      {
+        title: "Movie.2024.2160p.UHD.BluRay.x265.HDR.mkv\n👤 80 💾 35 GB ⚙️ X",
+        infoHash: MKV_2160_HASH,
+        fileIdx: 0,
+        url: resolveProxyUrl(MKV_2160_HASH, 0, "movie.2160p.hevc.hdr.mkv"),
+      },
+    ]);
+
+    const sources = await resolveDebridSources({ tmdbId: 3, mediaType: "movie" });
+    const safari2160 = sources.filter((s) => s.compat === "safari" && s.maxHeight === 2160);
+    expect(safari2160.length).toBe(1);
+    expect(safari2160[0]?.url).toContain(MKV_2160_HASH);
+    expect(safari2160[0]?.codec).toBe("hevc");
+  });
+
+  it("full path: repeat resolve is a pure cache read (zero Torrentio/RD network calls)", async () => {
+    mockTorrentioStreams(buildStreams());
+    const first = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(first.length).toBeGreaterThanOrEqual(6);
+
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      throw new Error("should not be called on a warm cache");
+    }) as unknown as typeof fetch;
+
+    const second = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(second.length).toBeGreaterThanOrEqual(6);
+    expect(calls).toBe(0);
+  });
+
+  /** Inventory with no 4K release at all — the 2160 slots can never fill. */
+  function build1080OnlyStreams(): unknown[] {
+    return NATIVE_1080_HASHES.map((hash, i) => ({
+      title: `Movie.2024.1080p.WEB-DL.H264-GRP${i}\n\u{1F464} ${30 - i * 5} \u{1F4BE} 3 GB \u2699\uFE0F X`,
+      infoHash: hash,
+      fileIdx: 0,
+      url: resolveProxyUrl(hash, 0, `movie.1080p.${i}.h264.mp4`),
+    }));
+  }
+
+  it("full path: a slot with no candidate is not re-hunted on the next resolve", async () => {
+    // Regression: without a negative cache the unfillable 2160 slots were
+    // re-hunted on EVERY request, burning the whole RD_FULL_DEADLINE_MS on a
+    // title whose inventory simply has no 4K release. Measured live at 12-16s
+    // per watch, forever, versus 4-6s for a title whose slots all fill.
+    let torrentioCalls = 0;
+    mockTorrentioStreams(build1080OnlyStreams(), () => {
+      torrentioCalls++;
+    });
+
+    const first = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(first.length).toBeGreaterThan(0);
+    expect(first.some((s) => s.maxHeight === 2160)).toBe(false);
+    expect(torrentioCalls).toBe(1);
+
+    // Second resolve must be a pure cache read: every still-missing slot was
+    // proven empty, so there is nothing left worth spending the deadline on.
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      throw new Error("should not re-hunt a slot already proven unfillable");
+    }) as unknown as typeof fetch;
+
+    const second = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(second.length).toBe(first.length);
+    expect(calls).toBe(0);
+  });
+
+  it("full path: a slot whose every candidate is rejected is not re-hunted immediately", async () => {
+    // The RD-uncached case: candidates exist, but each resolves to the same
+    // ~150 KB stub, so media-validation refuses them all. Before the negative
+    // cache this re-ran the entire deadline on every single request.
+    const rejectAll = NATIVE_1080_HASHES.map((_hash, i) => ({
+      title: `Movie.2024.1080p.WEB-DL.H264-STUB${i}\n\u{1F464} 30 \u{1F4BE} 3 GB \u2699\uFE0F X`,
+      infoHash: SMALL_CLIP_HASH,
+      fileIdx: i,
+      url: resolveProxyUrl(SMALL_CLIP_HASH, i, `movie.stub.${i}.mp4`),
+    }));
+
+    let torrentioCalls = 0;
+    mockTorrentioStreams(rejectAll, () => {
+      torrentioCalls++;
+    });
+    const first = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(first).toEqual([]);
+    expect(torrentioCalls).toBe(1);
+
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      throw new Error("should not immediately re-hunt slots whose candidates all failed");
+    }) as unknown as typeof fetch;
+
+    const second = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(second).toEqual([]);
+    expect(calls).toBe(0);
+  });
+
+  it("full path: forceRefresh re-hunts slots previously proven unfillable", async () => {
+    mockTorrentioStreams(build1080OnlyStreams());
+    const first = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(first.some((s) => s.maxHeight === 2160)).toBe(false);
+
+    // The 4K release exists now. Recovery must not be served a remembered miss.
+    let torrentioCalls = 0;
+    mockTorrentioStreams(buildStreams(), () => {
+      torrentioCalls++;
+    });
+    const refreshed = await resolveDebridSources({
+      tmdbId: 1,
+      mediaType: "movie",
+      forceRefresh: true,
+    });
+
+    expect(torrentioCalls).toBe(1);
+    expect(refreshed.some((s) => s.maxHeight === 2160)).toBe(true);
+  });
+
+  it("full recovery: expires signed RD slots and resolves a fresh roster", async () => {
+    mockTorrentioStreams(buildStreams());
+    const first = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(first.length).toBeGreaterThanOrEqual(6);
+
+    let torrentioCalls = 0;
+    mockTorrentioStreams(buildStreams(), () => {
+      torrentioCalls++;
+    });
+    const refreshed = await resolveDebridSources({
+      tmdbId: 1,
+      mediaType: "movie",
+      forceRefresh: true,
+    });
+
+    expect(torrentioCalls).toBe(1);
+    expect(refreshed.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("fast path: cached MKV native slot is a miss so the player never remuxes", async () => {
+    mockTorrentioStreams([]);
+    cacheStore.set(`${IMDB}|movie|0|0|native-1080-1|realdebrid`, {
+      title: "Legacy.1080p.H264",
+      source: "legacy",
+      url: `http://127.0.0.1:${server.port}/cdn/legacy.1080p.h264.mkv`,
+      compat: "native",
+      codec: "h264",
+    });
+
+    const sources = await resolveFastDebridSources({
+      tmdbId: 1,
+      mediaType: "movie",
+    });
+
+    expect(sources).toHaveLength(0);
+  });
+
+  it("full path: rejects a resolved short clip and falls through to the next ranked release", async () => {
+    const slots = ["native-2160", "safari-2160", "native-1080-2", "native-1080-3"];
+    for (const slot of slots) {
+      cacheStore.set(`${IMDB}|movie|0|0|${slot}|realdebrid`, {
+        title: `Cached ${slot}`,
+        source: slot,
+        url: `http://127.0.0.1:${server.port}/cdn/cached-${slot}.mp4`,
+        compat: slot === "safari-2160" ? "safari" : "native",
+      });
+    }
+    const goodHash = "2".repeat(40);
+    mockTorrentioStreams([
+      {
+        // Metadata claims a plausible feature size so the resolver still
+        // exercises media validation and falls through after the CDN proves
+        // that the object is only a short clip.
+        title: "Movie.2024.1080p.WEB-DL.H264.CLIP\nseeders 999 size 3 GB source X",
+        infoHash: SMALL_CLIP_HASH,
+        fileIdx: 0,
+        url: resolveProxyUrl(SMALL_CLIP_HASH, 0, "movie.clip.1080p.h264.mp4"),
+      },
+      {
+        title: "Movie.2024.1080p.WEB-DL.H264-GOOD\n👤 50 💾 3 GB ⚙️ X",
+        infoHash: goodHash,
+        fileIdx: 0,
+        url: resolveProxyUrl(goodHash, 0, "movie.1080p.h264.mp4"),
+      },
+    ]);
+
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    const native1080 = sources.find((source) => source.id.endsWith("native-1080-1"));
+    expect(native1080?.url).toContain(goodHash);
+    expect(native1080?.url).not.toContain(SMALL_CLIP_HASH);
+    const cached = cacheStore.get(`${IMDB}|movie|0|0|native-1080-1|realdebrid`) as
+      | { url?: string }
+      | undefined;
+    expect(cached?.url).toContain(goodHash);
+  });
+
+  it("full path: rejects an unknown native container whose signature is M2TS", async () => {
+    const slots = [
+      "native-2160",
+      "safari-2160",
+      "native-1080-2",
+      "native-1080-3",
+    ];
+    for (const slot of slots) {
+      cacheStore.set(`${IMDB}|movie|0|0|${slot}|realdebrid`, {
+        title: `Cached ${slot}`,
+        source: slot,
+        url: `http://127.0.0.1:${server.port}/cdn/cached-${slot}.mp4`,
+        compat: slot === "safari-2160" ? "safari" : "native",
+      });
+    }
+    mockTorrentioStreams([
+      {
+        title: "Movie.2024.1080p.WEB-DL.H264-UNKNOWN\n👤 50 💾 3 GB",
+        infoHash: UNSUPPORTED_CONTAINER_HASH,
+        fileIdx: 0,
+        url: resolveProxyUrl(
+          UNSUPPORTED_CONTAINER_HASH,
+          0,
+          "movie.unknown.1080p.h264.m2ts"
+        ),
+      },
+    ]);
+
+    const sources = await resolveDebridSources({
+      tmdbId: 1,
+      mediaType: "movie",
+    });
+
+    expect(
+      sources.some((source) =>
+        source.url.includes(UNSUPPORTED_CONTAINER_HASH)
+      )
+    ).toBe(false);
+    expect(
+      cacheStore.has(
+        `${IMDB}|movie|0|0|native-1080-1|realdebrid`
+      )
+    ).toBe(false);
+  });
+
+  it("full path: ignores non-cached RD-download rows and uses an instant native 720p availability fallback", async () => {
+    mockTorrentioStreams([
+      {
+        name: "[RD download] Torrentio\n1080p",
+        title: "Episode.1080p.H264.mp4\n👤 999 💾 1 GB",
+        infoHash: SMALL_CLIP_HASH,
+        fileIdx: 0,
+        url: resolveProxyUrl(
+          SMALL_CLIP_HASH,
+          0,
+          "episode.not-instant.1080p.h264.mp4"
+        ),
+      },
+      {
+        name: "[RD+] Torrentio\n720p",
+        title: "Episode.720p.H264.mp4\n👤 20 💾 400 MB",
+        infoHash: FALLBACK_720_HASH,
+        fileIdx: 0,
+        url: resolveProxyUrl(
+          FALLBACK_720_HASH,
+          0,
+          "episode.instant.720p.h264.mp4"
+        ),
+      },
+    ]);
+
+    const sources = await resolveDebridSources({
+      tmdbId: 1,
+      mediaType: "tv",
+      season: 1,
+      episode: 1,
+    });
+
+    expect(sources).toHaveLength(1);
+    expect(sources[0]?.id.endsWith("native-720")).toBe(true);
+    expect(sources[0]?.quality).toBe("720p");
+    expect(sources[0]?.maxHeight).toBe(720);
+    expect(sources[0]?.url).toContain(FALLBACK_720_HASH);
+    expect(sources[0]?.url).not.toContain(SMALL_CLIP_HASH);
+  });
+
+  it("full path: treats an implausibly small warm-cache row as missing and replaces it", async () => {
+    cacheStore.set(`${IMDB}|movie|0|0|native-1080-1|realdebrid`, {
+      title: "Generic pack that resolved to a 30-second clip",
+      source: SMALL_CLIP_HASH,
+      url: `http://127.0.0.1:${server.port}/cdn/${SMALL_CLIP_HASH}.mp4`,
+      compat: "native",
+    });
+    mockTorrentioStreams(buildStreams());
+
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(sources.some((source) => source.url.includes(SMALL_CLIP_HASH))).toBe(false);
+    const cached = cacheStore.get(`${IMDB}|movie|0|0|native-1080-1|realdebrid`) as
+      | { url?: string }
+      | undefined;
+    expect(cached?.url).not.toContain(SMALL_CLIP_HASH);
+    expect(new Set(sources.map((source) => source.url)).size).toBe(sources.length);
+  });
+
+  it("full path: invalidates a bad warm row even when no replacement resolves", async () => {
+    const key = `${IMDB}|movie|0|0|native-1080-1|realdebrid`;
+    cacheStore.set(key, {
+      title: "Short clip with no available replacement",
+      source: SMALL_CLIP_HASH,
+      url: `http://127.0.0.1:${server.port}/cdn/${SMALL_CLIP_HASH}.mp4`,
+      compat: "native",
+    });
+    mockTorrentioStreams([]);
+
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(sources).toEqual([]);
+    expect(cacheStore.has(key)).toBe(false);
+  });
+
+  it("full path: collapses duplicate warm slots and refills with an unoccupied release", async () => {
+    const slots = ["native-2160", "safari-2160", "native-1080-1", "native-1080-2", "native-1080-3"];
+    for (const slot of slots) {
+      const duplicate1080 = slot === "native-1080-1" || slot === "native-1080-2";
+      const url = duplicate1080
+        ? `http://127.0.0.1:${server.port}/cdn/legacy-rotated-yify.mp4`
+        : `http://127.0.0.1:${server.port}/cdn/cached-${slot}.mp4`;
+      cacheStore.set(`${IMDB}|movie|0|0|${slot}|realdebrid`, {
+        title: duplicate1080
+          ? "Movie.2024.1080p.WEB-DL.H264-GRP0"
+          : `Cached ${slot}`,
+        // Legacy rows can contain only a now-rotated direct URL, with no hash.
+        // The normalized release title must bridge identity to the fresh
+        // candidate even though its new redirect target differs.
+        source: duplicate1080 ? url : slot,
+        url,
+        compat: slot === "safari-2160" ? "safari" : "native",
+      });
+    }
+    mockTorrentioStreams(buildStreams());
+
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(sources.length).toBeGreaterThanOrEqual(6);
+    expect(new Set(sources.map((source) => source.url)).size).toBeGreaterThanOrEqual(6);
+    const refilled = cacheStore.get(`${IMDB}|movie|0|0|native-1080-2|realdebrid`) as
+      | { source?: string }
+      | undefined;
+    expect(refilled?.source).not.toBe(NATIVE_1080_HASHES[0]);
+  });
+
+  it("fast path: cold cache is CACHE-ONLY — returns [] immediately (no live network in the awaited path), then backgrounds the full roster resolve", async () => {
+    mockTorrentioStreams(buildStreams());
+    const started = Date.now();
+    const sources = await resolveFastDebridSources({ tmdbId: 1, mediaType: "movie" });
+    const elapsedMs = Date.now() - started;
+
+    // The whole point of this fix: a cold cache must NEVER spend time on a
+    // live Torrentio/RD resolve inside the awaited fast-path call — it
+    // returns nothing for THIS request rather than block on network.
+    expect(sources).toEqual([]);
+    expect(elapsedMs).toBeLessThan(300);
+
+    // The full live roster resolve still happens — entirely in the
+    // background (fire-and-forget, not awaited by the fast call itself) —
+    // so poll briefly for all 5 slots to land in cache.
+    const pollDeadline = Date.now() + 2_000;
+    let rdRowCount = 0;
+    while (Date.now() < pollDeadline) {
+      rdRowCount = Array.from(cacheStore.keys()).filter((k) => k.endsWith("|realdebrid")).length;
+      if (rdRowCount >= 5) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(rdRowCount).toBeGreaterThanOrEqual(6);
+  });
+
+  it("fast path: warm cache hit returns near-instantly with the cached source, well under the fast deadline", async () => {
+    mockTorrentioStreams([]); // background fill (fires regardless of the cache hit) finds nothing further — harmless.
+    cacheStore.set(`${IMDB}|movie|0|0|native-2160|realdebrid`, {
+      title: "Movie.2024.2160p.WEB-DL.H264-GRP",
+      source: NATIVE_2160_HASH,
+      url: "https://51.download.real-debrid.com/d/cached4k/movie.mp4",
+      compat: "native",
+    });
+
+    const started = Date.now();
+    const sources = await resolveFastDebridSources({ tmdbId: 1, mediaType: "movie" });
+    const elapsedMs = Date.now() - started;
+
+    expect(sources.length).toBe(1);
+    expect(sources[0]?.url).toBe("https://51.download.real-debrid.com/d/cached4k/movie.mp4");
+    expect(sources[0]?.maxHeight).toBe(2160);
+    expect(elapsedMs).toBeLessThan(500);
+  });
+
+  it("fast path: no token configured -> [] immediately, no network", async () => {
+    delete process.env.REAL_DEBRID_API_TOKEN;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      throw new Error("should never fetch without a token");
+    }) as unknown as typeof fetch;
+
+    const sources = await resolveFastDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(sources).toEqual([]);
+    expect(calls).toBe(0);
+  });
+});

@@ -1,0 +1,570 @@
+/* Title card loader — poster, a dark room, honest stages, living light. */
+
+.bloom-stage {
+  --bloom-hue: 280;
+  --bloom-fill: 0;
+  --crimson: 8 86% 56%;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --bloom-exit: cubic-bezier(0.4, 0, 0.2, 1);
+  background-color: #000;
+  opacity: 1;
+}
+
+/*
+ * Match-cut into the stream. Chrome leaves first, the poster flies into
+ * the lens, then the black veil lifts so the already-playing frame is
+ * revealed — not a hard cut of the whole overlay.
+ */
+.bloom-stage--out {
+  animation: bloom-stage-clear 1040ms var(--bloom-exit) forwards;
+}
+
+.bloom-stage--out .bloom-copy {
+  animation: bloom-chrome-out 280ms var(--bloom-exit) forwards;
+}
+
+.bloom-stage--out .bloom-card-wrap {
+  animation: bloom-matchcut 920ms var(--bloom-exit) forwards;
+}
+
+.bloom-stage--out .bloom-card,
+.bloom-stage--out .bloom-card-sheen {
+  animation: none;
+}
+
+.bloom-stage--out .bloom-wash,
+.bloom-stage--out .bloom-aurora,
+.bloom-stage--out .bloom-room,
+.bloom-stage--out .bloom-dither {
+  animation: bloom-veil-out 1040ms var(--bloom-exit) forwards;
+}
+
+.bloom-wash {
+  position: absolute;
+  inset: -10%;
+  width: 120%;
+  height: 120%;
+  object-fit: cover;
+  filter: blur(52px) saturate(1.2) brightness(0.42);
+  opacity: 0.62;
+  transform: scale(1.1);
+  animation: bloom-wash-drift 28s ease-in-out infinite alternate;
+}
+
+.bloom-aurora {
+  position: absolute;
+  inset: -20%;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      42% 36% at 50% 38%,
+      hsl(var(--bloom-hue) 80% 58% / 0.28) 0%,
+      transparent 70%
+    ),
+    radial-gradient(
+      28% 22% at 28% 72%,
+      hsl(var(--crimson) / 0.16) 0%,
+      transparent 70%
+    );
+  animation: bloom-aurora 7.5s ease-in-out infinite alternate;
+}
+
+.bloom-room {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(
+      70% 55% at 50% 42%,
+      hsl(var(--bloom-hue) 40% 18% / 0.28) 0%,
+      transparent 62%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(0, 0, 0, 0.34) 0%,
+      transparent 28%,
+      transparent 58%,
+      rgba(0, 0, 0, 0.78) 100%
+    );
+}
+
+.bloom-card-wrap {
+  position: relative;
+  z-index: 2;
+  animation: bloom-enter 820ms var(--ease) both;
+}
+
+.bloom-card {
+  position: relative;
+  width: min(42vw, 228px);
+  aspect-ratio: 2 / 3;
+  border-radius: 16px;
+  overflow: hidden;
+  background:
+    linear-gradient(
+      180deg,
+      hsl(var(--bloom-hue) 28% 16%) 0%,
+      #0c0c12 100%
+    );
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 28px 70px rgba(0, 0, 0, 0.58),
+    0 0 90px hsl(var(--bloom-hue) 70% 48% / 0.28);
+  animation: bloom-glow 4.8s ease-in-out infinite;
+}
+
+.bloom-card[data-art="loading"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: linear-gradient(
+    105deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.08) 48%,
+    transparent 66%
+  );
+  animation: bloom-card-sheen 1.6s ease-in-out infinite;
+}
+
+.bloom-card-sheen {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(
+    115deg,
+    transparent 32%,
+    rgba(255, 255, 255, 0.18) 48%,
+    transparent 64%
+  );
+  transform: translateX(-130%);
+  animation: bloom-card-sheen 4.6s var(--ease) 900ms infinite;
+}
+
+.bloom-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: transparent;
+  opacity: 0;
+  transition: opacity 480ms var(--ease);
+}
+
+.bloom-poster--preview {
+  z-index: 0;
+}
+
+.bloom-poster--ready {
+  opacity: 1;
+  z-index: 1;
+}
+
+.bloom-card[data-art="ready"] {
+  animation: bloom-glow 4.8s ease-in-out infinite, bloom-still 18s ease-in-out infinite alternate;
+}
+
+.bloom-mark {
+  --ab-size: 96px;
+  width: 96px;
+  height: 96px;
+}
+
+.bloom-copy {
+  position: relative;
+  z-index: 2;
+  margin-top: 1.65rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.62rem;
+  padding: 0 1.5rem;
+  max-width: 38rem;
+  text-align: center;
+  animation: bloom-enter 820ms var(--ease) 70ms both;
+}
+
+.bloom-wordmark {
+  margin: 0;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.64rem;
+  font-weight: 500;
+  letter-spacing: 0.36em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.48);
+}
+
+.bloom-title {
+  margin: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-display), Montserrat, ui-sans-serif, sans-serif;
+  font-size: clamp(1.3rem, 3.1vw, 1.95rem);
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  color: #fff;
+  text-shadow: 0 2px 24px rgba(0, 0, 0, 0.7);
+}
+
+.bloom-steps {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.85rem;
+  margin: 0.15rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bloom-step {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  color: rgba(255, 255, 255, 0.28);
+  transition: color 360ms var(--ease);
+}
+
+.bloom-step[data-state="now"] {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.bloom-step[data-state="done"] {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.bloom-step-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 99px;
+  background: currentColor;
+  box-shadow: none;
+}
+
+.bloom-step[data-state="now"] .bloom-step-dot {
+  background: hsl(var(--crimson));
+  box-shadow: 0 0 10px hsl(var(--crimson) / 0.7);
+  animation: bloom-dot-breathe 1.6s ease-in-out infinite;
+}
+
+.bloom-step-label {
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.bloom-meter {
+  position: relative;
+  width: min(14.5rem, 56vw);
+  height: 3px;
+  margin-top: 0.2rem;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.bloom-meter-pulse {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 42%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.22),
+    transparent
+  );
+  animation: bloom-indeterminate 1.85s ease-in-out infinite;
+}
+
+.bloom-meter-fill {
+  position: relative;
+  display: block;
+  height: 100%;
+  width: calc(var(--bloom-fill) * 100%);
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    hsl(var(--crimson)),
+    hsl(var(--bloom-hue) 82% 72%)
+  );
+  box-shadow: 0 0 12px hsl(var(--crimson) / 0.45);
+  transition: width 560ms var(--ease);
+  overflow: hidden;
+  z-index: 1;
+}
+
+.bloom-meter-fill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.5) 50%,
+    transparent 100%
+  );
+  transform: translateX(-120%);
+  animation: bloom-sheen 2.1s var(--ease) infinite;
+}
+
+.bloom-chips {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 8px;
+  margin-top: 0.05rem;
+}
+
+.bloom-chip {
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.28);
+  transform: scale(0.7);
+  animation: bloom-chip-in 380ms var(--ease) both;
+}
+
+.bloom-chip[data-premium="true"] {
+  width: 9px;
+  height: 9px;
+  background: hsl(var(--bloom-hue) 80% 68%);
+  box-shadow: 0 0 8px hsl(var(--bloom-hue) 80% 60% / 0.55);
+}
+
+.bloom-chip[data-chosen="true"] {
+  background: #fff;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.55);
+}
+
+.bloom-chip--ghost {
+  background: rgba(255, 255, 255, 0.1);
+  animation: bloom-ghost 1.5s ease-in-out infinite;
+}
+
+.bloom-chip--ghost:nth-child(2) {
+  animation-delay: 0.18s;
+}
+
+.bloom-chip--ghost:nth-child(3) {
+  animation-delay: 0.36s;
+}
+
+.bloom-phase {
+  margin: 0.2rem 0 0;
+  font-size: 0.7rem;
+  font-weight: 550;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.62);
+  transition: color 280ms var(--ease);
+}
+
+.bloom-roster {
+  margin-left: 0.55rem;
+  padding-left: 0.55rem;
+  border-left: 1px solid rgba(255, 255, 255, 0.16);
+  letter-spacing: 0.12em;
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.bloom-dither {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+@keyframes bloom-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes bloom-still {
+  from { transform: scale(1); }
+  to { transform: scale(1.05); }
+}
+
+@keyframes bloom-wash-drift {
+  from { transform: scale(1.1) translate3d(-1.2%, 0, 0); }
+  to { transform: scale(1.18) translate3d(1.4%, -1%, 0); }
+}
+
+@keyframes bloom-aurora {
+  from { opacity: 0.7; transform: scale(1) translate3d(0, 0, 0); }
+  to { opacity: 1; transform: scale(1.08) translate3d(0, -1.5%, 0); }
+}
+
+@keyframes bloom-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.1),
+      0 28px 70px rgba(0, 0, 0, 0.58),
+      0 0 70px hsl(var(--bloom-hue) 70% 48% / 0.18);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.16),
+      0 32px 80px rgba(0, 0, 0, 0.6),
+      0 0 110px hsl(var(--bloom-hue) 75% 52% / 0.38);
+  }
+}
+
+@keyframes bloom-card-sheen {
+  0% { transform: translateX(-130%); }
+  35%,
+  100% { transform: translateX(130%); }
+}
+
+@keyframes bloom-sheen {
+  0% { transform: translateX(-120%); }
+  55%,
+  100% { transform: translateX(160%); }
+}
+
+@keyframes bloom-indeterminate {
+  0% { transform: translateX(-80%); }
+  100% { transform: translateX(260%); }
+}
+
+@keyframes bloom-dot-breathe {
+  0%,
+  100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.8; }
+}
+
+@keyframes bloom-chip-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes bloom-ghost {
+  0%,
+  100% { opacity: 0.35; }
+  50% { opacity: 0.8; }
+}
+
+@keyframes bloom-chrome-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+}
+
+@keyframes bloom-matchcut {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+    filter: blur(0);
+  }
+  42% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.78);
+    filter: blur(10px);
+  }
+}
+
+@keyframes bloom-veil-out {
+  to { opacity: 0; }
+}
+
+@keyframes bloom-stage-clear {
+  0%,
+  32% { background-color: #000; }
+  100% { background-color: transparent; }
+}
+
+@keyframes bloom-stage-fade {
+  to { opacity: 0; }
+}
+
+.bloom-stage[data-device="tv"] .bloom-wash {
+  filter: none;
+  opacity: 0.28;
+  animation: none;
+}
+
+.bloom-stage[data-device="tv"] .bloom-aurora,
+.bloom-stage[data-device="tv"] .bloom-poster,
+.bloom-stage[data-device="tv"] .bloom-card-wrap,
+.bloom-stage[data-device="tv"] .bloom-copy,
+.bloom-stage[data-device="tv"] .bloom-card,
+.bloom-stage[data-device="tv"] .bloom-card-sheen,
+.bloom-stage[data-device="tv"] .bloom-meter-pulse,
+.bloom-stage[data-device="tv"] .bloom-step-dot {
+  animation: none;
+}
+
+.bloom-stage[data-device="tv"].bloom-stage--out {
+  animation: bloom-stage-fade 400ms ease forwards;
+}
+
+.bloom-stage[data-device="tv"].bloom-stage--out .bloom-copy,
+.bloom-stage[data-device="tv"].bloom-stage--out .bloom-card-wrap,
+.bloom-stage[data-device="tv"].bloom-stage--out .bloom-wash,
+.bloom-stage[data-device="tv"].bloom-stage--out .bloom-aurora,
+.bloom-stage[data-device="tv"].bloom-stage--out .bloom-room,
+.bloom-stage[data-device="tv"].bloom-stage--out .bloom-dither {
+  animation: none;
+}
+
+.bloom-stage[data-device="tv"] .bloom-card {
+  width: min(28vmin, 240px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bloom-poster,
+  .bloom-card-wrap,
+  .bloom-copy,
+  .bloom-card,
+  .bloom-card-sheen,
+  .bloom-wash,
+  .bloom-aurora,
+  .bloom-meter-fill,
+  .bloom-meter-fill::after,
+  .bloom-meter-pulse,
+  .bloom-step-dot,
+  .bloom-chip,
+  .bloom-chip--ghost {
+    animation: none;
+  }
+
+  .bloom-stage--out {
+    animation: bloom-stage-fade 400ms ease forwards;
+  }
+
+  .bloom-stage--out .bloom-copy,
+  .bloom-stage--out .bloom-card-wrap,
+  .bloom-stage--out .bloom-wash,
+  .bloom-stage--out .bloom-aurora,
+  .bloom-stage--out .bloom-room,
+  .bloom-stage--out .bloom-dither {
+    animation: none;
+  }
+}
