@@ -918,6 +918,37 @@ async function readCachedRdSlots(
  * background fill) that already paid for a Torrentio fetch can reuse it
  * instead of hitting Torrentio twice for the same request.
  */
+type RosterResult = { sources: PlaybackSource[]; candidates: DebridCandidate[] };
+
+/**
+ * One live roster resolve per title at a time. The fast path starts a
+ * background fill and the player fires a full request in parallel; without
+ * sharing, both resolved the same candidates against Real-Debrid at once,
+ * doubling traffic and provoking 503s.
+ */
+const inflightRosters = new Map<string, Promise<RosterResult>>();
+
+function rosterKey(keyBase: KeyBase): string {
+  return `${keyBase.imdbId}:${keyBase.mediaType}:${keyBase.season ?? 0}:${keyBase.episode ?? 0}`;
+}
+
+function resolveRealDebridSlotsShared(
+  keyBase: KeyBase,
+  req: ResolveDebridSourcesRequest,
+  rdToken: string,
+  preFetchedCandidates?: DebridCandidate[]
+): Promise<RosterResult> {
+  const key = rosterKey(keyBase);
+  const existing = inflightRosters.get(key);
+  // An explicit "try again" must not be answered by the attempt that failed.
+  if (existing && !req.forceRefresh) return existing;
+  const run = resolveRealDebridSlots(keyBase, req, rdToken, preFetchedCandidates).finally(() => {
+    if (inflightRosters.get(key) === run) inflightRosters.delete(key);
+  });
+  inflightRosters.set(key, run);
+  return run;
+}
+
 async function resolveRealDebridSlots(
   keyBase: KeyBase,
   req: ResolveDebridSourcesRequest,
@@ -950,79 +981,64 @@ async function resolveRealDebridSlots(
     }));
 
   const slotOptions = buildRdSlotOptions(candidates, missing, occupiedIdentities);
+  // The slot groups draw from disjoint candidate pools (native 4K, native
+  // 1080p, HEVC/remux 4K, the rest), so they resolve concurrently. Run one
+  // after another they shared a single deadline, and a slow or uncached 4K
+  // pool could spend all of it before 1080p was even attempted.
   const native4kSlots = missing.filter((slot) => slot.startsWith("native-2160"));
-  const rankedNative4k =
-    native4kSlots.length > 0
-      ? await resolveRankedCandidatePool(
-          slotOptions[native4kSlots[0]!] ?? [],
-          native4kSlots.length,
+  const native1080Slots = missing.filter((slot) => slot.startsWith("native-1080"));
+  const remux4kSlots = missing.filter((slot) => slot.startsWith("safari-2160"));
+  const resolvePool = (slots: DebridSlot[]) =>
+    slots.length > 0
+      ? resolveRankedCandidatePool(
+          slotOptions[slots[0]!] ?? [],
+          slots.length,
           rdToken,
           deadline,
           req.mediaType,
           occupiedIdentities
         )
-      : [];
+      : Promise.resolve([] as ResolvedCandidate[]);
+  const otherMissingBase = missing.filter(
+    (slot) =>
+      !slot.startsWith("native-1080") &&
+      !slot.startsWith("native-2160") &&
+      !slot.startsWith("safari-2160")
+  );
+  const [rankedNative4k, rankedNative1080, rankedRemux4k, otherEntriesAll] = await Promise.all([
+    resolvePool(native4kSlots),
+    resolvePool(native1080Slots),
+    resolvePool(remux4kSlots),
+    mapWithConcurrency(otherMissingBase, RESOLVE_CONCURRENCY, async (slot) => {
+      const options = slotOptions[slot];
+      if (!options?.length) return null;
+      const resolved = await resolveSlotCandidate(
+        options,
+        rdToken,
+        deadline,
+        req.mediaType,
+        occupiedIdentities
+      );
+      return resolved ? { slot, resolved } : null;
+    }),
+  ]);
   const native4kEntries = rankedNative4k.map((resolved, index) => ({
     slot: native4kSlots[index]!,
     resolved,
   }));
-  const native1080Slots = missing.filter((slot) =>
-    slot.startsWith("native-1080")
-  );
-  const rankedNative1080 =
-    native1080Slots.length > 0
-      ? await resolveRankedCandidatePool(
-          slotOptions[native1080Slots[0]!] ?? [],
-          native1080Slots.length,
-          rdToken,
-          deadline,
-          req.mediaType,
-          occupiedIdentities
-        )
-      : [];
   const nativeEntries = rankedNative1080.map((resolved, index) => ({
     slot: native1080Slots[index]!,
     resolved,
   }));
-
-  const remux4kSlots = missing.filter((slot) => slot.startsWith("safari-2160"));
-  const rankedRemux4k =
-    remux4kSlots.length > 0
-      ? await resolveRankedCandidatePool(
-          slotOptions[remux4kSlots[0]!] ?? [],
-          remux4kSlots.length,
-          rdToken,
-          deadline,
-          req.mediaType,
-          occupiedIdentities
-        )
-      : [];
   const remux4kEntries = rankedRemux4k.map((resolved, index) => ({
     slot: remux4kSlots[index]!,
     resolved,
   }));
-
   // A successful native 1080p roster makes the 720p availability fallback
-  // redundant. Do not eagerly resolve/cache a sixth, lower-quality source.
-  const otherMissing = missing.filter(
-    (slot) =>
-      !slot.startsWith("native-1080") &&
-      !slot.startsWith("native-2160") &&
-      !slot.startsWith("safari-2160") &&
-      !(slot === "native-720" && nativeEntries.length > 0)
+  // redundant; drop it rather than cache a lower-quality extra source.
+  const otherEntries = otherEntriesAll.filter(
+    (entry) => !(entry?.slot === "native-720" && nativeEntries.length > 0)
   );
-  const otherEntries = await mapWithConcurrency(otherMissing, RESOLVE_CONCURRENCY, async (slot) => {
-    const options = slotOptions[slot];
-    if (!options?.length) return null;
-    const resolved = await resolveSlotCandidate(
-      options,
-      rdToken,
-      deadline,
-      req.mediaType,
-      occupiedIdentities
-    );
-    return resolved ? { slot, resolved } : null;
-  });
   let resolvedPerSlot = [
     ...native4kEntries,
     ...nativeEntries,
@@ -1137,7 +1153,7 @@ function backgroundFillRemainingSlots(
 ): void {
   void (async () => {
     try {
-      await resolveRealDebridSlots(keyBase, req, rdToken, preFetchedCandidates);
+      await resolveRealDebridSlotsShared(keyBase, req, rdToken, preFetchedCandidates);
     } catch {
       // Swallow — the fast path already returned; next request re-resolves.
     }
@@ -1349,7 +1365,7 @@ export async function resolveDebridSources(
         );
       }
       const rdToken = process.env.REAL_DEBRID_API_TOKEN as string;
-      const { sources: rdSources, candidates } = await resolveRealDebridSlots(keyBase, req, rdToken);
+      const { sources: rdSources, candidates } = await resolveRealDebridSlotsShared(keyBase, req, rdToken);
       sources.push(...rdSources);
       rdCandidates = candidates;
     }
