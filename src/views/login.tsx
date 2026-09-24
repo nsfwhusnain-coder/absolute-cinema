@@ -4,13 +4,15 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { signIn } from "next-auth/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
-import { ArrowLeft, Check, Delete, Loader2, Plus, UserRound } from "lucide-react";
+import { ArrowLeft, Check, Delete, Loader2, Lock, Plus, UserRound } from "lucide-react";
 import { toast } from "sonner";
 import { BrandLockup } from "@/components/brand-mark";
 import { useNavigate } from "@/hooks/use-navigate";
 import { transitionEnter } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { AVATAR_COLORS } from "@/lib/avatar-colors";
+import { defaultAvatar } from "@/lib/avatars";
+import { AvatarPicker, ProfileAvatar } from "@/components/profile-avatar";
 
 export const LAST_PROFILE_KEY = "absolute-cinema:last-profile";
 
@@ -60,6 +62,9 @@ export function writeLastProfile(name: string): void {
 interface ProfileSummary {
   name: string;
   avatarColor: string;
+  avatar: string;
+  /** Asks for a PIN before opening. */
+  locked: boolean;
 }
 
 interface ProfilesResponse {
@@ -82,29 +87,6 @@ async function rateLimitMessage(name: string): Promise<string | null> {
     // fall through to the generic message
   }
   return null;
-}
-
-function initials(name: string): string {
-  return name
-    .split(/\s+/)
-    .map((part) => part[0])
-    .filter(Boolean)
-    .slice(0, 2)
-    .join("")
-    .toUpperCase();
-}
-
-export function ProfileAvatar({ name, color, size = "lg" }: { name: string; color: string; size?: "sm" | "md" | "lg" }) {
-  const dims = size === "lg" ? "h-20 w-20 text-3xl sm:h-32 sm:w-32 sm:text-4xl" : size === "md" ? "h-16 w-16 text-2xl" : "h-8 w-8 text-sm";
-  return (
-    <span
-      aria-hidden
-      className={cn("flex items-center justify-center rounded-[28%] font-display font-bold text-white shadow-lg", dims)}
-      style={{ background: `linear-gradient(145deg, ${color}, color-mix(in srgb, ${color} 55%, #000))` }}
-    >
-      {initials(name)}
-    </span>
-  );
 }
 
 type Screen = { kind: "pick" } | { kind: "pin"; profile: ProfileSummary } | { kind: "create" } | { kind: "manual" };
@@ -172,7 +154,8 @@ export function LoginView({ callbackUrl, error }: { callbackUrl?: string; error?
               {screen.kind === "pick" && (
                 <PickScreen
                   data={data}
-                  onPick={(profile) => setScreen({ kind: "pin", profile })}
+                  onLocked={(profile) => setScreen({ kind: "pin", profile })}
+                  onDone={finish}
                   onAdd={() => setScreen({ kind: "create" })}
                   onManual={() => setScreen({ kind: "manual" })}
                 />
@@ -211,16 +194,34 @@ export function LoginView({ callbackUrl, error }: { callbackUrl?: string; error?
 
 function PickScreen({
   data,
-  onPick,
+  onLocked,
+  onDone,
   onAdd,
   onManual,
 }: {
   data: ProfilesResponse;
-  onPick: (profile: ProfileSummary) => void;
+  onLocked: (profile: ProfileSummary) => void;
+  onDone: (name: string) => void;
   onAdd: () => void;
   onManual: () => void;
 }) {
   const last = readLastProfile();
+  const [opening, setOpening] = useState<string | null>(null);
+
+  // Unlocked profiles open with one tap, like Netflix; locked ones ask for their PIN.
+  const open = async (profile: ProfileSummary) => {
+    if (profile.locked) return onLocked(profile);
+    if (opening) return;
+    setOpening(profile.name);
+    const res = await signIn("credentials", { name: profile.name, redirect: false });
+    if (res?.error) {
+      setOpening(null);
+      toast.error((await rateLimitMessage(profile.name)) ?? `Couldn't open ${profile.name}. Try again.`);
+      return;
+    }
+    onDone(profile.name);
+  };
+
   return (
     <div className="mx-auto flex max-w-4xl flex-col items-center">
       <h1 className="font-display text-3xl font-bold tracking-tight sm:text-5xl">Who&apos;s watching?</h1>
@@ -229,12 +230,23 @@ function PickScreen({
           <li key={profile.name}>
             <button
               type="button"
-              onClick={() => onPick(profile)}
+              onClick={() => void open(profile)}
+              disabled={opening !== null}
               data-tv-first-focus={profile.name === last ? true : undefined}
-              className="group flex w-24 flex-col items-center gap-3 rounded-3xl p-1 focus-visible:outline-none sm:w-36"
+              className="group flex w-24 flex-col items-center gap-3 rounded-3xl p-1 focus-visible:outline-none disabled:cursor-wait sm:w-36"
             >
-              <span className="rounded-[30%] ring-0 ring-white/80 ring-offset-4 ring-offset-[#050508] transition group-hover:scale-105 group-hover:ring-2 group-focus-visible:scale-105 group-focus-visible:ring-2">
-                <ProfileAvatar name={profile.name} color={profile.avatarColor} />
+              <span className="relative rounded-[30%] ring-0 ring-white/80 ring-offset-4 ring-offset-[#050508] transition group-hover:scale-105 group-hover:ring-2 group-focus-visible:scale-105 group-focus-visible:ring-2">
+                <ProfileAvatar name={profile.name} color={profile.avatarColor} avatar={profile.avatar} />
+                {opening === profile.name && (
+                  <span className="absolute inset-0 flex items-center justify-center rounded-[28%] bg-black/45">
+                    <Loader2 className="h-7 w-7 animate-spin" />
+                  </span>
+                )}
+                {profile.locked && (
+                  <span className="glass-clear absolute -bottom-1 -right-1 flex h-7 w-7 items-center justify-center rounded-full" aria-label="Locked with a PIN">
+                    <Lock className="h-3.5 w-3.5" />
+                  </span>
+                )}
               </span>
               <span className="max-w-full truncate text-sm font-medium text-white/80 group-hover:text-white">{profile.name}</span>
             </button>
@@ -247,7 +259,7 @@ function PickScreen({
               onClick={onAdd}
               className="group flex w-24 flex-col items-center gap-3 rounded-3xl p-1 focus-visible:outline-none sm:w-36"
             >
-              <span className="flex h-20 w-20 items-center justify-center rounded-[28%] border-2 border-dashed border-white/25 text-white/60 transition group-hover:scale-105 group-hover:border-white/60 group-hover:text-white group-focus-visible:border-white sm:h-32 sm:w-32">
+              <span className="glass-clear flex h-20 w-20 items-center justify-center rounded-[28%] text-white/70 transition group-hover:scale-105 group-hover:text-white sm:h-32 sm:w-32">
                 <Plus className="h-8 w-8 sm:h-10 sm:w-10" />
               </span>
               <span className="text-sm font-medium text-white/60 group-hover:text-white">Add profile</span>
@@ -343,7 +355,7 @@ function PinScreen({ profile, onBack, onDone }: { profile: ProfileSummary; onBac
       <div className="mb-6 self-start">
         <BackButton onClick={onBack} />
       </div>
-      <ProfileAvatar name={profile.name} color={profile.avatarColor} size="md" />
+      <ProfileAvatar name={profile.name} color={profile.avatarColor} avatar={profile.avatar} size="md" />
       <h1 className="mt-4 font-display text-2xl font-bold">{profile.name}</h1>
       <p className="mt-1 text-sm text-white/60">Enter your PIN</p>
       <motion.div key={shake} animate={shake ? { x: [0, -10, 10, -6, 6, 0] } : undefined} transition={{ duration: 0.35 }} className="mt-8">
@@ -380,95 +392,103 @@ function CreateScreen({
   onDone: (name: string) => void;
 }) {
   const [name, setName] = useState("");
+  const [avatar, setAvatar] = useState<string>(defaultAvatar(existing));
+  const [color, setColor] = useState<string>(AVATAR_COLORS[existing % AVATAR_COLORS.length]!);
+  const [lock, setLock] = useState(false);
   const [pin, setPin] = useState("");
   const [confirm, setConfirm] = useState("");
-  const [color, setColor] = useState(AVATAR_COLORS[existing % AVATAR_COLORS.length]!);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (pin !== confirm) return setMessage("The PINs don't match.");
+    if (lock && pin !== confirm) return setMessage("The PINs don't match.");
     setBusy(true);
     setMessage(null);
     const res = await fetch("/api/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: name.trim(), pin, avatarColor: color }),
+      body: JSON.stringify({ name: name.trim(), avatar, avatarColor: color, ...(lock ? { pin } : {}) }),
     });
     const json = (await res.json().catch(() => ({}))) as { error?: string };
     if (!res.ok) {
       setBusy(false);
       return setMessage(json.error ?? "Couldn't create the profile.");
     }
-    const signedIn = await signIn("credentials", { name: name.trim(), pin, redirect: false });
+    const signedIn = await signIn("credentials", { name: name.trim(), ...(lock ? { pin } : {}), redirect: false });
     if (signedIn?.error) {
       setBusy(false);
-      return setMessage("Profile created — sign in to continue.");
+      return setMessage("Profile created. Pick it to continue.");
     }
     onDone(name.trim());
   };
 
-  const valid = name.trim().length >= 2 && /^\d{4,10}$/.test(pin) && confirm.length >= PIN_MIN;
+  const valid = name.trim().length >= 2 && (!lock || (/^\d{4,10}$/.test(pin) && confirm.length >= PIN_MIN));
 
   return (
-    <form onSubmit={submit} className="mx-auto w-full max-w-sm">
+    <form onSubmit={submit} className="mx-auto w-full max-w-md">
       {onBack && (
         <div className="mb-6">
           <BackButton onClick={onBack} />
         </div>
       )}
       <div className="flex flex-col items-center text-center">
-        <ProfileAvatar name={name || "?"} color={color} size="md" />
+        <ProfileAvatar name={name || "?"} color={color} avatar={avatar} size="md" />
         <h1 className="mt-4 font-display text-2xl font-bold">{firstRun ? "Create your profile" : "Add a profile"}</h1>
         <p className="mt-1 text-sm text-white/60">
-          {firstRun ? "This first profile manages the server." : "Just a name and a PIN."}
+          {firstRun ? "This first profile manages the server." : "Pick a name and a picture."}
         </p>
       </div>
-      <div className="glass mt-8 space-y-4 rounded-3xl p-5">
+      <div className="glass-clear mt-8 space-y-5 rounded-3xl p-5">
         <Field label="Name">
           <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} maxLength={24} autoFocus placeholder="e.g. Alex" autoComplete="nickname" />
         </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="PIN">
-            <input
-              className={inputClass}
-              type="password"
-              inputMode="numeric"
-              autoComplete="new-password"
-              value={pin}
-              onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, PIN_MAX))}
-              placeholder="4-10 digits"
-            />
-          </Field>
-          <Field label="Confirm PIN">
-            <input
-              className={inputClass}
-              type="password"
-              inputMode="numeric"
-              autoComplete="new-password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value.replace(/\D/g, "").slice(0, PIN_MAX))}
-              placeholder="Again"
-            />
-          </Field>
-        </div>
         <div>
-          <span className="mb-2 block text-sm font-medium text-white/80">Colour</span>
-          <div className="flex flex-wrap gap-2.5">
-            {AVATAR_COLORS.map((c) => (
-              <button
-                key={c}
-                type="button"
-                aria-label={`Colour ${c}`}
-                aria-pressed={color === c}
-                onClick={() => setColor(c)}
-                className={cn("h-9 w-9 rounded-full ring-offset-2 ring-offset-[#101014] transition", color === c && "ring-2 ring-white")}
-                style={{ background: c }}
-              />
-            ))}
-          </div>
+          <span className="mb-2 block text-sm font-medium text-white/80">Picture</span>
+          <AvatarPicker
+            name={name}
+            avatar={avatar}
+            color={color}
+            onChange={(next) => {
+              if (next.avatar) setAvatar(next.avatar);
+              if (next.color) setColor(next.color);
+            }}
+          />
         </div>
+        <label className="flex cursor-pointer items-center justify-between gap-4">
+          <span>
+            <span className="block text-sm font-medium text-white">Lock with a PIN</span>
+            <span className="block text-xs text-white/55">Off: anyone here can open this profile with one tap.</span>
+          </span>
+          <input type="checkbox" className="peer sr-only" checked={lock} onChange={(e) => setLock(e.target.checked)} />
+          <span className="relative inline-flex h-7 w-12 shrink-0 items-center rounded-full bg-white/15 transition-colors peer-checked:bg-[var(--primary)] peer-focus-visible:ring-2 peer-focus-visible:ring-white/60 after:ml-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow after:transition-transform peer-checked:after:translate-x-5" />
+        </label>
+        {lock && (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="PIN">
+              <input
+                className={inputClass}
+                type="password"
+                inputMode="numeric"
+                autoComplete="new-password"
+                value={pin}
+                onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, PIN_MAX))}
+                placeholder="4-10 digits"
+              />
+            </Field>
+            <Field label="Confirm PIN">
+              <input
+                className={inputClass}
+                type="password"
+                inputMode="numeric"
+                autoComplete="new-password"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value.replace(/\D/g, "").slice(0, PIN_MAX))}
+                placeholder="Again"
+              />
+            </Field>
+          </div>
+        )}
         {message && (
           <p role="alert" className="text-sm text-red-300">
             {message}
@@ -512,10 +532,10 @@ function ManualScreen({
       setBusy(false);
       return setMessage(locked);
     }
-    const res = await signIn("credentials", { name: name.trim(), pin, redirect: false });
+    const res = await signIn("credentials", { name: name.trim(), ...(pin ? { pin } : {}), redirect: false });
     if (res?.error) {
       setBusy(false);
-      return setMessage((await rateLimitMessage(name)) ?? "That name and PIN don't match.");
+      return setMessage((await rateLimitMessage(name)) ?? "No profile with that name, or its PIN isn't right.");
     }
     onDone(name.trim());
   };
@@ -528,16 +548,16 @@ function ManualScreen({
         </div>
       )}
       <div className="flex flex-col items-center text-center">
-        <span className="glass flex h-16 w-16 items-center justify-center rounded-[28%]">
+        <span className="glass-clear flex h-16 w-16 items-center justify-center rounded-[28%]">
           <UserRound className="h-7 w-7" />
         </span>
         <h1 className="mt-4 font-display text-2xl font-bold">Sign in</h1>
       </div>
-      <div className="glass mt-8 space-y-4 rounded-3xl p-5">
+      <div className="glass-clear mt-8 space-y-4 rounded-3xl p-5">
         <Field label="Name">
           <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} autoFocus autoComplete="username" />
         </Field>
-        <Field label="PIN">
+        <Field label="PIN (only if the profile is locked)">
           <input
             className={inputClass}
             type="password"
@@ -554,7 +574,7 @@ function ManualScreen({
         )}
         <button
           type="submit"
-          disabled={busy || !name.trim() || pin.length < PIN_MIN}
+          disabled={busy || !name.trim() || (pin.length > 0 && pin.length < PIN_MIN)}
           className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-white font-semibold text-black transition hover:bg-white/90 disabled:opacity-40"
         >
           {busy && <Loader2 className="h-4 w-4 animate-spin" />} Sign in

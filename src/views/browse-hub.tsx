@@ -27,7 +27,7 @@ const LIST_PAGES = 3;
 export interface BrowseHubProps {
   mediaType: MediaKind;
   title: string;
-  heroFrom: "trending" | "popular";
+  heroFrom: "trending" | "popular" | "acclaimed";
   rows: HubRow[];
 }
 
@@ -47,13 +47,11 @@ export function BrowseHub({ mediaType, title, heroFrom, rows }: BrowseHubProps) 
   const hideAdult = useHideAdult();
 
   const heroPath =
-    mediaType === "movie"
-      ? heroFrom === "trending"
-        ? "trending/movie/week"
-        : "movie/popular/1"
+    heroFrom === "acclaimed"
+      ? `discover/${mediaType}/acclaimed`
       : heroFrom === "trending"
-        ? "trending/tv/week"
-        : "tv/popular/1";
+        ? `trending/${mediaType}/week`
+        : `${mediaType}/popular/1`;
 
   const heroQuery = useQuery({
     queryKey: ["tmdb", "hub-hero", mediaType, heroFrom],

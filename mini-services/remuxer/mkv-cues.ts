@@ -42,6 +42,7 @@ export const CHANNELS_ID = 0x9f;
 export const VIDEO_ID = 0xe0;
 export const COLOUR_ID = 0x55b0;
 export const TRANSFER_CHARACTERISTICS_ID = 0x55ba;
+export const CODEC_PRIVATE_ID = 0x63a2;
 
 /** ITU-T H.273 transfer characteristics that mean HDR. */
 const TRANSFER_PQ = 16;
@@ -57,6 +58,11 @@ export function dynamicRangeFromTransfer(transfer: number | null): DynamicRange 
 
 const VIDEO_TRACK_TYPE = 1;
 const AUDIO_TRACK_TYPE = 2;
+const SUBTITLE_TRACK_TYPE = 0x11;
+/** AVC profile_idc values browsers cannot decode: High 10, High 4:2:2, High 4:4:4. */
+const UNDECODABLE_AVC_PROFILES = new Set([110, 122, 244]);
+/** Text subtitle codecs ffmpeg converts to WebVTT (image formats like PGS are skipped). */
+const TEXT_SUBTITLE_CODECS = /^S_TEXT\/(UTF8|ASS|SSA|WEBVTT)$|^S_(ASS|SSA)$/;
 const DEFAULT_TIMESTAMP_SCALE_NS = 1_000_000;
 const NS_PER_SECOND = 1e9;
 /** Unknown-size marker for an 8-byte-or-less vint whose value bits are all 1. */
@@ -152,6 +158,18 @@ export interface MkvAudioTrack {
   channels: number | null;
 }
 
+export interface MkvSubtitleTrack {
+  /** Zero-based position among ALL subtitle tracks: ffmpeg's `0:s:N`. */
+  subtitleIndex: number;
+  codecId: string;
+  language: string | null;
+  name: string | null;
+  isDefault: boolean;
+  isForced: boolean;
+  /** Text-based, so it can become WebVTT. */
+  text: boolean;
+}
+
 export function readString(buf: Uint8Array, el: EbmlElement): string {
   let end = el.dataStart + el.size;
   while (end > el.dataStart && buf[end - 1] === 0) end--;
@@ -168,6 +186,9 @@ export interface SegmentLayout {
   videoCodecId: string | null;
   dynamicRange: DynamicRange;
   audioTracks: MkvAudioTrack[];
+  subtitleTracks: MkvSubtitleTrack[];
+  /** The video is 10-bit/4:2:2/4:4:4 H.264, which no browser decodes. */
+  videoUndecodable: boolean;
   /** Absolute byte offset of the Cues element, when SeekHead lists it. */
   cuesOffset: number | null;
 }
@@ -191,6 +212,8 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
     videoCodecId: null,
     dynamicRange: "SDR",
     audioTracks: [],
+    subtitleTracks: [],
+    videoUndecodable: false,
     cuesOffset: null,
   };
   let rawDuration: number | null = null;
@@ -230,6 +253,7 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
         let isForced = false;
         let channels: number | null = null;
         let transfer: number | null = null;
+        let avcProfile: number | null = null;
         for (const field of children(head, entry.dataStart, entry.dataStart + entry.size)) {
           if (field.id === TRACK_NUMBER_ID) number = readUint(head, field);
           else if (field.id === TRACK_TYPE_ID) type = readUint(head, field);
@@ -239,6 +263,7 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
           else if (field.id === NAME_ID) name = readString(head, field);
           else if (field.id === FLAG_DEFAULT_ID) isDefault = readUint(head, field) === 1;
           else if (field.id === FLAG_FORCED_ID) isForced = readUint(head, field) === 1;
+          else if (field.id === CODEC_PRIVATE_ID && field.size > 1) avcProfile = head[field.dataStart + 1] ?? null;
           else if (field.id === VIDEO_ID) {
             for (const video of children(head, field.dataStart, field.dataStart + field.size)) {
               if (video.id !== COLOUR_ID) continue;
@@ -256,6 +281,19 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
           layout.videoTrack = number;
           layout.videoCodecId = codecId || null;
           layout.dynamicRange = dynamicRangeFromTransfer(transfer);
+          layout.videoUndecodable =
+            codecId === "V_MPEG4/ISO/AVC" && avcProfile !== null && UNDECODABLE_AVC_PROFILES.has(avcProfile);
+        }
+        if (type === SUBTITLE_TRACK_TYPE) {
+          layout.subtitleTracks.push({
+            subtitleIndex: layout.subtitleTracks.length,
+            codecId,
+            language: bcp47 ?? language ?? "eng",
+            name,
+            isDefault,
+            isForced,
+            text: TEXT_SUBTITLE_CODECS.test(codecId),
+          });
         }
         if (type === AUDIO_TRACK_TYPE) {
           layout.audioTracks.push({
@@ -320,6 +358,8 @@ export interface KeyframeIndex {
   videoCodecId: string | null;
   dynamicRange: DynamicRange;
   audioTracks: MkvAudioTrack[];
+  subtitleTracks: MkvSubtitleTrack[];
+  videoUndecodable: boolean;
   /** Byte ranges already downloaded while indexing (head and Cues), reusable by a local cache. */
   fetched: Array<{ start: number; bytes: Uint8Array }>;
 }
@@ -356,6 +396,8 @@ export async function readMkvKeyframes(fetchRange: RangeFetcher): Promise<Keyfra
     videoCodecId: layout.videoCodecId,
     dynamicRange: layout.dynamicRange,
     audioTracks: layout.audioTracks,
+    subtitleTracks: layout.subtitleTracks,
+    videoUndecodable: layout.videoUndecodable,
     fetched,
   };
 }

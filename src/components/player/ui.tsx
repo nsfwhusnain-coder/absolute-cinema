@@ -241,26 +241,33 @@ export function MenuSection({ label, children }: { label?: string; children: Rea
   );
 }
 
+/** Current value shown at the right of a menu row. */
+export function MenuValue({ children }: { children: ReactNode }) {
+  return <span className="max-w-[9rem] truncate text-xs text-white/60">{children}</span>;
+}
+
 export function MenuItem({
   label,
   detail,
-  selected = false,
+  selected,
   trailing,
   onClick,
   disabled = false,
 }: {
   label: ReactNode;
   detail?: ReactNode;
+  /** Set for choices (a check marks the current one); leave out for navigation rows. */
   selected?: boolean;
   trailing?: ReactNode;
   onClick: () => void;
   disabled?: boolean;
 }) {
+  const choice = selected !== undefined;
   return (
     <button
       type="button"
-      role="menuitemradio"
-      aria-checked={selected}
+      role={choice ? "menuitemradio" : "menuitem"}
+      aria-checked={choice ? selected : undefined}
       disabled={disabled}
       onClick={onClick}
       className={cn(
@@ -270,7 +277,7 @@ export function MenuItem({
         disabled && "cursor-not-allowed opacity-40"
       )}
     >
-      <span className="flex h-4 w-4 shrink-0 items-center justify-center">{selected && <Check className="h-4 w-4" />}</span>
+      {choice && <span className="flex h-4 w-4 shrink-0 items-center justify-center">{selected && <Check className="h-4 w-4" />}</span>}
       <span className="min-w-0 flex-1">
         <span className="block truncate font-medium">{label}</span>
         {detail && <span className="block truncate text-xs text-white/55">{detail}</span>}
@@ -281,35 +288,91 @@ export function MenuItem({
 }
 
 /** Before the first frame: artwork, title and what the player is doing. */
+export interface LoadingStep {
+  label: string;
+  detail?: string;
+  state: "done" | "active" | "pending";
+}
+
+/** Full-screen start-up view: artwork, what is playing, and exactly what the player is doing. */
 export function LoadingOverlay({
   backdrop,
   logo,
   title,
   subtitle,
-  status,
+  description,
+  steps,
+  chips,
+  note,
+  progress,
 }: {
   backdrop?: string | null;
   logo?: string | null;
   title: string;
   subtitle?: string;
-  status: string;
+  description?: string;
+  steps: LoadingStep[];
+  chips: string[];
+  note?: string | null;
+  /** 0-1 while buffering the first seconds. */
+  progress?: number;
 }) {
   return (
-    <div className="absolute inset-0 z-10 flex items-center justify-center overflow-hidden bg-black">
+    <div className="absolute inset-0 z-10 flex items-end overflow-hidden bg-black sm:items-center">
       {backdrop && (
-        <img src={backdrop} alt="" className="absolute inset-0 h-full w-full scale-105 object-cover opacity-40 blur-2xl" />
+        <img src={backdrop} alt="" className="absolute inset-0 h-full w-full scale-105 object-cover opacity-60 blur-sm" />
       )}
-      <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-black/60" />
-      <div className="relative flex max-w-lg flex-col items-center gap-5 px-6 text-center">
+      <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-black/30" />
+      <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-black/30 to-transparent" />
+      <div className="relative flex w-full max-w-xl flex-col gap-5 px-6 pb-16 sm:ml-[8vw] sm:px-0 sm:pb-0">
         {logo ? (
-          <img src={logo} alt={title} className="max-h-28 w-auto max-w-[80vw] object-contain drop-shadow-2xl" />
+          <img src={logo} alt={title} className="max-h-24 w-auto max-w-[70vw] self-start object-contain drop-shadow-2xl sm:max-h-32" />
         ) : (
-          <h1 className="font-display text-3xl font-bold text-white drop-shadow sm:text-4xl">{title}</h1>
+          <h1 className="font-display text-3xl font-bold text-white drop-shadow sm:text-5xl">{title}</h1>
         )}
-        {subtitle && <p className="-mt-2 text-sm text-white/75">{subtitle}</p>}
-        <div className="glass flex items-center gap-2.5 rounded-full px-4 py-2 text-sm text-white/90">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          <span>{status}</span>
+        {subtitle && <p className="-mt-2 text-sm font-medium text-white/85 sm:text-base">{subtitle}</p>}
+        {description && <p className="line-clamp-3 max-w-lg text-sm leading-relaxed text-white/65">{description}</p>}
+        <div className="glass-clear w-full max-w-md rounded-3xl p-4">
+          <ol className="space-y-2.5">
+            {steps.map((step) => (
+              <li key={step.label} className="flex items-center gap-3 text-sm">
+                <span
+                  className={cn(
+                    "flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
+                    step.state === "done" && "bg-white text-black",
+                    step.state === "active" && "bg-white/15 text-white",
+                    step.state === "pending" && "bg-white/[0.06] text-white/30"
+                  )}
+                  aria-hidden
+                >
+                  {step.state === "done" ? (
+                    <Check className="h-3 w-3" strokeWidth={3} />
+                  ) : step.state === "active" ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                  )}
+                </span>
+                <span className={cn("font-medium", step.state === "pending" ? "text-white/40" : "text-white")}>{step.label}</span>
+                {step.detail && <span className="ml-auto truncate pl-3 text-xs text-white/60">{step.detail}</span>}
+              </li>
+            ))}
+          </ol>
+          {progress !== undefined && (
+            <div className="mt-3 h-1 overflow-hidden rounded-full bg-white/10" aria-hidden>
+              <div className="h-full rounded-full bg-white transition-[width] duration-300" style={{ width: `${Math.round(progress * 100)}%` }} />
+            </div>
+          )}
+          {(chips.length > 0 || note) && (
+            <div className="mt-3 flex flex-wrap items-center gap-1.5">
+              {chips.map((chip) => (
+                <span key={chip} className="rounded-md bg-white/12 px-1.5 py-0.5 text-[11px] font-semibold tracking-wide text-white/90">
+                  {chip}
+                </span>
+              ))}
+              {note && <span className="text-xs text-white/60">{note}</span>}
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -15,8 +15,9 @@ import {
 } from "@/lib/watched-history";
 import { tmdbImageUrl } from "@/lib/tmdb";
 import { cn } from "@/lib/utils";
-import { PREFERENCES_QUERY_KEY, fetchPreferences } from "./playback-section";
+import { PREFERENCES_QUERY_KEY, fetchPreferences, type ProfilePreferences } from "@/lib/preferences-client";
 import { PrimaryButton, Row, Section, Toggle, inputClass } from "./primitives";
+import { useOwnProfile } from "./profile-section";
 
 export function LibrarySection() {
   return (
@@ -35,6 +36,8 @@ function ContentFilterRow() {
   const [checking, setChecking] = useState(false);
   const { data } = useQuery({ queryKey: PREFERENCES_QUERY_KEY, queryFn: fetchPreferences });
   const hideAdult = data ? data.hideAdult !== false : true;
+  const { data: profile } = useOwnProfile();
+  const locked = Boolean(profile?.pinRequired);
 
   const save = useMutation({
     mutationFn: async (next: boolean) => {
@@ -49,7 +52,7 @@ function ContentFilterRow() {
     },
     onSuccess: (next) => {
       qc.setQueryData(HIDE_ADULT_QUERY_KEY, next);
-      qc.setQueryData(PREFERENCES_QUERY_KEY, (old: object | undefined) => ({ ...old, hideAdult: next }));
+      qc.setQueryData(PREFERENCES_QUERY_KEY, (old: ProfilePreferences | undefined) => (old ? { ...old, hideAdult: next } : old));
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Could not save"),
   });
@@ -75,7 +78,7 @@ function ContentFilterRow() {
     <Row
       inline={!confirming}
       label="Hide adult titles"
-      help="Hides titles TMDB flags as adult. R and TV-MA titles still show. Turning it off asks for your PIN."
+      help={`Hides titles TMDB flags as adult. R and TV-MA titles still show.${locked ? " Turning it off asks for your PIN." : ""}`}
     >
       {confirming ? (
         <form onSubmit={confirm} className="flex w-full gap-2 sm:w-72">
@@ -102,7 +105,7 @@ function ContentFilterRow() {
           label="Hide adult titles"
           checked={hideAdult}
           disabled={!data || save.isPending}
-          onChange={(next) => (next ? save.mutate(true) : setConfirming(true))}
+          onChange={(next) => (next || !locked ? save.mutate(next) : setConfirming(true))}
         />
       )}
     </Row>

@@ -1,15 +1,13 @@
 "use client";
 
-import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PlayCircle } from "lucide-react";
 import { toast } from "sonner";
 import { clearPlaybackPreresolveCache } from "@/lib/playback-preresolve";
-import { getAutoplayNext, setAutoplayNext, syncProfilePlaybackPreferences } from "@/lib/player-preferences";
-import type { ProfilePlaybackPreferences } from "@/lib/profile-preferences";
+import { setAutoplayNext, syncProfilePlaybackPreferences } from "@/lib/player-preferences";
+import { PREFERENCES_QUERY_KEY, fetchPreferences, patchPreferences } from "@/lib/preferences-client";
 import { Row, Section, Segmented, Toggle } from "./primitives";
 
-export const PREFERENCES_QUERY_KEY = ["profile-playback-preferences"] as const;
 
 const QUALITY_OPTIONS = [
   { value: "auto", label: "Best" },
@@ -32,32 +30,17 @@ const LANGUAGES = [
   { value: "zh", label: "Chinese" },
 ];
 
-export async function fetchPreferences(): Promise<ProfilePlaybackPreferences & { hideAdult?: boolean }> {
-  const res = await fetch("/api/preferences", { cache: "no-store" });
-  const json = (await res.json()) as ProfilePlaybackPreferences & { hideAdult?: boolean; error?: string };
-  if (!res.ok) throw new Error(json.error || "Could not load preferences");
-  return json;
-}
 
 export function PlaybackSection() {
   const qc = useQueryClient();
-  const [autoplay, setAutoplay] = useState(getAutoplayNext);
   const { data } = useQuery({ queryKey: PREFERENCES_QUERY_KEY, queryFn: fetchPreferences });
 
   const save = useMutation({
-    mutationFn: async (patch: Record<string, unknown>) => {
-      const res = await fetch("/api/preferences", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      const json = (await res.json()) as ProfilePlaybackPreferences & { error?: string };
-      if (!res.ok) throw new Error(json.error || "Could not save");
-      return json;
-    },
+    mutationFn: patchPreferences,
     onSuccess: (prefs) => {
       syncProfilePlaybackPreferences(prefs);
-      qc.setQueryData(PREFERENCES_QUERY_KEY, (old: object | undefined) => ({ ...old, ...prefs }));
+      setAutoplayNext(prefs.autoplayNext);
+      qc.setQueryData(PREFERENCES_QUERY_KEY, prefs);
       clearPlaybackPreresolveCache();
       qc.removeQueries({ queryKey: ["playback"] });
     },
@@ -122,14 +105,12 @@ export function PlaybackSection() {
           onChange={(v) => save.mutate({ subtitlePreference: v })}
         />
       </Row>
-      <Row label="Autoplay next episode" help="Starts the next episode after a short countdown. This device only." inline>
+      <Row inline label="Autoplay next episode" help="Starts the next episode after a short countdown.">
         <Toggle
           label="Autoplay next episode"
-          checked={autoplay}
-          onChange={(next) => {
-            setAutoplay(next);
-            setAutoplayNext(next);
-          }}
+          checked={data?.autoplayNext ?? true}
+          disabled={disabled}
+          onChange={(next) => save.mutate({ autoplayNext: next })}
         />
       </Row>
     </Section>

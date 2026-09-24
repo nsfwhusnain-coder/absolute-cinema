@@ -4,8 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Airplay,
-  Captions as CaptionsIcon,
-  ListVideo,
   Maximize,
   Minimize,
   Pause,
@@ -25,7 +23,8 @@ import { useHoverPreview } from "@/hooks/use-hover-preview";
 import { hdrSdrDisplayMap } from "@/lib/playback/hdr-sdr-map";
 import { buildDownloadOptions, downloadDetailLine, downloadFilename, downloadSizeLabel } from "@/lib/playback/download-options";
 import { cn } from "@/lib/utils";
-import { usePlayerState, PLAYBACK_SPEEDS } from "./store";
+import { usePlayerState, PLAYBACK_SPEEDS, VIDEO_FITS } from "./store";
+import { languageName } from "@/lib/language-name";
 import { usePlayerController } from "./use-player-controller";
 import { useSubtitles, type ExternalSubtitle } from "./use-subtitles";
 import { normalizeHeight, playableHere, qualityChoices, qualityLabel, type AudioChoice, type TitleContext } from "./playable";
@@ -36,6 +35,8 @@ import {
   IconButton,
   LoadingOverlay,
   MenuItem,
+  MenuValue,
+  type LoadingStep,
   MenuSection,
   PlayerMenu,
   SeekBar,
@@ -48,8 +49,14 @@ const CONTROLS_IDLE_MS = 3200;
 const NOTICE_MS = 5000;
 const SEEK_STEP_S = 10;
 const VOLUME_STEP = 0.1;
+/** Two taps closer together than this are a double tap. */
+const DOUBLE_TAP_MS = 300;
+/** Double taps in the outer 35% of the width seek; the middle only toggles controls. */
+const SEEK_ZONE = 0.35;
+/** Seconds buffered that the start-up progress bar counts as full. */
+const START_BUFFER_S = 4;
 
-type Panel = "none" | "subtitles" | "settings" | "quality" | "speed" | "servers" | "download" | "episodes";
+type Panel = "none" | "settings" | "subtitles" | "audio" | "picture" | "quality" | "speed" | "servers" | "download" | "episodes";
 
 export interface PlayerProps {
   sources: PlaybackSource[];
@@ -58,6 +65,8 @@ export interface PlayerProps {
   title: TitleContext;
   displayTitle: string;
   episodeLabel?: string;
+  /** Synopsis shown while the stream starts. */
+  overview?: string;
   backdrop?: string | null;
   logo?: string | null;
   initialTime: number;
@@ -96,6 +105,8 @@ export function Player(props: PlayerProps) {
   const [panel, setPanel] = useState<Panel>("none");
   const [hoverTime, setHoverTime] = useState<number | null>(null);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastPointer = useRef<string>("mouse");
+  const lastTapAt = useRef(0);
   const state = usePlayerState();
 
   const actions = usePlayerController({
@@ -148,6 +159,7 @@ export function Player(props: PlayerProps) {
     if (idleTimer.current) clearTimeout(idleTimer.current);
   }, []);
 
+
   // Transient notices (e.g. an automatic server change) fade out.
   useEffect(() => {
     if (!state.notice) return;
@@ -158,8 +170,10 @@ export function Player(props: PlayerProps) {
     return () => clearTimeout(timer);
   }, [state.notice]);
 
+  // The whole page goes full screen (not the player element), so moving to the
+  // next episode, which remounts the player, stays full screen.
   const toggleFullscreen = useCallback(() => {
-    const el = containerRef.current;
+    const el = document.documentElement;
     const video = videoRef.current as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null;
     if (document.fullscreenElement) {
       void document.exitFullscreen();
@@ -240,33 +254,104 @@ export function Player(props: PlayerProps) {
     return `/api/download?${params}`;
   };
   const started = state.phase === "playing" || state.phase === "recovering" || (state.phase === "starting" && state.currentTime > 0);
+
+  // A click or tap shows or hides the controls (only the play button pauses);
+  // on touch, a double tap on either side seeks, like every phone video app.
+  const onTouchTap = useCallback(
+    (clientX: number, touch: boolean) => {
+      const now = Date.now();
+      const doubleTap = touch && now - lastTapAt.current < DOUBLE_TAP_MS;
+      lastTapAt.current = now;
+      const rect = containerRef.current?.getBoundingClientRect();
+      const zone = rect && rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5;
+      if (doubleTap && started && (zone < SEEK_ZONE || zone > 1 - SEEK_ZONE)) {
+        actions.seekBy(zone < SEEK_ZONE ? -SEEK_STEP_S : SEEK_STEP_S);
+        poke();
+        return;
+      }
+      const s = usePlayerState.getState();
+      if (s.controlsVisible && s.playing) {
+        if (idleTimer.current) clearTimeout(idleTimer.current);
+        s.set({ controlsVisible: false });
+      } else {
+        poke();
+      }
+    },
+    [actions, poke, started]
+  );
   const showLoading = !started && !state.failureMessage;
   const controlsShown = state.controlsVisible || panel !== "none" || !state.playing;
 
-  const loadingStatus =
-    state.phase === "resolving"
-      ? props.sources.length
-        ? "Finding the best stream…"
-        : "Searching servers…"
-      : activeSource
-        ? `Starting ${qualityLabel(normalizeHeight(sourceMaxHeight(activeSource) || 1080))}${isRemux ? " · preparing" : ""}…`
-        : "Starting…";
+  const bufferedAhead = Math.max(0, state.bufferedEnd - state.currentTime);
+  const connecting = Boolean(activeSource) && state.phase !== "resolving";
+  const bufferingStart = connecting && bufferedAhead > 0;
+  const loadingSteps: LoadingStep[] = [
+    {
+      label: "Finding servers",
+      detail: playable.length ? `${playable.length} found${props.discovering ? " so far" : ""}` : "Searching…",
+      state: connecting ? "done" : "active",
+    },
+    { label: "Connecting", detail: connecting ? serverName(activeSource) : undefined, state: bufferingStart ? "done" : connecting ? "active" : "pending" },
+    { label: "Buffering", state: bufferingStart ? "active" : "pending" },
+  ];
+  const loadingChips = activeSource && connecting
+    ? [
+        qualityLabel(normalizeHeight(sourceMaxHeight(activeSource) || 1080)),
+        ...(state.dynamicRange && state.dynamicRange !== "SDR" ? ["HDR"] : []),
+        ...(activeSource.origin === "debrid" ? ["Real-Debrid"] : []),
+      ]
+    : [];
+  const loadingNote = state.startNote ?? (connecting && isRemux && !bufferingStart ? "Preparing the file for your browser" : null);
+
+  const subtitleLabel = state.subtitles.find((o) => o.id === state.activeSubtitle)?.label ?? "Off";
+  const remuxAudio = state.remuxAudio;
+  const audioOptions =
+    remuxAudio && remuxAudio.tracks.length > 1
+      ? remuxAudio.tracks.map((track) => ({
+          key: `remux-${track.index}`,
+          label: audioTrackLabel(track.language, track.name),
+          detail: channelsLabel(track.channels),
+          selected: remuxAudio.active === track.index,
+          select: () => {
+            setPanel("none");
+            actions.selectRemuxAudio(track.index);
+          },
+        }))
+      : state.audioTracks.map((track) => ({
+          key: `engine-${track.id}`,
+          label: track.name,
+          detail: track.lang ? languageName(track.lang) : undefined,
+          selected: state.activeAudio === track.id,
+          select: () => actions.selectAudio(track.id),
+        }));
+  const activeAudioLabel = audioOptions.find((o) => o.selected)?.label ?? "";
 
   return (
     <div
       ref={containerRef}
       className={cn("relative h-full w-full select-none overflow-hidden bg-black text-white", !controlsShown && "cursor-none")}
-      onMouseMove={poke}
-      onPointerDown={poke}
-      onClick={() => {
-        if (panel !== "none") setPanel("none");
-        else if (started) actions.togglePlay();
+      onPointerMove={(e) => {
+        if (e.pointerType === "mouse") poke();
       }}
-      onDoubleClick={toggleFullscreen}
+      onPointerDown={(e) => {
+        // Recorded only: showing the controls here would undo the click's toggle.
+        lastPointer.current = e.pointerType;
+      }}
+      onClick={(e) => {
+        // Only the play button pauses; a click or tap elsewhere shows or hides the controls.
+        if (panel !== "none") setPanel("none");
+        else onTouchTap(e.clientX, lastPointer.current !== "mouse");
+      }}
+      onDoubleClick={() => {
+        if (lastPointer.current === "mouse") toggleFullscreen();
+      }}
     >
       <video
         ref={videoRef}
-        className="main-player absolute inset-0 h-full w-full bg-black object-contain"
+        className={cn(
+          "main-player absolute inset-0 h-full w-full bg-black",
+          state.videoFit === "cover" ? "object-cover" : state.videoFit === "fill" ? "object-fill" : "object-contain"
+        )}
         style={videoFilter ? { filter: videoFilter } : undefined}
         playsInline
         preload="auto"
@@ -282,7 +367,11 @@ export function Player(props: PlayerProps) {
           logo={props.logo}
           title={props.displayTitle}
           subtitle={props.episodeLabel}
-          status={loadingStatus}
+          description={props.overview}
+          steps={loadingSteps}
+          chips={loadingChips}
+          note={loadingNote}
+          progress={bufferingStart ? Math.min(1, bufferedAhead / START_BUFFER_S) : undefined}
         />
       )}
       {started && state.buffering && !state.failureMessage && <BufferingSpinner />}
@@ -316,7 +405,7 @@ export function Player(props: PlayerProps) {
           <IconButton label="Back" onClick={props.onBack} className="glass" size="lg">
             <ArrowLeft className="h-5 w-5" />
           </IconButton>
-          <div className="min-w-0">
+          <div className={cn("min-w-0", showLoading && "invisible")}>
             <div className="truncate font-display text-base font-semibold sm:text-lg">{props.displayTitle}</div>
             {props.episodeLabel && <div className="truncate text-xs text-white/70 sm:text-sm">{props.episodeLabel}</div>}
           </div>
@@ -356,9 +445,9 @@ export function Player(props: PlayerProps) {
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="glass rounded-[1.75rem] px-4 pb-2 pt-1.5 sm:px-5">
+        <div className="glass-clear rounded-[1.75rem] px-4 pb-2 pt-1.5 sm:px-5">
           <div className="flex items-center gap-3">
-            <span className="w-14 text-right text-xs font-medium tabular-nums text-white/85">{formatTime(state.currentTime)}</span>
+            <span className="w-14 text-right text-xs font-medium tabular-nums text-white/90">{formatTime(state.currentTime)}</span>
             <SeekBar
               duration={state.duration}
               currentTime={state.currentTime}
@@ -367,7 +456,7 @@ export function Player(props: PlayerProps) {
               onHover={setHoverTime}
               previewSrc={previewSrc}
             />
-            <span className="w-14 text-xs font-medium tabular-nums text-white/60">-{formatTime(Math.max(0, state.duration - state.currentTime))}</span>
+            <span className="w-14 text-xs font-medium tabular-nums text-white/70">-{formatTime(Math.max(0, state.duration - state.currentTime))}</span>
           </div>
           <div className="flex items-center justify-between gap-1">
             <div className="flex items-center gap-0.5">
@@ -375,41 +464,16 @@ export function Player(props: PlayerProps) {
                 {state.playing ? <Pause className="h-5 w-5 fill-current" /> : <Play className="h-5 w-5 fill-current" />}
               </IconButton>
               <VolumeControl volume={state.volume} muted={state.muted} onVolume={actions.setVolume} onToggleMute={actions.toggleMute} />
-            </div>
-            <div className="flex items-center gap-0.5">
               {props.tv?.onNextEpisode && (
                 <IconButton label="Next episode" onClick={props.tv.onNextEpisode}>
-                  <SkipForward className="h-5 w-5" />
+                  <SkipForward className="h-5 w-5 fill-current" />
                 </IconButton>
               )}
-              {props.tv && (
-                <IconButton label="Episodes" active={panel === "episodes"} onClick={() => setPanel(panel === "episodes" ? "none" : "episodes")}>
-                  <ListVideo className="h-5 w-5" />
-                </IconButton>
-              )}
-              <IconButton label="Subtitles and audio" active={panel === "subtitles"} onClick={() => setPanel(panel === "subtitles" ? "none" : "subtitles")}>
-                <CaptionsIcon className="h-5 w-5" />
-              </IconButton>
-              <IconButton
-                label="Settings"
-                active={panel === "settings" || panel === "quality" || panel === "speed" || panel === "servers" || panel === "download"}
-                onClick={() => setPanel(panel === "none" ? "settings" : "none")}
-              >
+            </div>
+            <div className="flex items-center gap-0.5">
+              <IconButton label="Settings" active={panel !== "none"} onClick={() => setPanel(panel === "none" ? "settings" : "none")}>
                 <Settings className="h-5 w-5" />
               </IconButton>
-              {airplay && (
-                <IconButton
-                  label="AirPlay"
-                  onClick={() => (videoRef.current as HTMLVideoElement & { webkitShowPlaybackTargetPicker?: () => void })?.webkitShowPlaybackTargetPicker?.()}
-                >
-                  <Airplay className="h-5 w-5" />
-                </IconButton>
-              )}
-              {typeof document !== "undefined" && document.pictureInPictureEnabled && (
-                <IconButton label="Picture in picture" onClick={togglePip} className="hidden sm:inline-flex">
-                  <PictureInPicture2 className="h-5 w-5" />
-                </IconButton>
-              )}
               <IconButton label={state.fullscreen ? "Exit full screen" : "Full screen"} onClick={toggleFullscreen}>
                 {state.fullscreen ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
               </IconButton>
@@ -421,49 +485,72 @@ export function Player(props: PlayerProps) {
       {/* Menus */}
       {panel !== "none" && (
         <div className="absolute bottom-28 right-3 z-30 sm:bottom-32 sm:right-6">
-          {panel === "subtitles" && (
-            <PlayerMenu title="Subtitles & audio">
-              <MenuSection label="Subtitles">
-                <MenuItem label="Off" selected={!state.activeSubtitle} onClick={() => selectSubtitle(null)} />
-                {state.subtitles.map((option) => (
-                  <MenuItem
-                    key={option.id}
-                    label={option.label}
-                    detail={option.origin === "embedded" ? "In stream" : undefined}
-                    selected={state.activeSubtitle === option.id}
-                    onClick={() => selectSubtitle(option.id)}
-                  />
-                ))}
-              </MenuSection>
-              {state.audioTracks.length > 1 && (
-                <MenuSection label="Audio">
-                  {state.audioTracks.map((track) => (
-                    <MenuItem key={track.id} label={track.name} detail={track.lang || undefined} selected={state.activeAudio === track.id} onClick={() => actions.selectAudio(track.id)} />
-                  ))}
-                </MenuSection>
+          {panel === "settings" && (
+            <PlayerMenu title="Settings">
+              <MenuItem label="Subtitles" trailing={<MenuValue>{subtitleLabel}</MenuValue>} onClick={() => setPanel("subtitles")} />
+              {audioOptions.length > 1 && (
+                <MenuItem label="Audio" trailing={<MenuValue>{activeAudioLabel}</MenuValue>} onClick={() => setPanel("audio")} />
+              )}
+              <MenuItem
+                label="Quality"
+                trailing={<MenuValue>{state.qualityChoice === "auto" ? `Auto${nowHeight ? ` (${qualityLabel(nowHeight)})` : ""}` : qualityLabel(state.qualityChoice)}</MenuValue>}
+                onClick={() => setPanel("quality")}
+              />
+              <MenuItem label="Picture" trailing={<MenuValue>{VIDEO_FITS.find((f) => f.value === state.videoFit)?.label}</MenuValue>} onClick={() => setPanel("picture")} />
+              <MenuItem label="Playback speed" trailing={<MenuValue>{state.rate === 1 ? "Normal" : `${state.rate}×`}</MenuValue>} onClick={() => setPanel("speed")} />
+              <MenuItem label="Server" trailing={<MenuValue>{serverName(activeSource)}</MenuValue>} onClick={() => setPanel("servers")} />
+              {props.tv && <MenuItem label="Episodes" trailing={<MenuValue>{`S${props.tv.season} · E${props.tv.episode}`}</MenuValue>} onClick={() => setPanel("episodes")} />}
+              {typeof document !== "undefined" && document.pictureInPictureEnabled && (
+                <MenuItem
+                  label="Picture in picture"
+                  trailing={<PictureInPicture2 className="h-4 w-4 text-white/70" />}
+                  onClick={() => {
+                    setPanel("none");
+                    togglePip();
+                  }}
+                />
+              )}
+              {airplay && (
+                <MenuItem
+                  label="AirPlay"
+                  trailing={<Airplay className="h-4 w-4 text-white/70" />}
+                  onClick={() => {
+                    setPanel("none");
+                    (videoRef.current as HTMLVideoElement & { webkitShowPlaybackTargetPicker?: () => void })?.webkitShowPlaybackTargetPicker?.();
+                  }}
+                />
+              )}
+              {downloads.length > 0 && (
+                <MenuItem label="Download" trailing={<MenuValue>{`${downloads.length} option${downloads.length > 1 ? "s" : ""}`}</MenuValue>} onClick={() => setPanel("download")} />
               )}
             </PlayerMenu>
           )}
-          {panel === "settings" && (
-            <PlayerMenu title="Settings">
-              <MenuItem
-                label="Quality"
-                trailing={<span className="text-xs text-white/60">{state.qualityChoice === "auto" ? `Auto${nowHeight ? ` (${qualityLabel(nowHeight)})` : ""}` : qualityLabel(state.qualityChoice)}</span>}
-                onClick={() => setPanel("quality")}
-              />
-              <MenuItem
-                label="Playback speed"
-                trailing={<span className="text-xs text-white/60">{state.rate === 1 ? "Normal" : `${state.rate}×`}</span>}
-                onClick={() => setPanel("speed")}
-              />
-              <MenuItem
-                label="Server"
-                trailing={<span className="max-w-[9rem] truncate text-xs text-white/60">{serverName(activeSource)}</span>}
-                onClick={() => setPanel("servers")}
-              />
-              {downloads.length > 0 && (
-                <MenuItem label="Download" trailing={<span className="text-xs text-white/60">{downloads.length} option{downloads.length > 1 ? "s" : ""}</span>} onClick={() => setPanel("download")} />
-              )}
+          {panel === "subtitles" && (
+            <PlayerMenu title="Subtitles" onBack={() => setPanel("settings")}>
+              <MenuItem label="Off" selected={!state.activeSubtitle} onClick={() => selectSubtitle(null)} />
+              {state.subtitles.map((option) => (
+                <MenuItem
+                  key={option.id}
+                  label={option.label}
+                  detail={option.origin === "external" ? "Online" : "In the file"}
+                  selected={state.activeSubtitle === option.id}
+                  onClick={() => selectSubtitle(option.id)}
+                />
+              ))}
+            </PlayerMenu>
+          )}
+          {panel === "audio" && (
+            <PlayerMenu title="Audio" onBack={() => setPanel("settings")}>
+              {audioOptions.map((option) => (
+                <MenuItem key={option.key} label={option.label} detail={option.detail} selected={option.selected} onClick={option.select} />
+              ))}
+            </PlayerMenu>
+          )}
+          {panel === "picture" && (
+            <PlayerMenu title="Picture" onBack={() => setPanel("settings")}>
+              {VIDEO_FITS.map((fit) => (
+                <MenuItem key={fit.value} label={fit.label} detail={fit.detail} selected={state.videoFit === fit.value} onClick={() => usePlayerState.getState().set({ videoFit: fit.value })} />
+              ))}
             </PlayerMenu>
           )}
           {panel === "download" && (
@@ -538,6 +625,19 @@ export function Player(props: PlayerProps) {
       )}
     </div>
   );
+}
+
+function audioTrackLabel(language: string | null, name: string | null): string {
+  const base = languageName(language);
+  const extra = name?.trim();
+  return extra && extra.toLowerCase() !== base.toLowerCase() ? `${base} · ${extra}` : base;
+}
+
+function channelsLabel(channels: number | null): string | undefined {
+  if (!channels) return undefined;
+  if (channels === 1) return "Mono";
+  if (channels === 2) return "Stereo";
+  return `${channels - 1}.1`;
 }
 
 function serverName(source: PlaybackSource | null): string {

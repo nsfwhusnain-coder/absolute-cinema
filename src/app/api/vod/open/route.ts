@@ -51,6 +51,8 @@ export async function GET(req: NextRequest) {
     const value = (params.get(name) ?? "").toLowerCase();
     if (LANGUAGE.test(value)) worker.set(name, value);
   }
+  const audioIndex = optionalInt("audioIndex");
+  if (audioIndex !== undefined && Number.isInteger(audioIndex) && audioIndex >= 0) worker.set("audioIndex", String(audioIndex));
 
   const res = await fetch(`${REMUXER_URL}/vod/open?${worker}`, { signal: AbortSignal.timeout(OPEN_TIMEOUT_MS) }).catch(
     () => null
@@ -61,6 +63,9 @@ export async function GET(req: NextRequest) {
     durationS?: number;
     dynamicRange?: string;
     audio?: unknown;
+    audioIndex?: number | null;
+    audioTracks?: unknown[];
+    subtitles?: unknown[];
     error?: string;
   };
   if (!res.ok || !body.id) {
@@ -72,6 +77,10 @@ export async function GET(req: NextRequest) {
       durationS: body.durationS,
       dynamicRange: body.dynamicRange ?? "SDR",
       audio: body.audio ?? null,
+      audioIndex: body.audioIndex ?? null,
+      audioTracks: body.audioTracks ?? [],
+      subtitles: body.subtitles ?? [],
+      subtitleBase: `/api/vod/${body.id}/`,
     },
     { headers: { "Cache-Control": "no-store" } }
   );

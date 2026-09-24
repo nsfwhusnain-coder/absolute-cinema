@@ -44,11 +44,11 @@ export function MobileDock({ hubsEnabled = true }: MobileDockProps) {
 
   return (
     <nav
-      className="fixed inset-x-0 bottom-0 z-50 border-t border-white/5 bg-background/80 backdrop-blur-xl md:hidden"
-      style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      className="pointer-events-none fixed inset-x-0 bottom-0 z-50 px-3 md:hidden"
+      style={{ paddingBottom: "max(0.5rem, env(safe-area-inset-bottom))" }}
       aria-label="Primary"
     >
-      <div className="flex h-16 items-center justify-around px-1">
+      <div className="glass-clear pointer-events-auto flex h-16 items-center justify-around rounded-[1.75rem] px-1.5">
         {items.map((item) => {
           const active = isNavPathActive(pathname, item.path);
           return (
@@ -59,10 +59,8 @@ export function MobileDock({ hubsEnabled = true }: MobileDockProps) {
               aria-label={item.label}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "flex min-h-11 min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-full py-1.5 text-[10px] font-medium transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-                active
-                  ? "text-primary"
-                  : "text-muted-foreground hover:text-foreground"
+                "flex min-h-12 min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-[1.25rem] py-1.5 text-[10px] font-medium transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60",
+                active ? "bg-white/15 text-white" : "text-white/65 hover:text-white"
               )}
             >
               <item.icon className="h-5 w-5 shrink-0" aria-hidden />

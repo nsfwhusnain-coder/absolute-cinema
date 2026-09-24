@@ -1,6 +1,8 @@
 /// <reference types="bun-types" />
 import { afterEach, describe, expect, it } from "bun:test";
 import {
+  isHi10AvcRelease,
+  debridHeightBucket,
   buildKindPath,
   extractInfoHashFromResolveUrl,
   fetchTorrentioCandidates,
@@ -16,6 +18,36 @@ import {
   isMoviePackRelease,
   isStereoscopicRelease,
 } from "./torrentio";
+
+describe("anime-sized releases", () => {
+  const MB = 1024 ** 2;
+  it("keeps a normal 24-minute HEVC 1080p episode", () => {
+    expect(isLeanDebridSize({ resolutionHeight: 1080, sizeBytes: 265 * MB, codec: "hevc" }, "tv")).toBe(false);
+  });
+  it("still rejects implausibly small H.264 1080p episodes", () => {
+    expect(isLeanDebridSize({ resolutionHeight: 1080, sizeBytes: 150 * MB, codec: "h264" }, "tv")).toBe(true);
+  });
+  it("buckets 800p Blu-ray rips with 720p", () => {
+    expect(debridHeightBucket(800)).toBe(720);
+    expect(debridHeightBucket(1080)).toBe(1080);
+    expect(debridHeightBucket(480)).toBe(480);
+  });
+});
+
+describe("isHi10AvcRelease", () => {
+  it("rejects 10-bit H.264, which no browser decodes", () => {
+    expect(isHi10AvcRelease("[SubsPlease] Frieren - 01 (1080p) [Hi10P].mkv")).toBe(true);
+    expect(isHi10AvcRelease("Naruto 001 [BD 1080p x264 10bit FLAC]")).toBe(true);
+    expect(isHi10AvcRelease("Show S01E01 1080p AVC 10-bit")).toBe(true);
+  });
+
+  it("keeps 10-bit HEVC/AV1 and releases without an AVC tag", () => {
+    expect(isHi10AvcRelease("Frieren S01E01 1080p x265 10bit")).toBe(false);
+    expect(isHi10AvcRelease("Frieren S01E01 1080p AV1 10bit")).toBe(false);
+    expect(isHi10AvcRelease("[Group] Frieren - 01 [1080p][10bit]")).toBe(false);
+    expect(isHi10AvcRelease("Movie 2024 1080p WEB-DL x264")).toBe(false);
+  });
+});
 
 describe("buildKindPath season 0", () => {
   it("keeps TMDB specials as :0:1.json instead of mapping to S1", () => {

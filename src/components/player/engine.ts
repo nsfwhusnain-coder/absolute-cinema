@@ -50,6 +50,13 @@ export interface EngineHandlers {
 const MANIFEST_TIMEOUT_MS = 20_000;
 /** Opening rendition when the viewer has not chosen a quality. */
 export const DEFAULT_START_HEIGHT = 1080;
+/**
+ * Automatic quality never picks renditions below this. Embed CDNs that take
+ * seconds to send each segment's first byte drag hls.js's bandwidth estimate
+ * down to tiny renditions it is slow to leave; a connection that genuinely
+ * cannot carry this is handled by moving to another server instead.
+ */
+const MIN_AUTO_BITRATE_BPS = 1_200_000;
 const FRAG_TIMEOUT_MS = 30_000;
 
 export type EngineKind = "hlsjs" | "native_hls" | "native_file";
@@ -110,6 +117,7 @@ export class MediaEngine {
       capLevelToPlayerSize: false,
       abrEwmaDefaultEstimate: profile.abrInitialEstimateBps,
       abrMaxWithRealBitrate: true,
+      minAutoBitrate: MIN_AUTO_BITRATE_BPS,
       maxBufferLength: profile.maxBufferLengthS,
       maxMaxBufferLength: profile.maxMaxBufferLengthS,
       maxBufferSize: profile.maxBufferSizeBytes,

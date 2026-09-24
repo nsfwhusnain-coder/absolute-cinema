@@ -1,6 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { PREFERENCES_QUERY_KEY, patchPreferences } from "@/lib/preferences-client";
 import { Check, Palette } from "lucide-react";
 import {
   ACCENTS,
@@ -22,12 +25,18 @@ const MATERIALS: { id: Material; label: string; help: string }[] = [
 export function AppearanceSection() {
   const [material, setMaterial] = useState<Material>(currentMaterial);
   const [accent, setAccent] = useState<AccentId>(currentAccent);
+  const qc = useQueryClient();
+  // Applied at once on this device, then saved to the profile so every device follows.
+  const save = (patch: { material?: Material; accent?: AccentId }) =>
+    patchPreferences(patch)
+      .then((prefs) => qc.setQueryData(PREFERENCES_QUERY_KEY, prefs))
+      .catch(() => toast.error("Couldn't save to your profile; it applies on this device only"));
 
   return (
     <Section
       title="Appearance"
       icon={<Palette className="h-4 w-4 text-white/70" />}
-      description="Applies to this device only."
+      description="Saved to your profile, so every device you sign in on looks the same."
     >
       <Row label="Theme">
         <div className="grid grid-cols-2 gap-3 sm:w-80" role="radiogroup" aria-label="Theme">
@@ -40,6 +49,7 @@ export function AppearanceSection() {
               onClick={() => {
                 setMaterial(m.id);
                 applyMaterial(m.id);
+                void save({ material: m.id });
               }}
               className={cn(
                 "overflow-hidden rounded-2xl border text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60",
@@ -68,6 +78,7 @@ export function AppearanceSection() {
               onClick={() => {
                 setAccent(a.id);
                 applyAccent(a.id);
+                void save({ accent: a.id });
               }}
               className={cn(
                 "flex h-8 w-8 items-center justify-center rounded-full transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70",

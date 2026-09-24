@@ -8,7 +8,7 @@ import { PRIMARY_NAV, isNavPathActive } from "@/lib/nav";
 import { NavLettermark } from "@/components/brand-mark";
 import { signOut, useSession } from "next-auth/react";
 import { useEffect, useRef, useState } from "react";
-import { ProfileAvatar } from "@/views/login";
+import { ProfileAvatar } from "@/components/profile-avatar";
 
 const FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-transparent";
@@ -182,12 +182,12 @@ function ProfileMenu() {
         onClick={() => setOpen((v) => !v)}
         className={cn("ml-0.5 inline-flex h-10 w-10 items-center justify-center rounded-full", FOCUS_RING)}
       >
-        <ProfileAvatar name={name || "?"} color={session?.user?.avatarColor ?? "#e50914"} size="sm" />
+        <ProfileAvatar name={name || "?"} color={session?.user?.avatarColor ?? "#e50914"} avatar={session?.user?.avatar} size="sm" />
       </button>
       {open && (
         <div role="menu" className="glass-strong absolute right-0 top-12 w-56 rounded-3xl p-2">
           <div className="flex items-center gap-3 px-3 pb-2 pt-1">
-            <ProfileAvatar name={name || "?"} color={session?.user?.avatarColor ?? "#e50914"} size="sm" />
+            <ProfileAvatar name={name || "?"} color={session?.user?.avatarColor ?? "#e50914"} avatar={session?.user?.avatar} size="sm" />
             <span className="min-w-0 truncate text-sm font-semibold text-white">{name}</span>
           </div>
           <Link href="/login" role="menuitem" className={item} onClick={() => setOpen(false)}>

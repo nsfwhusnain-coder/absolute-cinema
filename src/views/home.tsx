@@ -15,6 +15,7 @@ import {
   fetchTrendingMerged,
   seedSeenFromContinue,
   takeUnique,
+  tmdbFetch,
   type MediaKind,
   type TmdbListItem,
 } from "@/lib/tmdb-client";
@@ -202,11 +203,21 @@ export function HomeView() {
     };
   }, [catalog.data, continueQuery.data, recSeed, recSeedMediaType, becauseYouWatchedQuery.data, hideAdult]);
 
-  const featured = withoutAdultTitles(catalog.data?.trendingMovies ?? [], hideAdult).slice(0, 5).map((m) => ({
-    ...m,
-    overview: m.overview ?? "",
-    media_type: "movie" as const,
-  }));
+  // Home's banner is what everyone is watching today, movies and shows alike;
+  // the Movies and Shows pages feature acclaimed picks instead.
+  const heroQuery = useQuery({
+    queryKey: ["tmdb", "home-hero", "trending-all-day"],
+    queryFn: () => tmdbFetch("trending/all/day"),
+    staleTime: 60 * 60 * 1000,
+  });
+  const heroPool: Array<TmdbListItem & { media_type: "movie" | "tv" }> = heroQuery.data?.results?.length
+    ? heroQuery.data.results
+        .filter((m) => (m.media_type === "movie" || m.media_type === "tv") && m.backdrop_path)
+        .map((m) => ({ ...m, media_type: m.media_type as "movie" | "tv" }))
+    : (catalog.data?.trendingMovies ?? []).map((m) => ({ ...(m as TmdbListItem), media_type: "movie" as const }));
+  const featured = withoutAdultTitles(heroPool, hideAdult)
+    .slice(0, 5)
+    .map((m) => ({ ...m, overview: m.overview ?? "" }));
 
   const hasContinue = !continueQuery.isLoading && continueItems.length > 0;
   const catalogFailed = isTotalCatalogFailure(catalog.data);
@@ -216,7 +227,7 @@ export function HomeView() {
     if (!mounted) return;
     const hero = featured[0];
     if (hero) {
-      void preresolvePlayback({ mediaType: "movie", tmdbId: hero.id }).then(
+      void preresolvePlayback({ mediaType: hero.media_type, tmdbId: hero.id }).then(
         warmPreresolvedPlayback
       );
     }

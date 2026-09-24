@@ -16,6 +16,7 @@ import {
   parseSubtitlePreference,
   type ProfilePlaybackPreferences,
 } from "@/lib/profile-preferences";
+import { ACCENTS, DEFAULT_ACCENT, DEFAULT_MATERIAL, type AccentId, type Material } from "@/lib/appearance";
 
 export async function getUserPlaybackPreferences(
   userId: string
@@ -135,4 +136,52 @@ export async function saveHideAdultPreference(
     update: { value: hideAdult ? "on" : "off" },
     create: { userId, key: HIDE_ADULT_SETTING_KEY, value: hideAdult ? "on" : "off" },
   });
+}
+
+const MATERIAL_SETTING_KEY = "appearance_material";
+const ACCENT_SETTING_KEY = "appearance_accent";
+const AUTOPLAY_NEXT_SETTING_KEY = "autoplay_next";
+
+/** Per-profile look and small behaviour choices that follow the profile to every device. */
+export interface ProfileExtras {
+  material: Material;
+  accent: AccentId;
+  autoplayNext: boolean;
+}
+
+export function parseMaterial(value: unknown): Material | null {
+  return value === "clear" || value === "solid" ? value : null;
+}
+
+export function parseAccent(value: unknown): AccentId | null {
+  return ACCENTS.some((a) => a.id === value) ? (value as AccentId) : null;
+}
+
+export async function getProfileExtras(userId: string): Promise<ProfileExtras> {
+  const rows = await db.userSetting.findMany({
+    where: { userId, key: { in: [MATERIAL_SETTING_KEY, ACCENT_SETTING_KEY, AUTOPLAY_NEXT_SETTING_KEY] } },
+    select: { key: true, value: true },
+  });
+  const values = new Map(rows.map((row) => [row.key, row.value]));
+  return {
+    material: parseMaterial(values.get(MATERIAL_SETTING_KEY)) ?? DEFAULT_MATERIAL,
+    accent: parseAccent(values.get(ACCENT_SETTING_KEY)) ?? DEFAULT_ACCENT,
+    autoplayNext: values.get(AUTOPLAY_NEXT_SETTING_KEY) !== "off",
+  };
+}
+
+export async function saveProfileExtras(userId: string, patch: Partial<ProfileExtras>): Promise<void> {
+  const writes: Array<[string, string]> = [];
+  if (patch.material) writes.push([MATERIAL_SETTING_KEY, patch.material]);
+  if (patch.accent) writes.push([ACCENT_SETTING_KEY, patch.accent]);
+  if (patch.autoplayNext !== undefined) writes.push([AUTOPLAY_NEXT_SETTING_KEY, patch.autoplayNext ? "on" : "off"]);
+  await db.$transaction(
+    writes.map(([key, value]) =>
+      db.userSetting.upsert({
+        where: { userId_key: { userId, key } },
+        update: { value },
+        create: { userId, key, value },
+      })
+    )
+  );
 }

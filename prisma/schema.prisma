@@ -1,5 +1,5 @@
 // Absolute Cinema — self-hosted movie streaming UI
-// Schema: users (name + PIN, no email), watchlist, watch progress, admin settings
+// Schema: profiles (name, avatar, optional PIN; no email), watchlist, watch progress, settings
 
 generator client {
   provider = "prisma-client-js"
@@ -13,9 +13,14 @@ datasource db {
 model User {
   id          String   @id @default(cuid())
   name        String   @unique
-  pinHash     String
+  /// Set only when the profile has a PIN.
+  pinHash     String?
+  /// Ask for the PIN when opening this profile (off: one tap, like Netflix).
+  pinRequired Boolean  @default(false)
   isAdmin     Boolean  @default(false)
   avatarColor String   @default("#e50914")
+  /// Picture from public/avatars (empty: the name's initial).
+  avatar      String   @default("")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

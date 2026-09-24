@@ -13,7 +13,8 @@
  *   - "safari-2160"   Hades — cached HEVC/MKV 4K remux
  *   - "safari-2160-2" Hades II — second cached 4K remux when one exists
  *   - "native-1080-1/2/3"  Kronos — browser-safe H.264/MP4 1080p
- *   - "safari-1080"   Oceanus — cached 1080 remux (MKV / lossless audio)
+ *   - "safari-1080(-2/-3)" Oceanus — cached 1080 remux (MKV / lossless audio);
+ *     most anime and non-English releases only exist as MKV
  *   - "native-720"    last-resort native fallback when no HD exists
  * "Best native" (the auto-default target) falls out of this for free: the
  * existing (unowned) scoring in source-quality.ts already ranks a native
@@ -73,8 +74,10 @@
  */
 import type { MediaType, PlaybackSource } from "../types";
 import { inferAudioLanguageFromText } from "../source-facts";
+import { resolveKitsuEpisode } from "./anime-mapping";
 import {
   fetchTorrentioCandidates,
+  fetchTorrentioKitsuCandidates,
   fetchTorrentioCandidatesNoDebrid,
   isMoviePackRelease,
   parseReleaseTitle,
@@ -136,7 +139,10 @@ const RD_SLOTS: DebridSlot[] = [
   "native-1080-3",
   "native-1080-4",
   "safari-1080",
+  "safari-1080-2",
+  "safari-1080-3",
   "native-720",
+  "safari-720",
 ];
 
 /**
@@ -263,6 +269,34 @@ export interface ResolveDebridSourcesRequest {
 
 interface ResolvedCandidate extends DebridCandidate {
   directUrl: string;
+}
+
+/**
+ * Torrentio candidates for a title. Anime episodes are looked up by Kitsu
+ * entry first: TMDB and IMDb often split long anime differently (TMDB has
+ * Bleach as two seasons, the second being Thousand-Year Blood War; IMDb has
+ * sixteen), so an IMDb "S2E1" can be a different show's episode. Titles with
+ * no anime mapping, or no Kitsu results, use the IMDb lookup.
+ */
+async function fetchTorrentioCandidatesForTitle(
+  req: ResolveDebridSourcesRequest,
+  imdbId: string,
+  rdToken: string
+): Promise<DebridCandidate[]> {
+  if (req.mediaType === "tv" && req.season && req.episode) {
+    const kitsu = await resolveKitsuEpisode(req.tmdbId, req.season, req.episode);
+    if (kitsu) {
+      const byKitsu = await fetchTorrentioKitsuCandidates({ ...kitsu, rdToken });
+      if (byKitsu.length) return byKitsu;
+    }
+  }
+  return fetchTorrentioCandidates({
+    imdbId,
+    mediaType: req.mediaType,
+    season: req.season,
+    episode: req.episode,
+    rdToken,
+  });
 }
 
 interface KeyBase {
@@ -449,7 +483,7 @@ function nativeCandidatesAt(
 
 function remuxCandidatesAt(
   candidates: DebridCandidate[],
-  height: 1080 | 2160
+  height: 720 | 1080 | 2160
 ): DebridCandidate[] {
   // HEVC/MKV/DTS releases are the bulk of RD's cached 4K library. Native
   // slots stay MP4-only so Poseidon/Kronos start instantly. Remux slots
@@ -524,8 +558,11 @@ function buildRdSlotOptions(
     "native-1080-2": [],
     "native-1080-3": [],
     "native-1080-4": [],
-    "safari-1080": available(remuxCandidatesAt(candidates, 1080)),
+    "safari-1080": [],
+    "safari-1080-2": [],
+    "safari-1080-3": [],
     "native-720": available(nativeCandidatesAt(candidates, 720)),
+    "safari-720": available(remuxCandidatesAt(candidates, 720)),
   };
 
   // Keep one shared ranked pool. Disjoint round-robin lanes prevented
@@ -543,6 +580,11 @@ function buildRdSlotOptions(
   const native1080 = available(nativeCandidatesAt(candidates, 1080));
   nativeSlots.forEach((slot) => {
     result[slot] = native1080;
+  });
+  const remux1080Slots = missing.filter((slot) => slot.startsWith("safari-1080"));
+  const remux1080 = available(remuxCandidatesAt(candidates, 1080));
+  remux1080Slots.forEach((slot) => {
+    result[slot] = remux1080;
   });
   const remux4kSlots = missing.filter((slot) => slot.startsWith("safari-2160"));
   const remux4k = available(remuxCandidatesAt(candidates, 2160));
@@ -1070,6 +1112,9 @@ async function resolveRealDebridSlots(
       slot !== "safari-2160-2" &&
       slot !== "native-2160-2" &&
       slot !== "native-1080-4" &&
+      slot !== "safari-1080-2" &&
+      slot !== "safari-1080-3" &&
+      slot !== "safari-720" &&
       // A slot we recently proved unfillable is not worth the whole deadline.
       !isSlotRecentlyUnfillable(keyBase, slot)
   );
@@ -1080,21 +1125,16 @@ async function resolveRealDebridSlots(
   const deadline = Date.now() + RD_FULL_DEADLINE_MS;
   const candidates =
     preFetchedCandidates ??
-    (await fetchTorrentioCandidates({
-      imdbId: keyBase.imdbId,
-      mediaType: req.mediaType,
-      season: req.season,
-      episode: req.episode,
-      rdToken,
-    }));
+    (await fetchTorrentioCandidatesForTitle(req, keyBase.imdbId, rdToken));
 
   const slotOptions = buildRdSlotOptions(candidates, missing, occupiedIdentities);
   // The slot groups draw from disjoint candidate pools (native 4K, native
-  // 1080p, HEVC/remux 4K, the rest), so they resolve concurrently. Run one
+  // 1080p, remux 4K, remux 1080p, the rest), so they resolve concurrently. Run one
   // after another they shared a single deadline, and a slow or uncached 4K
   // pool could spend all of it before 1080p was even attempted.
   const native4kSlots = missing.filter((slot) => slot.startsWith("native-2160"));
   const native1080Slots = missing.filter((slot) => slot.startsWith("native-1080"));
+  const remux1080Slots = missing.filter((slot) => slot.startsWith("safari-1080"));
   const remux4kSlots = missing.filter((slot) => slot.startsWith("safari-2160"));
   const resolvePool = (slots: DebridSlot[]) =>
     slots.length > 0
@@ -1114,12 +1154,14 @@ async function resolveRealDebridSlots(
     (slot) =>
       !slot.startsWith("native-1080") &&
       !slot.startsWith("native-2160") &&
-      !slot.startsWith("safari-2160")
+      !slot.startsWith("safari-2160") &&
+      !slot.startsWith("safari-1080")
   );
-  const [rankedNative4k, rankedNative1080, rankedRemux4k, otherEntriesAll] = await Promise.all([
+  const [rankedNative4k, rankedNative1080, rankedRemux4k, rankedRemux1080, otherEntriesAll] = await Promise.all([
     resolvePool(native4kSlots),
     resolvePool(native1080Slots),
     resolvePool(remux4kSlots),
+    resolvePool(remux1080Slots),
     mapWithConcurrency(otherMissingBase, RESOLVE_CONCURRENCY, async (slot) => {
       const options = slotOptions[slot];
       if (!options?.length) return null;
@@ -1145,15 +1187,21 @@ async function resolveRealDebridSlots(
     slot: remux4kSlots[index]!,
     resolved,
   }));
-  // A successful native 1080p roster makes the 720p availability fallback
-  // redundant; drop it rather than cache a lower-quality extra source.
+  const remux1080Entries = rankedRemux1080.map((resolved, index) => ({
+    slot: remux1080Slots[index]!,
+    resolved,
+  }));
+  // A successful 1080p roster makes the 720p availability fallbacks
+  // redundant; drop them rather than cache lower-quality extra sources.
+  const hasHd = nativeEntries.length > 0 || remux1080Entries.some((entry) => entry.resolved);
   const otherEntries = otherEntriesAll.filter(
-    (entry) => !(entry?.slot === "native-720" && nativeEntries.length > 0)
+    (entry) => !((entry?.slot === "native-720" || entry?.slot === "safari-720") && hasHd)
   );
   let resolvedPerSlot = [
     ...native4kEntries,
     ...nativeEntries,
     ...remux4kEntries,
+    ...remux1080Entries,
     ...otherEntries,
   ].filter(
     (entry): entry is { slot: DebridSlot; resolved: ResolvedCandidate } =>

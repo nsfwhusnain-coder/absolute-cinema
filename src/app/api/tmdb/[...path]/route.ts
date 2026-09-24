@@ -40,6 +40,9 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ path: stri
       if (a === "trending" && b === "tv") {
         return tmdb.trendingTv((c as "day" | "week") || "week");
       }
+      if (a === "trending" && b === "all") {
+        return tmdb.trendingAll((c as "day" | "week") || "day");
+      }
       if (a === "movie" && b === "popular") {
         return tmdb.popularMovies(Number(c) || 1);
       }
@@ -107,6 +110,9 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ path: stri
       }
       if (a === "genre" && (b === "movie" || b === "tv")) {
         return tmdb.genres(b);
+      }
+      if (a === "discover" && (b === "movie" || b === "tv") && c === "acclaimed") {
+        return tmdb.acclaimedRecent(b, Number(params.page) || 1);
       }
       if (a === "discover" && b === "movie" && c === "new-digital") {
         return tmdb.newDigitalReleases(Number(params.page) || 1, (params.region as string) || "US");

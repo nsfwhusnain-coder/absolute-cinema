@@ -4,6 +4,7 @@ import { isSourcePlayableHere, sourceDelivery, sourceMaxHeight } from "@/lib/pla
 import { preferNativeHls } from "@/lib/playback/player-engine";
 import type { Ranker } from "@/lib/playback/orchestrator";
 import type { Playable } from "./engine";
+import type { RemuxAudioTrack, StreamSubtitleTrack } from "./store";
 
 export interface TitleContext {
   tmdbId: number;
@@ -16,6 +17,8 @@ export interface TitleContext {
 export interface AudioChoice {
   preference: "original" | "english" | "preferred";
   language: string;
+  /** A specific track of a remuxed file the viewer picked; overrides the preference. */
+  index?: number;
 }
 
 /** Sources the browser on this device can play at all. */
@@ -93,6 +96,13 @@ export interface ResolvedPlayable {
   /** SDR, PQ (HDR10 / Dolby Vision) or HLG when the server read it from the file. */
   dynamicRange?: string;
   remux: boolean;
+  /** Subtitle and audio tracks inside a remuxed file. */
+  remuxTracks?: {
+    subtitleBase: string;
+    subtitles: StreamSubtitleTrack[];
+    audioTracks: RemuxAudioTrack[];
+    audioIndex: number | null;
+  };
 }
 
 const VOD_OPEN_TIMEOUT_MS = 15_000;
@@ -116,6 +126,7 @@ export async function resolvePlayable(
       audioPreference: audio.preference,
       audioLanguage: audio.language,
     });
+    if (audio.index !== undefined) params.set("audioIndex", String(audio.index));
     if (source.remuxTicket) params.set("ticket", source.remuxTicket);
     if (title.season != null) params.set("season", String(title.season));
     if (title.episode != null) params.set("episode", String(title.episode));
@@ -127,6 +138,10 @@ export async function resolvePlayable(
       playlistUrl?: string;
       durationS?: number;
       dynamicRange?: string;
+      audioIndex?: number | null;
+      audioTracks?: RemuxAudioTrack[];
+      subtitles?: StreamSubtitleTrack[];
+      subtitleBase?: string;
       error?: string;
     };
     if (!res.ok || !body.playlistUrl) throw new Error(body.error || `remux open failed (${res.status})`);
@@ -135,6 +150,12 @@ export async function resolvePlayable(
       durationS: body.durationS,
       dynamicRange: body.dynamicRange,
       remux: true,
+      remuxTracks: {
+        subtitleBase: body.subtitleBase ?? "",
+        subtitles: body.subtitles ?? [],
+        audioTracks: body.audioTracks ?? [],
+        audioIndex: body.audioIndex ?? null,
+      },
     };
   }
   if (source.type === "hls") {

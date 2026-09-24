@@ -102,6 +102,14 @@ function resolveNextEpisode(
 
 /** Full-viewport watch page: the player and nothing else. */
 export function WatchView({ mediaType, id, season, episode }: Props) {
+  // The player puts the whole page into full screen, so changing episode keeps
+  // it; leaving the watch page is what ends it.
+  useEffect(
+    () => () => {
+      if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+    },
+    []
+  );
   const navigate = useNavigate();
   const router = useRouter();
   const mounted = useMounted();
@@ -193,7 +201,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
       const res = await fetch(`/api/tmdb/tv/${id}/season/${tvSeason}`);
       if (!res.ok) return null;
       return res.json() as Promise<{
-        episodes?: Array<{ episode_number: number; runtime?: number | null; name?: string }>;
+        episodes?: Array<{ episode_number: number; runtime?: number | null; name?: string; overview?: string }>;
       }>;
     },
     enabled: mounted && mediaType === "tv" && tvSeason != null,
@@ -268,7 +276,9 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
 
   const showPlayerShell = mounted && !!session;
   const baseTitle = meta?.title || meta?.name || playback?.title || "Untitled";
-  const episodeName = seasonMeta?.episodes?.find((e) => e.episode_number === tvEpisode)?.name;
+  const episodeMeta = seasonMeta?.episodes?.find((e) => e.episode_number === tvEpisode);
+  const episodeName = episodeMeta?.name;
+  const overview = (mediaType === "tv" ? episodeMeta?.overview || meta?.overview : meta?.overview) || undefined;
   const episodeLabel =
     mediaType === "tv" && tvSeason != null && tvEpisode != null
       ? `S${tvSeason} · E${tvEpisode}${episodeName ? ` · ${episodeName}` : ""}`
@@ -652,6 +662,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
             }}
             displayTitle={baseTitle}
             episodeLabel={episodeLabel}
+            overview={overview}
             backdrop={backdrop}
             logo={logo}
             initialTime={savedTime}

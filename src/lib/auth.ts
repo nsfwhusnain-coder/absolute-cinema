@@ -39,7 +39,7 @@ export const authOptions: NextAuthOptions = {
         pin: { label: "PIN", type: "password" },
       },
       async authorize(credentials, req) {
-        if (!credentials?.name || !credentials?.pin) return null;
+        if (!credentials?.name) return null;
 
         const name = credentials.name.trim();
         const ip = ipFromAuthorizeReq(req);
@@ -56,10 +56,13 @@ export const authOptions: NextAuthOptions = {
           recordAuthFailure(name, ip);
           return null;
         }
-        const ok = await bcrypt.compare(credentials.pin, user.pinHash);
-        if (!ok) {
-          recordAuthFailure(name, ip);
-          return null;
+        // Profiles open with one tap unless their owner turned on "Require PIN".
+        if (user.pinRequired) {
+          const ok = Boolean(user.pinHash && credentials.pin) && (await bcrypt.compare(credentials.pin!, user.pinHash!));
+          if (!ok) {
+            recordAuthFailure(name, ip);
+            return null;
+          }
         }
 
         clearAuthFailures(name, ip);
@@ -68,6 +71,7 @@ export const authOptions: NextAuthOptions = {
           name: user.name,
           isAdmin: user.isAdmin,
           avatarColor: user.avatarColor,
+          avatar: user.avatar,
         };
       },
     }),
@@ -79,17 +83,19 @@ export const authOptions: NextAuthOptions = {
         token.isAdmin = user.isAdmin;
         token.name = user.name;
         token.avatarColor = user.avatarColor;
+        token.avatar = user.avatar;
       } else if (trigger === "update" && token.id) {
         // The client asks for a refresh after editing its profile; the values
         // always come from the database, never from the client's payload.
         const fresh = await db.user.findUnique({
           where: { id: token.id as string },
-          select: { name: true, isAdmin: true, avatarColor: true },
+          select: { name: true, isAdmin: true, avatarColor: true, avatar: true },
         });
         if (fresh) {
           token.name = fresh.name;
           token.isAdmin = fresh.isAdmin;
           token.avatarColor = fresh.avatarColor;
+          token.avatar = fresh.avatar;
         }
       }
       return token;
@@ -100,6 +106,7 @@ export const authOptions: NextAuthOptions = {
         session.user.isAdmin = token.isAdmin as boolean;
         if (token.name) session.user.name = token.name as string;
         session.user.avatarColor = token.avatarColor ?? "#e50914";
+        session.user.avatar = token.avatar ?? "";
       }
       return session;
     },

@@ -139,7 +139,8 @@ function debridGreekName(lowerProvider: string, lowerLabel: string, id?: string)
   }
 
   if (id?.includes("safari-1080")) {
-    return PREMIUM_NAMES.rdRemux1080;
+    const remuxInstance = id.match(/safari-1080-([2-9])$/)?.[1];
+    return `${PREMIUM_NAMES.rdRemux1080}${toRomanSuffix(remuxInstance ? Number(remuxInstance) : 1)}`;
   }
 
   if (is1080) {

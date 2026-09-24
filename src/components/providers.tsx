@@ -23,6 +23,7 @@ const KeyboardShortcutsHelp = dynamic(
   { ssr: false }
 );
 import { ErrorBoundary } from "@/components/error-boundary";
+import { ProfileSync } from "@/components/profile-sync";
 
 function GlobalShortcuts() {
   const setShortcutsHelpOpen = useUIStore((s) => s.setShortcutsHelpOpen);
@@ -52,6 +53,7 @@ export function Providers({ children, session }: { children: React.ReactNode; se
         <MotionConfig reducedMotion="user">
           <ErrorBoundary>{children}</ErrorBoundary>
           <GlobalShortcuts />
+          <ProfileSync />
         </MotionConfig>
       </QueryClientProvider>
     </SessionProvider>

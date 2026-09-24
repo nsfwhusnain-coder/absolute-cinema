@@ -181,6 +181,19 @@ const SIZE_PATTERN = /(\d+(?:\.\d+)?)\s*(GiB|GB|MiB|MB)\b/i;
 const MOVIE_NON_FEATURE_PATTERN =
   /\b(?:featurettes?|bonus(?:es)?|extras?|soundtracks?|deleted[ ._-]?scenes?|imdb[ ._-]*top[ ._-]*\d+)\b/i;
 
+const TEN_BIT_PATTERN = /\b10[\s._-]?bits?\b/i;
+const HI10_PATTERN = /\bhi10p?\b/i;
+
+/**
+ * 10-bit H.264 ("Hi10P", common in anime encodes) is decodable by no browser.
+ * Only an explicit AVC/x264 tag (or "Hi10") counts: plain "10bit" releases
+ * are usually HEVC, which plays where the device supports it.
+ */
+export function isHi10AvcRelease(text: string): boolean {
+  if (HI10_PATTERN.test(text)) return true;
+  return TEN_BIT_PATTERN.test(text) && H264_PATTERN.test(text) && !HEVC_PATTERN.test(text) && !AV1_PATTERN.test(text);
+}
+
 /**
  * Pure title/filename classifier — no network. Exported for unit testing
  * against real sample release-name conventions.
@@ -299,6 +312,15 @@ export function isEligibleDebridQuality(height: number | null): height is 720 | 
 }
 
 /**
+ * Buckets heights the release scene uses besides the three rungs: 4:3 Blu-ray
+ * rips of older anime are "800p", which is HD and belongs with 720p.
+ */
+export function debridHeightBucket(height: number | null): number | null {
+  if (height != null && height > 720 && height < 900) return 720;
+  return height;
+}
+
+/**
  * Explicit stereoscopic layout tokens. A release carrying one of these stores
  * two eye views inside a normal-looking 1080p frame, so it plays as a squashed
  * side-by-side (or over-under) pair in any ordinary player.
@@ -337,7 +359,11 @@ export function isStereoscopicRelease(text: string): boolean {
   return STEREO_3D_BEFORE_SOURCE_PATTERN.test(t);
 }
 
-/** Known-size floors so a 800 MB "1080p" cannot occupy a native HD slot. */
+/**
+ * Known-size floors so a 800 MB "1080p" movie cannot occupy an HD slot. TV
+ * floors are sized for a 22-24 minute episode (sitcoms, anime), and HEVC/AV1
+ * need about half the bytes of H.264 for the same picture.
+ */
 const MIN_DEBRID_SIZE_BYTES: Record<MediaType, Record<720 | 1080 | 2160, number>> = {
   movie: {
     720: Math.round(0.7 * 1024 ** 3),
@@ -345,18 +371,21 @@ const MIN_DEBRID_SIZE_BYTES: Record<MediaType, Record<720 | 1080 | 2160, number>
     2160: 6 * 1024 ** 3,
   },
   tv: {
-    720: Math.round(0.25 * 1024 ** 3),
-    1080: Math.round(0.7 * 1024 ** 3),
+    720: Math.round(0.15 * 1024 ** 3),
+    1080: Math.round(0.35 * 1024 ** 3),
     2160: Math.round(1.8 * 1024 ** 3),
   },
 };
+const EFFICIENT_CODEC_SIZE_FACTOR = 0.5;
 
 export function isLeanDebridSize(
-  candidate: { resolutionHeight: 720 | 1080 | 2160; sizeBytes?: number },
+  candidate: { resolutionHeight: 720 | 1080 | 2160; sizeBytes?: number; codec?: ReleaseCodec },
   mediaType: MediaType
 ): boolean {
   if (candidate.sizeBytes == null || candidate.sizeBytes <= 0) return false;
-  return candidate.sizeBytes < MIN_DEBRID_SIZE_BYTES[mediaType][candidate.resolutionHeight];
+  const floor = MIN_DEBRID_SIZE_BYTES[mediaType][candidate.resolutionHeight];
+  const efficient = candidate.codec === "hevc" || candidate.codec === "av1";
+  return candidate.sizeBytes < (efficient ? floor * EFFICIENT_CODEC_SIZE_FACTOR : floor);
 }
 
 export function filterLeanDebridCandidates<T extends {
@@ -555,8 +584,8 @@ const PER_CLASS_CAP: Record<CandidateClass, number> = {
   // One RD roster slot consumes this class only when no higher native slot
   // is available. Keep several candidates so validation can fall through.
   "native-720": 5,
-  // A lower-quality source that still cannot direct-play has no value.
-  "safari-720": 0,
+  // Older shows and anime often exist only as 720p MKV; remux plays them.
+  "safari-720": 4,
 };
 /** Total candidate pool bound — see module header for why this replaced a flat top-8 cut. */
 const MAX_CANDIDATES = Object.values(PER_CLASS_CAP).reduce((sum, n) => sum + n, 0);
@@ -694,12 +723,13 @@ function parseTorrentioStreams(
       continue;
     }
     const parsed = parseReleaseTitle(text);
-    const height = parsed.resolutionHeight;
+    const height = debridHeightBucket(parsed.resolutionHeight);
     const sizeBytes = parseSizeBytes(text);
     if (!isEligibleDebridQuality(height)) continue;
     // Stereoscopic 3D/VR parses as ordinary 1080p but plays as a squashed
     // side-by-side pair. Never let one occupy a slot.
     if (isStereoscopicRelease(text)) continue;
+    if (isHi10AvcRelease(text)) continue;
 
     const rawTitle = (s.title ?? s.name ?? "Unknown release").split("\n")[0]?.trim();
     candidates.push({
@@ -746,6 +776,26 @@ export async function fetchTorrentioCandidates(
     const data = await fetchTorrentioJson(url);
     if (!data) return [];
     return parseTorrentioStreams(data, true, params.mediaType);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Same as `fetchTorrentioCandidates`, keyed by a Kitsu entry and its own
+ * episode number (how most anime is indexed). Never throws.
+ */
+export async function fetchTorrentioKitsuCandidates(params: {
+  kitsuId: number;
+  episode: number;
+  rdToken: string;
+}): Promise<DebridCandidate[]> {
+  try {
+    const configSegment = `realdebrid=${encodeURIComponent(params.rdToken)}`;
+    const url = `${TORRENTIO_BASE}/${configSegment}/stream/series/kitsu:${params.kitsuId}:${params.episode}.json`;
+    const data = await fetchTorrentioJson(url);
+    if (!data) return [];
+    return parseTorrentioStreams(data, true, "tv");
   } catch {
     return [];
   }

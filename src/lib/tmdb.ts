@@ -331,6 +331,26 @@ export const tmdb = {
   trendingTv: (window: "day" | "week" = "week") =>
     tmdbFetch<TmdbPaged<TmdbTv>>(`/trending/tv/${window}`),
 
+  /** Movies and shows together: what everyone is watching today. */
+  trendingAll: (window: "day" | "week" = "day") =>
+    tmdbFetch<TmdbPaged<(TmdbMovie | TmdbTv) & { media_type?: string }>>(`/trending/all/${window}`),
+
+  /**
+   * Recent, well-reviewed titles that people are watching now: the "worth
+   * your evening" picks for the Movies and Shows pages.
+   */
+  acclaimedRecent: (type: "movie" | "tv", page = 1) => {
+    const since = new Date(Date.now() - ACCLAIMED_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
+    return tmdbFetch<TmdbPaged<TmdbMovie | TmdbTv>>(`/discover/${type}`, {
+      ...(type === "movie" ? { "primary_release_date.gte": since } : { "air_date.gte": since }),
+      "vote_average.gte": type === "movie" ? 7.2 : 7.5,
+      "vote_count.gte": type === "movie" ? 300 : 150,
+      sort_by: "popularity.desc",
+      include_adult: false,
+      page,
+    });
+  },
+
   popularMovies: (page = 1) =>
     tmdbFetch<TmdbPaged<TmdbMovie>>(`/movie/popular`, { page }),
 
@@ -473,6 +493,8 @@ export const tmdb = {
 export const NETFLIX_PROVIDER_ID = 8;
 
 const NEW_RELEASE_WINDOW_DAYS = 120;
+/** How far back the Movies/Shows "acclaimed now" picks may reach. */
+const ACCLAIMED_WINDOW_DAYS = 540;
 const NEW_RELEASE_MIN_VOTES = 20;
 
 export const COMMON_GENRES: { id: number; name: string }[] = [

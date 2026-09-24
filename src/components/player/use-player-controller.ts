@@ -25,6 +25,12 @@ import { usePlayerState } from "./store";
 const START_TIMEOUT_MS = 20_000;
 /** Remux sessions open, index and produce their first segment before a frame exists (cold 4K measured at up to ~11s). */
 const REMUX_START_TIMEOUT_MS = 25_000;
+/** This many rebuffers inside the window means the source cannot keep up, even if each one recovers. */
+const REBUFFER_LIMIT = 3;
+const REBUFFER_WINDOW_MS = 90_000;
+/** Buffering right after a seek is expected and does not count. */
+const SEEK_GRACE_MS = 4_000;
+const QUALITY_STEPS = [2160, 1440, 1080, 720, 480];
 /** Buffering this long with no progress while playing means the server is too slow. */
 const STALL_TIMEOUT_MS = 12_000;
 /** A retry of a source that was already playing gets less patience than a cold start. */
@@ -58,6 +64,11 @@ export function usePlayerController(options: PlayerControllerOptions) {
   const startTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stallTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recheckTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Audio track the viewer picked inside a remuxed file (applies to that source only). */
+  const audioOverride = useRef<{ sourceId: string; index: number } | null>(null);
+  const rebuffers = useRef<number[]>([]);
+  const lastSeekAt = useRef(0);
+  const rebufferSwitches = useRef(0);
   const attachAbort = useRef<AbortController | null>(null);
   const attemptStartedAt = useRef(0);
   const playedOnSourceMs = useRef(0);
@@ -109,7 +120,11 @@ export function usePlayerController(options: PlayerControllerOptions) {
       const state = orchestrator.current;
       if (state.phase !== "starting") return;
       const source = sourceById(state.activeId);
-      if (source) emitPlayerFeedback({ event: "handoff_failed", sourceId: source.id, provider: source.provider, reason, engine: engineRef.current?.kind });
+      if (source) {
+        emitPlayerFeedback({ event: "handoff_failed", sourceId: source.id, provider: source.provider, reason, engine: engineRef.current?.kind });
+        const name = source.label.split("•")[0]?.trim() || source.provider;
+        store.getState().set({ startNote: `${name} didn't respond, trying the next server` });
+      }
       const { sources, discovering } = optionsRef.current;
       apply(onStartFailed(state, sources, reason, discovering, ranker(), Date.now()));
     },
@@ -177,12 +192,19 @@ export function usePlayerController(options: PlayerControllerOptions) {
       s.set({ buffering: true, failureMessage: null, levels: [], audioTracks: [], currentLevel: -1 });
       attemptStartedAt.current = Date.now();
       sustainedReported.current = false;
-      const { title, audio } = optionsRef.current;
+      const { title } = optionsRef.current;
+      const override = audioOverride.current?.sourceId === source.id ? audioOverride.current.index : undefined;
+      const audio = override === undefined ? optionsRef.current.audio : { ...optionsRef.current.audio, index: override };
       try {
         const resolved = await resolvePlayable(source, title, audio, startAt, video, abort.signal);
         if (abort.signal.aborted) return;
         remuxDuration.current = resolved.durationS ?? null;
-        s.set({ dynamicRange: resolved.dynamicRange ?? "SDR" });
+        const tracks = resolved.remuxTracks;
+        s.set({
+          dynamicRange: resolved.dynamicRange ?? "SDR",
+          streamSubtitles: tracks?.subtitles.length ? { base: tracks.subtitleBase, tracks: tracks.subtitles } : null,
+          remuxAudio: tracks ? { tracks: tracks.audioTracks, active: tracks.audioIndex } : null,
+        });
         const recovering = orchestrator.current.phase === "recovering";
         startTimer.current = setTimeout(
           () => (orchestrator.current.phase === "starting" ? startFailed("timeout") : playbackFailed("timeout", "stall")),
@@ -254,7 +276,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
         clearTimers();
         const source = sourceById(orchestrator.current.activeId);
         orchestrator.current = onFirstFrame(orchestrator.current);
-        s().set({ phase: "playing", decodedHeight: video.videoHeight });
+        s().set({ phase: "playing", decodedHeight: video.videoHeight, startNote: null });
         if (source && phase === "starting") {
           emitPlayerFeedback({
             event: "first_frame",
@@ -297,7 +319,32 @@ export function usePlayerController(options: PlayerControllerOptions) {
     };
     const onWaiting = () => {
       s().set({ buffering: true });
-      if (orchestrator.current.phase === "playing") armStall();
+      if (orchestrator.current.phase !== "playing") return;
+      armStall();
+      if (video.seeking || Date.now() - lastSeekAt.current < SEEK_GRACE_MS) return;
+      const now = Date.now();
+      rebuffers.current = [...rebuffers.current.filter((t) => now - t < REBUFFER_WINDOW_MS), now];
+      if (rebuffers.current.length >= REBUFFER_LIMIT) {
+        rebuffers.current = [];
+        moveToSmootherSource();
+      }
+    };
+    const onSeeking = () => {
+      lastSeekAt.current = Date.now();
+    };
+    // Playback keeps pausing to buffer: this server cannot keep up. Try another
+    // one at the same point; if that happened before, also step quality down.
+    const moveToSmootherSource = () => {
+      rebufferSwitches.current += 1;
+      if (rebufferSwitches.current > 1) {
+        const current = s().decodedHeight >= 1500 ? 2160 : s().decodedHeight >= 900 ? 1080 : s().decodedHeight;
+        const lower = QUALITY_STEPS.find((h) => h < current);
+        if (lower) {
+          s().set({ qualityChoice: lower });
+          s().showNotice(`Switched to ${lower}p for smoother playback`);
+        }
+      }
+      playbackFailed("rebuffering", "stall");
     };
     const onPause = () => {
       s().set({ playing: false });
@@ -322,6 +369,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
     video.addEventListener("playing", onPlaying);
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("waiting", onWaiting);
+    video.addEventListener("seeking", onSeeking);
     video.addEventListener("pause", onPause);
     video.addEventListener("loadedmetadata", onMeta);
     video.addEventListener("durationchange", onMeta);
@@ -333,6 +381,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       video.removeEventListener("playing", onPlaying);
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("waiting", onWaiting);
+      video.removeEventListener("seeking", onSeeking);
       video.removeEventListener("pause", onPause);
       video.removeEventListener("loadedmetadata", onMeta);
       video.removeEventListener("durationchange", onMeta);
@@ -341,7 +390,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       video.removeEventListener("volumechange", onVolume);
       video.removeEventListener("ratechange", onRate);
     };
-  }, [videoRef, store, armStall, clearTimers, reportSustained, sourceById]);
+  }, [videoRef, store, armStall, clearTimers, playbackFailed, reportSustained, sourceById]);
 
   // Roster changes: start when nothing is running; never switch a running source.
   const { sources, discovering } = options;
@@ -415,6 +464,13 @@ export function usePlayerController(options: PlayerControllerOptions) {
       },
       selectAudio(id: number) {
         engineRef.current?.setAudioTrack(id);
+      },
+      /** Remuxed files stream one audio track: switching reopens the same source at the same point. */
+      selectRemuxAudio(index: number) {
+        const sourceId = orchestrator.current.activeId;
+        if (!sourceId || store.getState().remuxAudio?.active === index) return;
+        audioOverride.current = { sourceId, index };
+        executeRef.current({ type: "attach", sourceId, keepPosition: true, refresh: false });
       },
       retry() {
         orchestrator.current = onRetryAll(orchestrator.current);

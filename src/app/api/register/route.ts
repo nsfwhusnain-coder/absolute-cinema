@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { defaultAvatarColor, isAvatarColor, signupsOpen } from "@/lib/profiles";
+import { defaultAvatar, isAvatarId } from "@/lib/avatars";
 import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
@@ -12,18 +13,20 @@ import {
 import { checkRegistrationGate } from "@/lib/registration-gate";
 
 /**
- * POST /api/register  { name, pin, avatarColor? }
+ * POST /api/register  { name, pin?, avatar?, avatarColor? }
  *
- * Creates a profile: a display name plus a 4-10 digit PIN, no email. The
+ * Creates a profile: a display name and picture, no email. A 4-10 digit PIN
+ * is optional; with one, the profile asks for it when opened. The
  * first profile becomes the admin. After that, anyone may create a profile
  * while sign-ups are open (Settings → Server, on by default) and an admin
  * always may. Rate-limited per name and IP, like sign-in.
  */
 export async function POST(req: NextRequest) {
   try {
-    const { name, pin, avatarColor } = (await req.json()) as {
+    const { name, pin, avatar, avatarColor } = (await req.json()) as {
       name?: string;
       pin?: string;
+      avatar?: string;
       avatarColor?: string;
     };
 
@@ -39,13 +42,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: gate.error }, { status: 403 });
     }
 
-    if (!name || !pin) {
-      return NextResponse.json({ error: "Missing name or PIN" }, { status: 400 });
+    if (!name) {
+      return NextResponse.json({ error: "Missing name" }, { status: 400 });
     }
     if (name.trim().length < 2 || name.trim().length > 24) {
       return NextResponse.json({ error: "Name must be 2 to 24 characters" }, { status: 400 });
     }
-    if (!/^\d{4,10}$/.test(pin)) {
+    if (pin !== undefined && pin !== "" && !/^\d{4,10}$/.test(pin)) {
       return NextResponse.json({ error: "PIN must be 4-10 digits" }, { status: 400 });
     }
 
@@ -74,14 +77,16 @@ export async function POST(req: NextRequest) {
     }
 
     const userCount = await db.user.count();
-    const pinHash = await bcrypt.hash(pin, 10);
+    const pinHash = pin ? await bcrypt.hash(pin, 10) : null;
 
     const user = await db.user.create({
       data: {
         name: trimmedName,
         pinHash,
+        pinRequired: Boolean(pinHash),
         isAdmin: userCount === 0, // first user is admin
         avatarColor: isAvatarColor(avatarColor) ? avatarColor : defaultAvatarColor(userCount),
+        avatar: isAvatarId(avatar) ? avatar : defaultAvatar(userCount),
       },
     });
 

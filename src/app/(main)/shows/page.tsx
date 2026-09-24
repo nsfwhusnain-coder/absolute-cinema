@@ -11,7 +11,7 @@ export default function ShowsPage() {
     <BrowseHub
       mediaType="tv"
       title="Shows"
-      heroFrom="trending"
+      heroFrom="acclaimed"
       rows={showsHubRows()}
     />
   );

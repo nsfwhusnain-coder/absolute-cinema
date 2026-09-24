@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import type { HlsSession } from "@/lib/hls-session";
+import { SegmentReadAhead, type ReadAheadBody } from "@/lib/hls-readahead";
 import {
   buildDashTemplateProxyUrl,
   dashRepresentationIdForProxy,
@@ -64,13 +65,6 @@ const SEGMENT_CACHE_MAX_BYTES = 512 * 1024 * 1024;
  * disk/edge cache that never duplicates media in the application heap.
  */
 export const SEGMENT_BODY_CACHE_ENABLED = false;
-/**
- * Speculative prefetch is deliberately disabled. It raced hls.js for the same
- * first segment and, for byte-range playlists whose URI is a whole `.mp4`,
- * fetched the complete feature without a Range header. Interactive hls.js
- * requests still populate the shared segment cache.
- */
-const PREFETCH_SEGMENT_COUNT = 0;
 /** Upstream fetch timeout for interactive proxy requests. */
 const UPSTREAM_TIMEOUT_MS = 25_000;
 /** Bytes read before deciding text-manifest vs binary — keeps the sniff itself cheap. */
@@ -186,7 +180,7 @@ export interface ProxyMetrics {
   /** Cache fills skipped because the bounded reader pool was saturated. */
   saturatedSkips: number;
   /** Explicitly exposes the production safety policy to system status. */
-  speculativePrefetchEnabled: boolean;
+  readAhead: { entries: number; bytes: number; playlists: number };
   /** False while media bodies are streamed without an in-process tee/cache. */
   segmentBodyCacheEnabled: boolean;
 }
@@ -595,7 +589,7 @@ export function getProxyMetrics(): ProxyMetrics {
     manifestEntries: manifestCache.size,
     oversizedSkips: metrics.oversizedSkips,
     saturatedSkips: metrics.saturatedSkips,
-    speculativePrefetchEnabled: PREFETCH_SEGMENT_COUNT > 0,
+    readAhead: readAhead.stats(),
     segmentBodyCacheEnabled: SEGMENT_BODY_CACHE_ENABLED,
   };
 }
@@ -624,88 +618,36 @@ function isKeyUrl(url: string): boolean {
   );
 }
 
-/**
- * Warm the first N media segments from an (unrewritten) m3u8 media playlist.
- * Uses absolute upstream URLs so cache keys match live segment proxy requests.
- * Fire-and-forget; never blocks the playlist response.
- */
-function prefetchSegments(session: HlsSession, manifest: string, baseUrl: string): void {
-  if (PREFETCH_SEGMENT_COUNT <= 0) return;
-  // Session must still be alive for upstream auth headers on miss.
-  if (session.expiresAt <= Date.now()) return;
+const READ_AHEAD_MAX_BYTES = 64 * 1024 * 1024;
 
-  const urls: string[] = [];
-  for (const line of manifest.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    try {
-      urls.push(resolveUrl(trimmed, baseUrl));
-    } catch {
-      /* skip */
-    }
+const readAhead = new SegmentReadAhead<HlsSession>(async (session, url) => {
+  if (session.expiresAt <= Date.now() || !isAllowedUpstreamUrl(url, session)) return null;
+  const res = await fetchUpstreamSafely(url, buildUpstreamHeaders(session, url, null), UPSTREAM_TIMEOUT_MS);
+  if (!res.ok || !res.body) {
+    void res.body?.cancel().catch(() => {});
+    return null;
   }
-
-  const misses: string[] = [];
-  const seen = new Set<string>();
-  let queued = 0;
-  for (const url of urls) {
-    if (queued >= PREFETCH_SEGMENT_COUNT) break;
-    if (!isSegmentUrl(url)) continue;
-    if (!isAllowedUpstreamUrl(url, session)) continue;
-    if (seen.has(url)) continue;
-    seen.add(url);
-
-    const scope = resolveBodyCacheScope(session, url, "segment");
-    // Fresh or SWR-stale counts as warm — no need to re-prefetch.
-    if (getCachedSegment(bodyCacheKey(scope.keyScope, url, null))) {
-      queued += 1;
-      continue;
-    }
-
-    queued += 1;
-    misses.push(url);
+  const reader = res.body.getReader();
+  const read = await readCapped(reader, READ_AHEAD_MAX_BYTES);
+  if (!read.complete) {
+    void reader.cancel("read-ahead segment over size cap").catch(() => {});
+    return null;
   }
-
-  if (misses.length === 0) return;
-
-  // Bounded worker pool — never fire all misses at once (would starve the
-  // interactive segment fetch competing for the same upstream/connection budget).
-  let cursor = 0;
-  const warmOne = async (): Promise<void> => {
-    while (cursor < misses.length) {
-      const url = misses[cursor++]!;
-      const scope = resolveBodyCacheScope(session, url, "segment");
-      const key = bodyCacheKey(scope.keyScope, url, null);
-      try {
-        const res = await fetchUpstreamSafely(
-          url,
-          buildUpstreamHeaders(session, url, null),
-          UPSTREAM_TIMEOUT_MS
-        );
-        if (!res.ok) continue;
-        const body = await readResponseBodyForCache(res);
-        if (!body) continue;
-        const passthrough = pickPassthroughHeaders(res);
-        if (!isIntactCacheableBody(res.status, body, passthrough)) continue;
-        const prefetchTtl = segmentEntryTtlMs(session, scope.global);
-        if (prefetchTtl <= 0) continue;
-        setCachedSegment(key, {
-          body,
-          byteLength: body.byteLength,
-          sessionId: scope.sessionTag,
-          status: res.status,
-          contentType: res.headers.get("content-type") || "application/octet-stream",
-          headers: passthrough,
-          expiresAt: Date.now() + prefetchTtl,
-        });
-      } catch {
-        /* best-effort background warm — never throw; never poison cache */
-      }
-    }
+  return {
+    status: res.status,
+    contentType: res.headers.get("content-type") || "application/octet-stream",
+    headers: pickPassthroughHeaders(res),
+    bytes: read.bytes,
   };
+});
 
-  const workerCount = Math.min(1, misses.length);
-  for (let i = 0; i < workerCount; i++) void warmOne();
+function readAheadResponse(body: ReadAheadBody): Response {
+  const headers = new Headers({
+    "Content-Type": body.contentType,
+    "Cache-Control": "private, max-age=3600",
+    "Content-Length": String(body.bytes.byteLength),
+  });
+  return new Response(toArrayBuffer(body.bytes), { status: body.status, headers });
 }
 
 function pickPassthroughHeaders(res: Response): Record<string, string> {
@@ -1059,7 +1001,16 @@ async function buildM3u8Response(
   const rewritten = didSyntheticWrap
     ? prepared // synthetic master already has proxy media URI
     : rewriteM3u8(prepared, session, rewriteBase);
-  prefetchSegments(session, rawText, rewriteBase);
+  if (isPureHlsMediaPlaylist(rawText)) {
+    readAhead.recordPlaylist(session.id, upstream, rawText, (uri) => {
+      try {
+        const url = resolveUrl(uri, rewriteBase);
+        return isSegmentUrl(url) && !isKeyUrl(url) ? url : null;
+      } catch {
+        return null;
+      }
+    });
+  }
   const isLive = !isVodM3u8(rawText);
   const headers = new Headers();
   headers.set("Content-Type", "application/vnd.apple.mpegurl");
@@ -2243,6 +2194,15 @@ export async function fetchProxied(
       return cachedSegmentResponse(cached.entry);
     }
     metrics.misses += 1;
+  }
+
+  // Plain (non-range) media segments: serve a read-ahead copy when one is
+  // ready or in flight, and start fetching the segments after this one.
+  if (!urlLooksLikePlaylist && !rangeHeader && isSegmentUrl(upstream) && !isKeyUrl(upstream)) {
+    const pending = readAhead.take(session.id, upstream);
+    readAhead.schedule(session, upstream);
+    const ready = pending ? await pending : null;
+    if (ready) return readAheadResponse(ready);
   }
 
   // Negative cache short-circuit (timeout / 5xx / ECONNRESET) — 30s.

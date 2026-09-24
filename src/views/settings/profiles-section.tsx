@@ -6,8 +6,9 @@ import { useSession } from "next-auth/react";
 import { Plus, Trash2, Users } from "lucide-react";
 import { toast } from "sonner";
 import { AVATAR_COLORS } from "@/lib/avatar-colors";
+import { defaultAvatar } from "@/lib/avatars";
 import { cn } from "@/lib/utils";
-import { ProfileAvatar } from "@/views/login";
+import { ProfileAvatar } from "@/components/profile-avatar";
 import { PrimaryButton, Row, Section, Toggle, inputClass } from "./primitives";
 
 interface AdminProfile {
@@ -15,6 +16,8 @@ interface AdminProfile {
   name: string;
   isAdmin: boolean;
   avatarColor: string;
+  avatar: string;
+  locked: boolean;
   watchlistCount: number;
   progressCount: number;
 }
@@ -111,7 +114,7 @@ function ProfileRow({ profile }: { profile: AdminProfile }) {
 
   return (
     <li className="flex items-center gap-3 rounded-2xl bg-white/[0.04] px-3 py-2.5">
-      <ProfileAvatar name={profile.name} color={profile.avatarColor} size="sm" />
+      <ProfileAvatar name={profile.name} color={profile.avatarColor} avatar={profile.avatar} size="sm" />
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium text-white">
           {profile.name}
@@ -119,6 +122,7 @@ function ProfileRow({ profile }: { profile: AdminProfile }) {
         </div>
         <div className="text-xs text-white/50">
           {profile.isAdmin ? "Admin · " : ""}
+          {profile.locked ? "PIN · " : ""}
           {profile.watchlistCount} in list · {profile.progressCount} in progress
         </div>
       </div>
@@ -152,14 +156,14 @@ function AddProfile({ existing }: { existing: number }) {
   const [name, setName] = useState("");
   const [pin, setPin] = useState("");
   const color = AVATAR_COLORS[existing % AVATAR_COLORS.length]!;
-  const ready = name.trim().length >= 2 && pin.length >= 4;
+  const ready = name.trim().length >= 2 && (pin.length === 0 || pin.length >= 4);
 
   const add = useMutation({
     mutationFn: async () => {
       const res = await fetch("/api/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), pin, avatarColor: color }),
+        body: JSON.stringify({ name: name.trim(), avatarColor: color, avatar: defaultAvatar(existing), ...(pin ? { pin } : {}) }),
       });
       const json = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) throw new Error(json.error || "Could not add profile");
@@ -194,7 +198,7 @@ function AddProfile({ existing }: { existing: number }) {
 
   return (
     <form onSubmit={submit} className="mt-3 flex flex-col gap-2 rounded-2xl bg-white/[0.04] p-3 sm:flex-row sm:items-center">
-      <ProfileAvatar name={name.trim() || "?"} color={color} size="sm" />
+      <ProfileAvatar name={name.trim() || "?"} color={color} avatar={defaultAvatar(existing)} size="sm" />
       <input
         className={cn(inputClass, "sm:flex-1")}
         value={name}
@@ -210,7 +214,7 @@ function AddProfile({ existing }: { existing: number }) {
         inputMode="numeric"
         autoComplete="new-password"
         value={pin}
-        placeholder="PIN"
+        placeholder="PIN (optional)"
         onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 10))}
         aria-label="PIN"
       />

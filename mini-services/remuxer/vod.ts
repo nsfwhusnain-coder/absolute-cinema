@@ -19,7 +19,8 @@ import {
   type AudioTrackSelection,
   type SelectableMediaTrack,
 } from "../../src/lib/playback/track-selection";
-import { httpRangeFetcher, readMkvKeyframes, type MkvAudioTrack } from "./mkv-cues";
+import { httpRangeFetcher, readMkvKeyframes, type MkvAudioTrack, type MkvSubtitleTrack } from "./mkv-cues";
+import { VttStreamParser, type VttCue } from "./vtt-stream";
 import type { ProxySource } from "./source-proxy";
 import { firstVideoDecodeTime, readVideoTrackInfo, stripEditLists, type VideoTrackInfo } from "./mp4-boxes";
 import {
@@ -51,6 +52,10 @@ const MAX_FAILED_RUNS_PER_SEGMENT = 2;
 const AUDIO_BITRATE = "192k";
 const FRAGMENT_MAX_US = 1_000_000;
 const JANITOR_INTERVAL_MS = 30_000;
+/** Text subtitle tracks carried per session (each is one more ffmpeg output). */
+const MAX_SUBTITLE_TRACKS = 6;
+/** First ffmpeg output fd used for subtitles (0-2 are stdin/out/err). */
+const SUBTITLE_FD_BASE = 3;
 
 const MAX_RUNS_TOTAL = Number(process.env.VOD_MAX_RUNS || 4);
 const CACHE_MAX_BYTES = Number(process.env.REMUX_CACHE_MAX_BYTES || 50 * 1024 ** 3);
@@ -96,6 +101,7 @@ interface Session {
   keyframes: number[];
   durationS: number;
   audioIndex: number | null;
+  subtitles: Array<{ track: MkvSubtitleTrack; cues: Map<string, VttCue> }>;
   hevc: boolean;
   init: Uint8Array | null;
   video: VideoTrackInfo | null;
@@ -113,6 +119,15 @@ export interface VodSessionInfo {
   videoCodecId: string | null;
   dynamicRange: "SDR" | "PQ" | "HLG";
   audio: { language: string | null; name: string | null; channels: number | null; codecId: string } | null;
+  /** Position of `audio` in `audioTracks`. */
+  audioIndex: number | null;
+  audioTracks: Array<{ index: number; language: string | null; name: string | null; channels: number | null; codecId: string }>;
+  subtitles: Array<{ index: number; language: string | null; name: string | null; isDefault: boolean; isForced: boolean }>;
+}
+
+/** Automatic audio choice, or an explicit track the viewer picked. */
+export interface VodAudioRequest extends AudioTrackSelection {
+  audioIndex?: number;
 }
 
 const sessions = new Map<string, Session>();
@@ -132,15 +147,19 @@ function log(message: string): void {
   console.log(`[vod] ${message}`);
 }
 
-function sessionId(url: string, audio: AudioTrackSelection): string {
+function sessionId(url: string, audio: VodAudioRequest): string {
   return createHash("sha256")
-    .update([VOD_VERSION, url, audio.preference, audio.originalLanguage ?? "", audio.preferredLanguage ?? ""].join("|"))
+    .update(
+      [VOD_VERSION, url, audio.preference, audio.originalLanguage ?? "", audio.preferredLanguage ?? "", audio.audioIndex ?? ""].join("|")
+    )
     .digest("hex")
     .slice(0, 24);
 }
 
-function chooseAudio(tracks: MkvAudioTrack[], selection: AudioTrackSelection): MkvAudioTrack | null {
+function chooseAudio(tracks: MkvAudioTrack[], selection: VodAudioRequest): MkvAudioTrack | null {
   if (!tracks.length) return null;
+  const explicit = tracks.find((t) => t.audioIndex === selection.audioIndex);
+  if (explicit) return explicit;
   const selectable: SelectableMediaTrack[] = tracks.map((t) => ({
     id: t.audioIndex,
     name: t.name ?? undefined,
@@ -156,7 +175,7 @@ function chooseAudio(tracks: MkvAudioTrack[], selection: AudioTrackSelection): M
 export async function openVodSession(
   cacheRoot: string,
   url: string,
-  audio: AudioTrackSelection,
+  audio: VodAudioRequest,
   startAtS = 0
 ): Promise<VodSessionInfo> {
   const id = sessionId(url, audio);
@@ -178,15 +197,17 @@ export async function openVodSession(
   return session.info;
 }
 
-async function createSession(cacheRoot: string, id: string, url: string, audio: AudioTrackSelection): Promise<Session> {
+async function createSession(cacheRoot: string, id: string, url: string, audio: VodAudioRequest): Promise<Session> {
   const fetcher = httpRangeFetcher(url, RANGE_TIMEOUT_MS);
   const index = await readMkvKeyframes(fetcher).catch((err: unknown) => {
     throw new VodError(`index read failed: ${err instanceof Error ? err.message : String(err)}`, 502);
   });
   if (!index) throw new VodError("source has no keyframe index", 415);
+  if (index.videoUndecodable) throw new VodError("10-bit H.264 video cannot play in browsers", 415);
   const totalSize = fetcher.size();
   if (!totalSize) throw new VodError("source size unknown", 502);
   const audioTrack = chooseAudio(index.audioTracks, audio);
+  const textSubtitles = index.subtitleTracks.filter((t) => t.text).slice(0, MAX_SUBTITLE_TRACKS);
   const bounds = computeSegmentBounds(index.keyframes, index.durationS);
   const dir = join(cacheRoot, `vod-${id}`);
   rmSync(dir, { recursive: true, force: true });
@@ -200,6 +221,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
     keyframes: index.keyframes,
     durationS: index.durationS,
     audioIndex: audioTrack?.audioIndex ?? null,
+    subtitles: textSubtitles.map((track) => ({ track, cues: new Map<string, VttCue>() })),
     hevc: /HEVC/i.test(index.videoCodecId ?? ""),
     init: null,
     video: null,
@@ -216,6 +238,21 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
       audio: audioTrack
         ? { language: audioTrack.language, name: audioTrack.name, channels: audioTrack.channels, codecId: audioTrack.codecId }
         : null,
+      audioIndex: audioTrack?.audioIndex ?? null,
+      audioTracks: index.audioTracks.map((t) => ({
+        index: t.audioIndex,
+        language: t.language,
+        name: t.name,
+        channels: t.channels,
+        codecId: t.codecId,
+      })),
+      subtitles: textSubtitles.map((t, index) => ({
+        index,
+        language: t.language,
+        name: t.name,
+        isDefault: t.isDefault,
+        isForced: t.isForced,
+      })),
     },
   };
   sessions.set(id, session);
@@ -257,6 +294,11 @@ function ffmpegArgs(session: Session, startTime: number): string[] {
     "-f", "mp4",
     "pipe:1"
   );
+  // Text subtitles ride along as WebVTT on extra pipes: the run already reads
+  // the whole file sequentially, so they cost nothing extra to download.
+  session.subtitles.forEach(({ track }, i) => {
+    args.push("-map", `0:s:${track.subtitleIndex}`, "-c:s", "webvtt", "-f", "webvtt", `pipe:${SUBTITLE_FD_BASE + i}`);
+  });
   return args;
 }
 
@@ -315,7 +357,9 @@ function startRun(session: Session, segment: number): Run {
   const id = session.nextRunId++;
   const dir = join(session.dir, `run-${id}`);
   mkdirSync(dir, { recursive: true });
-  const proc = spawn("ffmpeg", ffmpegArgs(session, startTime), { stdio: ["ignore", "pipe", "pipe"] });
+  const proc = spawn("ffmpeg", ffmpegArgs(session, startTime), {
+    stdio: ["ignore", "pipe", "pipe", ...session.subtitles.map(() => "pipe" as const)],
+  });
   const run: Run = { id, startSegment: segment, proc, startTime, fragments: [], finished: false, failed: false, paused: false, dir };
   session.runs.push(run);
   const splitter = new Fmp4StreamSplitter();
@@ -350,6 +394,18 @@ function startRun(session: Session, segment: number): Run {
   });
   proc.stderr!.on("data", (chunk: Buffer) => {
     if (stderr.length < 2000) stderr += chunk.toString();
+  });
+  session.subtitles.forEach(({ cues }, i) => {
+    const stream = proc.stdio[SUBTITLE_FD_BASE + i] as NodeJS.ReadableStream | null;
+    if (!stream) return;
+    const parser = new VttStreamParser();
+    const keep = (found: VttCue[]) => {
+      for (const cue of found) cues.set(`${cue.start.toFixed(3)}|${cue.text}`, cue);
+    };
+    stream.setEncoding("utf8");
+    stream.on("data", (chunk: string) => keep(parser.push(chunk)));
+    stream.on("end", () => keep(parser.flush()));
+    stream.on("error", () => undefined);
   });
   proc.on("close", (code, signal) => {
     if (run.finished) return;
@@ -399,6 +455,13 @@ function sessionOrThrow(id: string): Session {
   if (!session) throw new VodError("unknown session", 404);
   session.lastRequestAt = Date.now();
   return session;
+}
+
+/** Subtitle cues of text track `index` produced so far, in time order. */
+export function vodSubtitleCues(id: string, index: number): VttCue[] {
+  const track = sessionOrThrow(id).subtitles[index];
+  if (!track) throw new VodError("unknown subtitle track", 404);
+  return [...track.cues.values()].sort((a, b) => a.start - b.start);
 }
 
 export function vodPlaylist(id: string): string {

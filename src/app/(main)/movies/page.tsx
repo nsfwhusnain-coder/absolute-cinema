@@ -11,7 +11,7 @@ export default function MoviesPage() {
     <BrowseHub
       mediaType="movie"
       title="Movies"
-      heroFrom="trending"
+      heroFrom="acclaimed"
       rows={movieHubRows()}
     />
   );

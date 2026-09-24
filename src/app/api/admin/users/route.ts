@@ -31,6 +31,8 @@ export async function GET() {
       name: u.name,
       isAdmin: u.isAdmin,
       avatarColor: u.avatarColor,
+      avatar: u.avatar,
+      locked: u.pinRequired,
       createdAt: u.createdAt,
       watchlistCount: u._count.watchlist,
       progressCount: u._count.progress,

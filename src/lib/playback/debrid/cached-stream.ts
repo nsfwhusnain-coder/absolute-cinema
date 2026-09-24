@@ -50,7 +50,10 @@ export type DebridSlot =
   | "native-1080-3"
   | "native-1080-4"
   | "safari-1080"
-  | "native-720";
+  | "safari-1080-2"
+  | "safari-1080-3"
+  | "native-720"
+  | "safari-720";
 /** "realdebrid" is the original/default tier; "torbox" is the new sibling. */
 export type DebridProvider = "realdebrid" | "torbox";
 

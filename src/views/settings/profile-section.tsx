@@ -2,15 +2,25 @@
 
 import { useState, type FormEvent } from "react";
 import { useSession } from "next-auth/react";
-import { Check, UserRound } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { UserRound } from "lucide-react";
 import { toast } from "sonner";
 import { AVATAR_COLORS } from "@/lib/avatar-colors";
 import { cn } from "@/lib/utils";
-import { ProfileAvatar } from "@/views/login";
+import { AvatarPicker, ProfileAvatar } from "@/components/profile-avatar";
 import { useNavigate } from "@/hooks/use-navigate";
-import { PrimaryButton, Row, Section, inputClass } from "./primitives";
+import { PrimaryButton, Row, Section, Toggle, inputClass } from "./primitives";
 
-async function patchProfile(body: Record<string, string>): Promise<void> {
+export const OWN_PROFILE_QUERY_KEY = ["own-profile"] as const;
+
+export interface OwnProfile {
+  name: string;
+  avatarColor: string;
+  avatar: string;
+  pinRequired: boolean;
+}
+
+async function patchProfile(body: Record<string, unknown>): Promise<void> {
   const res = await fetch("/api/profile", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -20,30 +30,55 @@ async function patchProfile(body: Record<string, string>): Promise<void> {
   if (!res.ok) throw new Error(json.error || "Could not save");
 }
 
+export function useOwnProfile() {
+  return useQuery<OwnProfile>({
+    queryKey: OWN_PROFILE_QUERY_KEY,
+    queryFn: async () => (await fetch("/api/profile", { cache: "no-store" })).json(),
+  });
+}
+
+const digits = (value: string) => value.replace(/\D/g, "").slice(0, 10);
+
 export function ProfileSection() {
   const { data: session, update } = useSession();
   const navigate = useNavigate();
-  const name = session?.user?.name ?? "";
-  const color = session?.user?.avatarColor ?? AVATAR_COLORS[0];
-  const [savingColor, setSavingColor] = useState<string | null>(null);
+  const qc = useQueryClient();
+  const { data: profile } = useOwnProfile();
+  const [editing, setEditing] = useState(false);
 
-  const pickColor = async (next: string) => {
-    if (next === color) return;
-    setSavingColor(next);
+  const name = profile?.name ?? session?.user?.name ?? "";
+  const color = profile?.avatarColor ?? session?.user?.avatarColor ?? AVATAR_COLORS[0];
+  const avatar = profile?.avatar ?? session?.user?.avatar ?? "";
+
+  const refresh = async () => {
+    await qc.invalidateQueries({ queryKey: OWN_PROFILE_QUERY_KEY });
+    await update();
+  };
+
+  const saveLook = async (next: { avatar?: string; color?: string }) => {
+    qc.setQueryData<OwnProfile>(OWN_PROFILE_QUERY_KEY, (old) =>
+      old ? { ...old, ...(next.avatar ? { avatar: next.avatar } : {}), ...(next.color ? { avatarColor: next.color } : {}) } : old
+    );
     try {
-      await patchProfile({ avatarColor: next });
-      await update();
+      await patchProfile({ ...(next.avatar ? { avatar: next.avatar } : {}), ...(next.color ? { avatarColor: next.color } : {}) });
+      await refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not save");
-    } finally {
-      setSavingColor(null);
+      await qc.invalidateQueries({ queryKey: OWN_PROFILE_QUERY_KEY });
     }
   };
 
   return (
     <Section title="Profile" icon={<UserRound className="h-4 w-4 text-white/70" />}>
       <div className="flex items-center gap-4 pb-4">
-        <ProfileAvatar name={name || "?"} color={savingColor ?? color} size="md" />
+        <button
+          type="button"
+          onClick={() => setEditing((v) => !v)}
+          aria-label="Change picture"
+          className="rounded-[30%] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+        >
+          <ProfileAvatar name={name || "?"} color={color} avatar={avatar} size="md" />
+        </button>
         <div className="min-w-0 flex-1">
           <div className="truncate font-display text-xl font-semibold text-white">{name}</div>
           <div className="text-sm text-white/55">{session?.user?.isAdmin ? "Admin" : "Profile"}</div>
@@ -52,47 +87,36 @@ export function ProfileSection() {
           Switch profile
         </PrimaryButton>
       </div>
-      <Row label="Colour">
-        <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Avatar colour">
-          {AVATAR_COLORS.map((c) => (
-            <button
-              key={c}
-              type="button"
-              role="radio"
-              aria-checked={c === (savingColor ?? color)}
-              aria-label={`Colour ${c}`}
-              onClick={() => void pickColor(c)}
-              disabled={savingColor !== null}
-              className={cn(
-                "flex h-8 w-8 items-center justify-center rounded-full transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70",
-                c === (savingColor ?? color) && "ring-2 ring-white ring-offset-2 ring-offset-black/40"
-              )}
-              style={{ background: c }}
-            >
-              {c === (savingColor ?? color) && <Check className="h-4 w-4 text-white" />}
-            </button>
-          ))}
-        </div>
+      <Row label="Picture" help="A picture and colour so everyone spots their profile.">
+        <PrimaryButton tone="subtle" onClick={() => setEditing((v) => !v)}>
+          {editing ? "Done" : "Change"}
+        </PrimaryButton>
       </Row>
-      <RenameRow currentName={name} onSaved={() => void update()} />
-      <PinRow />
+      {editing && (
+        <div className="pb-4">
+          <AvatarPicker name={name} avatar={avatar} color={color} onChange={(next) => void saveLook(next)} />
+        </div>
+      )}
+      <RenameRow currentName={name} locked={Boolean(profile?.pinRequired)} onSaved={() => void refresh()} />
+      <PinLockRow locked={Boolean(profile?.pinRequired)} onSaved={() => void refresh()} />
     </Section>
   );
 }
 
-function RenameRow({ currentName, onSaved }: { currentName: string; onSaved: () => void }) {
+function RenameRow({ currentName, locked, onSaved }: { currentName: string; locked: boolean; onSaved: () => void }) {
   const [name, setName] = useState("");
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
   const trimmed = name.trim();
-  const ready = trimmed.length >= 2 && trimmed !== currentName && pin.length >= 4;
+  const changed = trimmed.length >= 2 && trimmed !== currentName;
+  const ready = changed && (!locked || pin.length >= 4);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (!ready) return;
     setBusy(true);
     try {
-      await patchProfile({ name: trimmed, currentPin: pin });
+      await patchProfile({ name: trimmed, ...(locked ? { currentPin: pin } : {}) });
       toast.success(`Renamed to ${trimmed}`);
       setName("");
       setPin("");
@@ -105,27 +129,34 @@ function RenameRow({ currentName, onSaved }: { currentName: string; onSaved: () 
   };
 
   return (
-    <Row label="Name" help="Confirm with your current PIN.">
-      <form onSubmit={submit} className="flex flex-col gap-2 sm:items-end">
-        <input
-          className={inputClass}
-          value={name}
-          maxLength={24}
-          placeholder={currentName}
-          onChange={(e) => setName(e.target.value)}
-          aria-label="New name"
-        />
-        {trimmed.length >= 2 && trimmed !== currentName && (
-          <div className="flex w-full gap-2 sm:w-72">
+    <Row label="Name" help={locked ? "Confirm with your PIN." : undefined}>
+      <form onSubmit={submit} className="flex w-full flex-col gap-2 sm:w-72">
+        <div className="flex gap-2">
+          <input
+            className={cn(inputClass, "sm:w-auto sm:flex-1")}
+            value={name}
+            maxLength={24}
+            placeholder={currentName}
+            onChange={(e) => setName(e.target.value)}
+            aria-label="New name"
+          />
+          {changed && !locked && (
+            <PrimaryButton type="submit" busy={busy}>
+              Save
+            </PrimaryButton>
+          )}
+        </div>
+        {changed && locked && (
+          <div className="flex gap-2">
             <input
               className={cn(inputClass, "sm:w-auto sm:flex-1")}
               type="password"
               inputMode="numeric"
               autoComplete="current-password"
               value={pin}
-              placeholder="Current PIN"
-              onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 10))}
-              aria-label="Current PIN"
+              placeholder="Your PIN"
+              onChange={(e) => setPin(digits(e.target.value))}
+              aria-label="Your PIN"
             />
             <PrimaryButton type="submit" disabled={!ready} busy={busy}>
               Save
@@ -137,75 +168,94 @@ function RenameRow({ currentName, onSaved }: { currentName: string; onSaved: () 
   );
 }
 
-function PinRow() {
-  const [open, setOpen] = useState(false);
+/** "Require PIN": off by default, so profiles open with one tap like Netflix. */
+function PinLockRow({ locked, onSaved }: { locked: boolean; onSaved: () => void }) {
+  const [mode, setMode] = useState<"idle" | "lock" | "unlock" | "change">("idle");
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [busy, setBusy] = useState(false);
-  const ready = current.length >= 4 && next.length >= 4;
 
   const reset = () => {
-    setOpen(false);
+    setMode("idle");
     setCurrent("");
     setNext("");
   };
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!ready) return;
     setBusy(true);
     try {
-      await patchProfile({ currentPin: current, newPin: next });
-      toast.success("PIN changed");
+      if (mode === "lock") await patchProfile({ newPin: next });
+      else if (mode === "unlock") await patchProfile({ pinRequired: false, currentPin: current });
+      else await patchProfile({ newPin: next, currentPin: current });
+      toast.success(mode === "unlock" ? "PIN removed" : mode === "lock" ? "Profile locked with a PIN" : "PIN changed");
       reset();
+      onSaved();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not change PIN");
+      toast.error(err instanceof Error ? err.message : "Could not save");
     } finally {
       setBusy(false);
     }
   };
 
-  const digits = (value: string) => value.replace(/\D/g, "").slice(0, 10);
+  const needsCurrent = mode === "unlock" || mode === "change";
+  const needsNext = mode === "lock" || mode === "change";
+  const ready = (!needsCurrent || current.length >= 4) && (!needsNext || next.length >= 4);
 
   return (
-    <Row label="PIN" help="4 to 10 digits, asked for when you pick this profile.">
-      {open ? (
-        <form onSubmit={submit} className="flex flex-col gap-2 sm:w-72">
-          <input
-            className={inputClass}
-            type="password"
-            inputMode="numeric"
-            autoComplete="current-password"
-            value={current}
-            placeholder="Current PIN"
-            onChange={(e) => setCurrent(digits(e.target.value))}
-            aria-label="Current PIN"
-            autoFocus
-          />
-          <input
-            className={inputClass}
-            type="password"
-            inputMode="numeric"
-            autoComplete="new-password"
-            value={next}
-            placeholder="New PIN"
-            onChange={(e) => setNext(digits(e.target.value))}
-            aria-label="New PIN"
-          />
+    <>
+      <Row inline label="Require PIN" help="Ask for a PIN before this profile opens. Off: one tap, like Netflix.">
+        <Toggle
+          label="Require PIN"
+          checked={(locked && mode !== "unlock") || mode === "lock"}
+          onChange={(on) => setMode(on ? (locked ? "idle" : "lock") : locked ? "unlock" : "idle")}
+        />
+      </Row>
+      {locked && mode === "idle" && (
+        <Row label="PIN">
+          <PrimaryButton tone="subtle" onClick={() => setMode("change")}>
+            Change PIN
+          </PrimaryButton>
+        </Row>
+      )}
+      {mode !== "idle" && (
+        <form onSubmit={submit} className="flex flex-col gap-2 py-4 sm:ml-auto sm:w-72">
+          {needsCurrent && (
+            <input
+              className={inputClass}
+              type="password"
+              inputMode="numeric"
+              autoComplete="current-password"
+              value={current}
+              placeholder="Current PIN"
+              onChange={(e) => setCurrent(digits(e.target.value))}
+              aria-label="Current PIN"
+              autoFocus
+            />
+          )}
+          {needsNext && (
+            <input
+              className={inputClass}
+              type="password"
+              inputMode="numeric"
+              autoComplete="new-password"
+              value={next}
+              placeholder="New PIN (4-10 digits)"
+              onChange={(e) => setNext(digits(e.target.value))}
+              aria-label="New PIN"
+              autoFocus={!needsCurrent}
+            />
+          )}
           <div className="flex justify-end gap-2">
             <PrimaryButton tone="subtle" onClick={reset}>
               Cancel
             </PrimaryButton>
             <PrimaryButton type="submit" disabled={!ready} busy={busy}>
-              Change PIN
+              {mode === "unlock" ? "Remove PIN" : mode === "lock" ? "Lock profile" : "Change PIN"}
             </PrimaryButton>
           </div>
         </form>
-      ) : (
-        <PrimaryButton tone="subtle" onClick={() => setOpen(true)}>
-          Change PIN
-        </PrimaryButton>
       )}
-    </Row>
+    </>
   );
 }

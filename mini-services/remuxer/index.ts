@@ -5,18 +5,18 @@
  * Internal only (127.0.0.1:3040); the Next.js app authenticates viewers and
  * proxies these routes.
  *
- *   GET /vod/open?u=<url>&audioPreference=&originalLanguage=&audioLanguage=&startAt=
- *        → { id, durationS, segments, videoCodecId, audio }
+ *   GET /vod/open?u=<url>&audioPreference=&originalLanguage=&audioLanguage=&audioIndex=&startAt=
+ *        → { id, durationS, segments, videoCodecId, audio, audioIndex, audioTracks, subtitles }
  *   GET /vod/<id>/index.m3u8   complete VOD playlist
  *   GET /vod/<id>/init.mp4     initialisation segment
  *   GET /vod/<id>/<n>.m4s      media segment n (produced on demand)
+ *   GET /vod/<id>/sub-<k>.json text subtitle track k: cues produced so far
  *   GET /health
  */
 
 import { createServer, type ServerResponse } from "node:http";
 import { mkdirSync } from "node:fs";
 import type { AudioPreference } from "../../src/lib/profile-preferences";
-import type { AudioTrackSelection } from "../../src/lib/playback/track-selection";
 import { serveRange } from "./source-proxy";
 import {
   VodError,
@@ -27,6 +27,8 @@ import {
   stopAllVodRuns,
   vodInit,
   vodPlaylist,
+  vodSubtitleCues,
+  type VodAudioRequest,
   vodSegment,
   vodSource,
   vodStats,
@@ -37,17 +39,19 @@ const CACHE_DIR = process.env.REMUX_CACHE_DIR || "/app/transcode-cache";
 const MAX_START_AT_S = 24 * 60 * 60;
 const SESSION_ID = /^[a-f0-9]{24}$/;
 
-function parseAudio(url: URL): AudioTrackSelection {
+function parseAudio(url: URL): VodAudioRequest {
   const pref = url.searchParams.get("audioPreference");
   const preference: AudioPreference = pref === "english" || pref === "preferred" ? pref : "original";
   const lang = (name: string): string | null => {
     const value = (url.searchParams.get(name) ?? "").trim().toLowerCase();
     return /^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/.test(value) ? value : null;
   };
+  const index = Number(url.searchParams.get("audioIndex"));
   return {
     preference,
     originalLanguage: lang("originalLanguage"),
     preferredLanguage: lang("audioLanguage") ?? "en",
+    ...(url.searchParams.has("audioIndex") && Number.isInteger(index) && index >= 0 ? { audioIndex: index } : {}),
   };
 }
 
@@ -85,6 +89,8 @@ const server = createServer(async (req, res) => {
       if (!source) return send(res, 404, "not found", "text/plain");
       return await serveRange(req, res, source);
     }
+    const subs = url.pathname.match(/^\/vod\/([a-f0-9]{24})\/sub-(\d{1,2})\.json$/);
+    if (subs) return send(res, 200, JSON.stringify({ cues: vodSubtitleCues(subs[1]!, Number(subs[2])) }), "application/json");
     const match = url.pathname.match(/^\/vod\/([a-f0-9]+)\/(index\.m3u8|init\.mp4|(\d+)\.m4s)$/);
     if (!match || !SESSION_ID.test(match[1]!)) return send(res, 404, "not found", "text/plain");
     const [, id, file, segment] = match;
