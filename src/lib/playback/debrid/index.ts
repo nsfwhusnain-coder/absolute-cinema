@@ -924,6 +924,41 @@ async function readCachedRdSlots(
  * background fill) that already paid for a Torrentio fetch can reuse it
  * instead of hitting Torrentio twice for the same request.
  */
+/**
+ * Turns a resolved candidate into the cache record and PlaybackSource.
+ * Hard invariant: every final RD URL passes `sanitizeStreamUrl` here, so a
+ * token-bearing link can never be cached or returned (the slot is dropped).
+ */
+function buildRdSource(
+  slot: DebridSlot,
+  resolved: ResolvedCandidate,
+  keyBase: KeyBase,
+  rdToken: string
+): { record: CachedStreamRecord; source: PlaybackSource } | null {
+  const safeUrl = sanitizeStreamUrl(resolved.directUrl, rdToken);
+  if (!safeUrl) return null;
+  const effectiveContainer = effectiveReleaseContainer(safeUrl, resolved.container);
+  const record: CachedStreamRecord = {
+    title: resolved.title,
+    source: resolved.infoHash ?? safeUrl,
+    url: safeUrl,
+    compat: resolved.compat,
+    ...(resolved.codec ? { codec: resolved.codec } : {}),
+    ...(effectiveContainer ? { container: effectiveContainer } : {}),
+  };
+  const source = toRdPlaybackSource(
+    slot,
+    keyBase.imdbId,
+    keyBase.mediaType,
+    keyBase.season,
+    keyBase.episode,
+    record,
+    resolved.codec,
+    effectiveContainer
+  );
+  return { record, source };
+}
+
 type RosterResult = { sources: PlaybackSource[]; candidates: DebridCandidate[] };
 
 /**
@@ -932,7 +967,7 @@ type RosterResult = { sources: PlaybackSource[]; candidates: DebridCandidate[] }
  * sharing, both resolved the same candidates against Real-Debrid at once,
  * doubling traffic and provoking 503s.
  */
-const inflightRosters = new Map<string, Promise<RosterResult>>();
+const inflightRosters = new Map<string, { run: Promise<RosterResult>; progress: PlaybackSource[] }>();
 
 function rosterKey(keyBase: KeyBase): string {
   return `${keyBase.imdbId}:${keyBase.mediaType}:${keyBase.season ?? 0}:${keyBase.episode ?? 0}`;
@@ -943,25 +978,92 @@ function resolveRealDebridSlotsShared(
   req: ResolveDebridSourcesRequest,
   rdToken: string,
   preFetchedCandidates?: DebridCandidate[]
-): Promise<RosterResult> {
+): { run: Promise<RosterResult>; progress: PlaybackSource[] } {
   const key = rosterKey(keyBase);
   const existing = inflightRosters.get(key);
   // An explicit "try again" must not be answered by the attempt that failed.
   if (existing && !req.forceRefresh) return existing;
-  const run = resolveRealDebridSlots(keyBase, req, rdToken, preFetchedCandidates).finally(() => {
-    if (inflightRosters.get(key) === run) inflightRosters.delete(key);
-  });
-  inflightRosters.set(key, run);
-  return run;
+  const progress: PlaybackSource[] = [];
+  const run = resolveRealDebridSlots(keyBase, req, rdToken, preFetchedCandidates, progress);
+  const entry = { run, progress };
+  inflightRosters.set(key, entry);
+  void run
+    .finally(() => {
+      if (inflightRosters.get(key) === entry) inflightRosters.delete(key);
+    })
+    .catch(() => {});
+  return entry;
+}
+
+/**
+ * Rosters returned before every slot finished resolving. The route marks
+ * those responses partial so they are cached briefly and the player polls
+ * again, picking up the slots that land afterwards.
+ */
+const incompleteRosters = new WeakSet<PlaybackSource[]>();
+
+export function isIncompleteDebridRoster(sources: PlaybackSource[]): boolean {
+  return incompleteRosters.has(sources);
+}
+
+/** How long the full path waits for the complete roster before settling for a good partial one. */
+const RD_SOFT_DEADLINE_MS = 5_000;
+const RD_SOFT_POLL_MS = 250;
+const RD_GOOD_ENOUGH_HEIGHT = 1080;
+
+/**
+ * Waits for the full roster, but answers as soon as the soft deadline has
+ * passed and at least one ≥1080p source is in hand. Pools still hunting
+ * (typically a scarce native-4K slot) keep running and fill the cache for
+ * the next play; the player's roster refresh picks them up as well.
+ */
+export async function awaitRosterWithSoftDeadline(
+  entry: { run: Promise<RosterResult>; progress: PlaybackSource[] },
+  softDeadlineMs = RD_SOFT_DEADLINE_MS
+): Promise<RosterResult & { complete: boolean }> {
+  const started = Date.now();
+  let settled: (RosterResult & { complete: boolean }) | null = null;
+  entry.run.then(
+    (result) => {
+      settled = { ...result, complete: true };
+    },
+    () => {
+      settled = { sources: [...entry.progress], candidates: [], complete: true };
+    }
+  );
+  while (!settled) {
+    const elapsed = Date.now() - started;
+    if (
+      elapsed >= softDeadlineMs &&
+      entry.progress.some((s) => (s.maxHeight ?? 0) >= RD_GOOD_ENOUGH_HEIGHT)
+    ) {
+      const seen = new Set<string>();
+      const sources = entry.progress.filter((s) => (seen.has(s.id) ? false : (seen.add(s.id), true)));
+      return { sources, candidates: [], complete: false };
+    }
+    await new Promise((resolve) => setTimeout(resolve, RD_SOFT_POLL_MS));
+  }
+  return settled;
 }
 
 async function resolveRealDebridSlots(
   keyBase: KeyBase,
   req: ResolveDebridSourcesRequest,
   rdToken: string,
-  preFetchedCandidates?: DebridCandidate[]
+  preFetchedCandidates?: DebridCandidate[],
+  progress?: PlaybackSource[]
 ): Promise<{ sources: PlaybackSource[]; candidates: DebridCandidate[] }> {
   const { hits, missing, occupiedIdentities } = await readCachedRdSlots(keyBase, rdToken);
+  progress?.push(...hits);
+  // Publish each tier the moment its pool settles so a caller waiting with a
+  // soft deadline can answer before the slowest pool gives up.
+  const report = (slots: DebridSlot[], results: ResolvedCandidate[]) => {
+    if (!progress) return;
+    results.forEach((resolved, index) => {
+      const source = buildRdSource(slots[index]!, resolved, keyBase, rdToken)?.source;
+      if (source) progress.push(source);
+    });
+  };
   if (req.forceRefresh) forgetUnfillableSlots(keyBase);
   const requiredMissing = missing.filter(
     (slot) =>
@@ -1003,7 +1105,10 @@ async function resolveRealDebridSlots(
           deadline,
           req.mediaType,
           occupiedIdentities
-        )
+        ).then((results) => {
+          report(slots, results);
+          return results;
+        })
       : Promise.resolve([] as ResolvedCandidate[]);
   const otherMissingBase = missing.filter(
     (slot) =>
@@ -1101,39 +1206,10 @@ async function resolveRealDebridSlots(
   const newSources: PlaybackSource[] = [];
   for (const entry of resolvedPerSlot) {
     if (!entry) continue;
-    const { slot, resolved } = entry;
-    // Hard invariant, re-applied right before this URL can become a
-    // PlaybackSource or a CachedStream row: `resolveCandidateLink` already
-    // only returns sanitized URLs, but this is the single choke point every
-    // final RD URL in this module must pass through — fail safe (drop the
-    // slot) rather than ever cache or return a token-bearing link.
-    const safeUrl = sanitizeStreamUrl(resolved.directUrl, rdToken);
-    if (!safeUrl) continue;
-    const effectiveContainer = effectiveReleaseContainer(
-      safeUrl,
-      resolved.container
-    );
-    const record: CachedStreamRecord = {
-      title: resolved.title,
-      source: resolved.infoHash ?? safeUrl,
-      url: safeUrl,
-      compat: resolved.compat,
-      ...(resolved.codec ? { codec: resolved.codec } : {}),
-      ...(effectiveContainer ? { container: effectiveContainer } : {}),
-    };
-    await upsertCachedStream({ ...keyBase, quality: slot, provider: "realdebrid" }, record);
-    newSources.push(
-      toRdPlaybackSource(
-        slot,
-        keyBase.imdbId,
-        keyBase.mediaType,
-        keyBase.season,
-        keyBase.episode,
-        record,
-        resolved.codec,
-        effectiveContainer
-      )
-    );
+    const built = buildRdSource(entry.slot, entry.resolved, keyBase, rdToken);
+    if (!built) continue;
+    await upsertCachedStream({ ...keyBase, quality: entry.slot, provider: "realdebrid" }, built.record);
+    newSources.push(built.source);
   }
 
   return { sources: [...hits, ...newSources], candidates };
@@ -1159,7 +1235,7 @@ function backgroundFillRemainingSlots(
 ): void {
   void (async () => {
     try {
-      await resolveRealDebridSlotsShared(keyBase, req, rdToken, preFetchedCandidates);
+      await resolveRealDebridSlotsShared(keyBase, req, rdToken, preFetchedCandidates).run;
     } catch {
       // Swallow — the fast path already returned; next request re-resolves.
     }
@@ -1371,7 +1447,10 @@ export async function resolveDebridSources(
         );
       }
       const rdToken = process.env.REAL_DEBRID_API_TOKEN as string;
-      const { sources: rdSources, candidates } = await resolveRealDebridSlotsShared(keyBase, req, rdToken);
+      const { sources: rdSources, candidates, complete } = await awaitRosterWithSoftDeadline(
+        resolveRealDebridSlotsShared(keyBase, req, rdToken)
+      );
+      if (!complete) incompleteRosters.add(sources);
       sources.push(...rdSources);
       rdCandidates = candidates;
     }

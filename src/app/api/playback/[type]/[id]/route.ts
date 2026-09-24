@@ -335,6 +335,11 @@ export async function GET(
         : resolvedDebridSources;
     result = providerResult;
     mergeDebridSources(result, debridSources, decideOptions);
+    if (await isIncompleteDebridRosterSafely(resolvedDebridSources)) {
+      // Real-Debrid answered early with good sources while slower slots keep
+      // resolving; keep the cache short so the player's next poll sees them.
+      result = { ...result, partial: true };
+    }
   }
 
   if (result && result.status !== "error") {
@@ -421,6 +426,15 @@ async function resolveDebridSourcesSafely(req: {
     return await resolveDebridSources(req);
   } catch {
     return [];
+  }
+}
+
+async function isIncompleteDebridRosterSafely(sources: PlaybackSource[]): Promise<boolean> {
+  try {
+    const { isIncompleteDebridRoster } = await import("@/lib/playback/debrid");
+    return isIncompleteDebridRoster(sources);
+  } catch {
+    return false;
   }
 }
 
