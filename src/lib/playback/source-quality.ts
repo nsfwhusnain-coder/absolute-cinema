@@ -172,7 +172,8 @@ export function qualityBadge(source: PlaybackSource): string {
   if (source.origin !== "debrid") return withCompatTag;
   // Distinguish the TorBox sibling tier from Real-Debrid in the UI — both
   // still get the same debrid ranking bonus/transcode penalty (origin-based).
-  const tag = source.provider === "TorBox" ? "TorBox" : "Debrid";
+  const tag =
+    source.provider === "TorBox" || source.provider === "AllDebrid" ? source.provider : "Debrid";
   return `${withCompatTag} (${tag})`;
 }
 

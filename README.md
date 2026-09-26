@@ -181,6 +181,7 @@ Everything is optional. Copy [`.env.example`](.env.example) to `.env` to overrid
 | `REMUX_MIN_FREE_BYTES` | 5 GiB | Free space the remux cache always leaves |
 | `BROWSER_POOL_SIZE` | `1` | Headless Chromium workers for web sources (1–4) |
 | `TORBOX_API_KEY` | – | Optional TorBox account as an extra debrid source |
+| `ALLDEBRID_API_KEY` | – | Optional AllDebrid premium account; covers releases Real-Debrid has taken down |
 | `PROVIDER_<NAME>=0` | on | Disable an individual web source |
 
 **Data** lives in three folders next to `docker-compose.yml`: `db/` (profiles, history,

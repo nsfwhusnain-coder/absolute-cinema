@@ -107,6 +107,11 @@ import {
   type TorboxResolvedFile,
 } from "./torbox";
 import {
+  allDebridDeadlineFromNow,
+  isAllDebridConfigured,
+  resolveAllDebridFirstCached,
+} from "./alldebrid";
+import {
   getFreshCachedStream,
   invalidateCachedStream,
   upsertCachedStream,
@@ -115,7 +120,12 @@ import {
   type DebridProvider,
   type CachedStreamRecord,
 } from "./cached-stream";
-import { resolveTokenFreeRedirect, sanitizeStreamUrl, sanitizeTorboxStreamUrl } from "./token-safety";
+import {
+  resolveTokenFreeRedirect,
+  sanitizeAllDebridStreamUrl,
+  sanitizeStreamUrl,
+  sanitizeTorboxStreamUrl,
+} from "./token-safety";
 import {
   validateDebridMediaLink,
   validateNativeBrowserContainer,
@@ -398,12 +408,13 @@ function buildSourceId(
   episode: number,
   slotOrQuality: string
 ): string {
-  const prefix = provider === "torbox" ? "torbox" : "debrid";
+  const prefix = provider === "torbox" ? "torbox" : provider === "alldebrid" ? "alldebrid" : "debrid";
   return `${prefix}-${imdbId}-${mediaType}-${season}-${episode}-${slotOrQuality}`;
 }
 
 /** Display name shown in `PlaybackSource.provider` / picker labels — distinguishes TorBox from RD in the UI while both keep `origin: "debrid"` for ranking. */
 function providerDisplayName(provider: DebridProvider): string {
+  if (provider === "alldebrid") return "AllDebrid";
   return provider === "torbox" ? "TorBox" : "Debrid";
 }
 
@@ -437,6 +448,7 @@ export function safariHintFor(
 function buildLabel(provider: DebridProvider, quality: RdQuality, safariHint: string): string {
   const q = qualityLabel(quality);
   if (provider === "torbox") return `TorBox · ${q}${safariHint}`;
+  if (provider === "alldebrid") return `AllDebrid · ${q}${safariHint}`;
   return `${q} • Debrid${safariHint}`;
 }
 
@@ -1570,7 +1582,8 @@ export async function resolveDebridSources(
 ): Promise<PlaybackSource[]> {
   const rdConfigured = isRealDebridConfigured();
   const torboxConfigured = isTorBoxConfigured();
-  if (!rdConfigured && !torboxConfigured) return [];
+  const allDebridConfigured = isAllDebridConfigured();
+  if (!rdConfigured && !torboxConfigured && !allDebridConfigured) return [];
 
   try {
     const imdbId = await resolveImdbId(req.tmdbId, req.mediaType);
@@ -1579,6 +1592,10 @@ export async function resolveDebridSources(
     const season = req.season ?? 0;
     const episode = req.episode ?? 0;
     const keyBase: KeyBase = { imdbId, mediaType: req.mediaType, season, episode };
+    // Runs alongside RD rather than after it, so it never adds to the roster wait.
+    const allDebridSources = allDebridConfigured
+      ? resolveAllDebridTier(req, keyBase).catch(() => [] as PlaybackSource[])
+      : Promise.resolve([] as PlaybackSource[]);
 
     const sources: PlaybackSource[] = [];
     let rdCandidates: DebridCandidate[] = [];
@@ -1691,8 +1708,84 @@ export async function resolveDebridSources(
       }
     }
 
+    sources.push(...(await allDebridSources));
+
     return sources;
   } catch {
     return [];
   }
+}
+
+// ---------------------------------------------------------------------------
+// AllDebrid sibling tier — covers Real-Debrid takedowns
+// ---------------------------------------------------------------------------
+
+/**
+ * One cached row per height, like TorBox. Candidates come from Torrentio's
+ * UN-configured list: the RD-configured list drops `[RD download]` rows, and
+ * RD's DMCA'd releases are exactly the ones this tier exists for. Ranked in
+ * the same streamability order as the RD roster, native before Safari-only
+ * at each height. Never throws.
+ */
+async function resolveAllDebridTier(
+  req: ResolveDebridSourcesRequest,
+  keyBase: KeyBase
+): Promise<PlaybackSource[]> {
+  const apiKey = process.env.ALLDEBRID_API_KEY?.trim() ?? "";
+  const sanitize = (url: string) => sanitizeAllDebridStreamUrl(url, apiKey);
+  const { hits, missing } = await readCachedSources("alldebrid", keyBase, sanitize);
+  if (!missing.length) return hits;
+
+  const [raw, runtime] = await Promise.all([
+    fetchTorrentioCandidatesNoDebrid({
+      imdbId: keyBase.imdbId,
+      mediaType: req.mediaType,
+      season: req.season,
+      episode: req.episode,
+    }),
+    titleRuntimeMinutes(req),
+  ]);
+  const candidates = orderForStreaming(raw, runtime);
+  const episodeTarget =
+    req.mediaType === "tv" && req.season && req.episode
+      ? { season: req.season, episode: req.episode }
+      : undefined;
+  const deadline = allDebridDeadlineFromNow();
+  const sources = [...hits];
+
+  for (const quality of missing) {
+    const ranked = rankCachedTorboxForHeight(candidates, heightForQuality(quality));
+    const resolved = await resolveAllDebridFirstCached(
+      ranked.map((c) => ({ infoHash: c.infoHash!, releaseTitle: c.title, fileIdx: c.fileIdx })),
+      deadline,
+      episodeTarget
+    );
+    if (!resolved) continue;
+    const safeUrl = sanitize(resolved.file.url);
+    const candidate = ranked.find((c) => c.infoHash === resolved.target.infoHash);
+    if (!safeUrl || !candidate) continue;
+    const compat: ReleaseCompat =
+      candidate.compat === "safari" || resolved.file.compat === "safari" ? "safari" : "native";
+    const codec = resolved.file.codec !== "unknown" ? resolved.file.codec : candidate.codec;
+    const record: CachedStreamRecord = {
+      title: candidate.title,
+      source: candidate.infoHash ?? safeUrl,
+      url: safeUrl,
+      compat,
+    };
+    sources.push(
+      toPlaybackSource(
+        "alldebrid",
+        quality,
+        keyBase.imdbId,
+        req.mediaType,
+        keyBase.season,
+        keyBase.episode,
+        record,
+        codec === "hevc" || codec === "h264" ? codec : "unknown"
+      )
+    );
+    await upsertCachedStream({ ...keyBase, quality, provider: "alldebrid" }, record);
+  }
+  return sources;
 }

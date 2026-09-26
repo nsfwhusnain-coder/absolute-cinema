@@ -6,11 +6,12 @@ export function parseDebridPlaybackSourceId(
   sourceId: string
 ): CachedStreamKey | null {
   const match = sourceId.match(
-    /^(debrid|torbox)-(tt\d+)-(movie|tv)-(\d+)-(\d+)-(.+)$/
+    /^(debrid|torbox|alldebrid)-(tt\d+)-(movie|tv)-(\d+)-(\d+)-(.+)$/
   );
   if (!match) return null;
   return {
-    provider: match[1] === "torbox" ? "torbox" : "realdebrid",
+    provider:
+      match[1] === "torbox" ? "torbox" : match[1] === "alldebrid" ? "alldebrid" : "realdebrid",
     imdbId: match[2]!,
     mediaType: match[3] as MediaType,
     season: Number(match[4]),

@@ -79,6 +79,10 @@ export const PREMIUM_NAMES = {
   torbox4k: "Dolby",
   /** TorBox 1080p row. */
   torbox1080: "Atmos",
+  /** AllDebrid 4K row. */
+  alldebrid4k: "Todd-AO",
+  /** AllDebrid 1080p row. */
+  alldebrid1080: "VistaVision",
   /** Any debrid source that doesn't match a known bucket. */
   fallback: "Academy",
 } as const;

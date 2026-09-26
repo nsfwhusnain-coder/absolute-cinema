@@ -29,11 +29,16 @@ function isGenericLabel(label: string): boolean {
 }
 
 function isDebridProvider(lowerProvider: string): boolean {
-  return lowerProvider === "debrid" || lowerProvider === "torbox" || lowerProvider === "premium";
+  return (
+    lowerProvider === "debrid" ||
+    lowerProvider === "torbox" ||
+    lowerProvider === "alldebrid" ||
+    lowerProvider === "premium"
+  );
 }
 
 function isDebridLabel(rawLabel: string): boolean {
-  return /\bdebrid\b|\btorbox\b/i.test(rawLabel);
+  return /\bdebrid\b|\btorbox\b|\balldebrid\b/i.test(rawLabel);
 }
 
 /** Raw scraper `provider` string → canonical embed token (same bucketing as
@@ -123,6 +128,12 @@ function debridGreekName(lowerProvider: string, lowerLabel: string, id?: string)
   const is1080 = /1080/.test(lowerLabel);
   const isSafari = /safari/.test(lowerLabel);
 
+  if (lowerProvider === "alldebrid" || lowerLabel.includes("alldebrid")) {
+    if (is4k) return PREMIUM_NAMES.alldebrid4k;
+    if (is1080) return PREMIUM_NAMES.alldebrid1080;
+    return PREMIUM_NAMES.fallback;
+  }
+
   if (isTorbox) {
     if (is4k) return PREMIUM_NAMES.torbox4k;
     if (is1080) return PREMIUM_NAMES.torbox1080;
@@ -198,7 +209,7 @@ export function getServerDisplayName(provider: string, label?: string, id?: stri
  */
 export function resolutionBadge(source: PlaybackSource): string {
   const badge = qualityBadge(source);
-  return source.origin === "debrid" ? badge.replace(/\s*\((?:Debrid|TorBox)\)$/, "") : badge;
+  return source.origin === "debrid" ? badge.replace(/\s*\((?:Debrid|TorBox|AllDebrid)\)$/, "") : badge;
 }
 
 export function sourceId(provider: string, label: string): string {

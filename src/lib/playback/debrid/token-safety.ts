@@ -101,6 +101,21 @@ export async function resolveTokenFreeRedirect(
   return sanitizeStreamUrl(responseUrl, token);
 }
 
+/**
+ * AllDebrid `link/unlock` returns a token-free CDN URL; never hand back one
+ * that still carries the key or points at the authorized API itself.
+ */
+export function sanitizeAllDebridStreamUrl(url: string | null | undefined, apiKey: string | null): string | null {
+  if (!url) return null;
+  if (/api\.alldebrid\.com/i.test(url)) return null;
+  if (apiKey) {
+    if (url.includes(apiKey)) return null;
+    const encoded = encodeURIComponent(apiKey);
+    if (encoded !== apiKey && url.includes(encoded)) return null;
+  }
+  return url;
+}
+
 /** TorBox's own `requestdl` endpoint shape — its `token` query param authorizes the request; the returned CDN link must never carry it either. */
 const TORBOX_REQUESTDL_PATTERN = /\/v1\/api\/torrents\/requestdl\b/i;
 
