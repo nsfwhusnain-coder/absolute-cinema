@@ -37,6 +37,8 @@
  */
 import { tmdb } from "@/lib/tmdb";
 import { cachedFetch } from "@/lib/server-cache";
+import type { TitleFacts } from "../release-identity";
+import { isWrongTitle } from "./title-gate";
 import type { MediaType } from "../types";
 import { isMoviePackRelease } from "../source-facts";
 import { isCaptureRelease, releaseQualityScore } from "../release-scorer";
@@ -696,6 +698,8 @@ export interface FetchTorrentioParams {
   rdToken: string;
   /** The language the title was made in (ISO 639-1); English when not given. Dubs are judged against it. */
   originalLanguage?: string | null;
+  /** What the title is known as: releases of another title are dropped. Not checked when absent. */
+  facts?: TitleFacts | null;
 }
 
 export interface FetchTorrentioNoDebridParams {
@@ -704,6 +708,14 @@ export interface FetchTorrentioNoDebridParams {
   season?: number;
   episode?: number;
   originalLanguage?: string | null;
+  facts?: TitleFacts | null;
+}
+
+/** Which title a response is being read for. */
+interface WantedTitle {
+  facts: TitleFacts | null;
+  season?: number;
+  episode?: number;
 }
 
 /** `stream/movie/<imdb>.json` or `stream/series/<imdb>:<s>:<e>.json` — the resource path, identical for the configured and un-configured endpoints. */
@@ -744,10 +756,12 @@ function parseTorrentioStreams(
   data: TorrentioResponseRaw,
   configuredDebrid: boolean,
   mediaType: MediaType,
-  originalLanguage?: string | null
+  originalLanguage?: string | null,
+  wanted?: WantedTitle
 ): DebridCandidate[] {
   const streams = Array.isArray(data.streams) ? data.streams : [];
   const candidates: DebridCandidate[] = [];
+  const otherTitles: string[] = [];
   for (const s of streams) {
     // Configured responses contain instant `[RD+]` rows and non-cached
     // `[RD download]` rows. The latter still require a torrent transfer and
@@ -773,6 +787,21 @@ function parseTorrentioStreams(
     if (isHi10AvcRelease(text)) continue;
 
     const rawTitle = (s.title ?? s.name ?? "Unknown release").split("\n")[0]?.trim();
+    // The index files releases under an id by their names, and gets some
+    // wrong: a namesake, a sequel, one film out of a collection of fifty.
+    if (
+      wanted &&
+      isWrongTitle(wanted.facts, {
+        mediaType,
+        release: rawTitle ?? "",
+        fileName: s.behaviorHints?.filename,
+        season: wanted.season,
+        episode: wanted.episode,
+      })
+    ) {
+      otherTitles.push(rawTitle ?? "");
+      continue;
+    }
     candidates.push({
       ...parsed,
       resolutionHeight: height,
@@ -785,6 +814,19 @@ function parseTorrentioStreams(
       ...(isUnwantedRelease(text, originalLanguage) ? { unwantedAudio: true } : {}),
       ...(releaseAudioKind(parseReleaseAudio(text), originalLanguage) === "multi" ? { severalAudio: true } : {}),
     });
+  }
+  if (otherTitles.length) {
+    console.info(
+      JSON.stringify({
+        event: "debrid_other_title_rejected",
+        mediaType,
+        wanted: wanted?.facts?.titles[0],
+        year: wanted?.facts?.year,
+        rejected: otherTitles.length,
+        kept: candidates.length,
+        sample: otherTitles.slice(0, 3),
+      })
+    );
   }
   return selectTopPerClass(
     filterLeanDebridCandidates(inOriginalLanguage(candidates), mediaType),
@@ -820,6 +862,10 @@ export function extractInfoHashFromResolveUrl(url: string | undefined): string |
   }
 }
 
+function wantedFrom(params: FetchTorrentioNoDebridParams): WantedTitle | undefined {
+  return params.facts === undefined ? undefined : { facts: params.facts, season: params.season, episode: params.episode };
+}
+
 /** Fetch + parse + filter (1080p+ only; MKV/WebM kept, not dropped) + per-class rank/bound (~30-40 total, see `PER_CLASS_CAP`). Never throws. */
 export async function fetchTorrentioCandidates(
   params: FetchTorrentioParams
@@ -830,7 +876,7 @@ export async function fetchTorrentioCandidates(
     const url = `${TORRENTIO_BASE}/${configSegment}/${kindPath}`;
     const data = await fetchTorrentioJson(url);
     if (!data) return [];
-    return parseTorrentioStreams(data, true, params.mediaType, params.originalLanguage);
+    return parseTorrentioStreams(data, true, params.mediaType, params.originalLanguage, wantedFrom(params));
   } catch {
     return [];
   }
@@ -844,14 +890,16 @@ export async function fetchTorrentioKitsuCandidates(params: {
   kitsuId: number;
   episode: number;
   rdToken: string;
+  facts?: TitleFacts | null;
 }): Promise<DebridCandidate[]> {
   try {
     const configSegment = `realdebrid=${encodeURIComponent(params.rdToken)}`;
     const url = `${TORRENTIO_BASE}/${configSegment}/stream/series/kitsu:${params.kitsuId}:${params.episode}.json`;
     const data = await fetchTorrentioJson(url);
     if (!data) return [];
-    // Kitsu indexes anime, whose original language is Japanese.
-    return parseTorrentioStreams(data, true, "tv", ANIME_ORIGINAL_LANGUAGE);
+    // Kitsu indexes anime, whose original language is Japanese. Its episodes
+    // are numbered through the whole run, so only the show is checked.
+    return parseTorrentioStreams(data, true, "tv", ANIME_ORIGINAL_LANGUAGE, params.facts === undefined ? undefined : { facts: params.facts });
   } catch {
     return [];
   }
@@ -875,7 +923,7 @@ export async function fetchTorrentioCandidatesNoDebrid(
     const url = `${TORRENTIO_BASE}/${buildKindPath(params)}`;
     const data = await fetchTorrentioJson(url);
     if (!data) return [];
-    return parseTorrentioStreams(data, false, params.mediaType, params.originalLanguage);
+    return parseTorrentioStreams(data, false, params.mediaType, params.originalLanguage, wantedFrom(params));
   } catch {
     return [];
   }

@@ -21,6 +21,7 @@ export type MediaValidationReason =
   | "http_error"
   | "too_small"
   | "unsupported_container"
+  | "wrong_title"
   | "network_indeterminate";
 
 export interface MediaValidationResult {

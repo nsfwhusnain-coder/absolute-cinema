@@ -93,6 +93,7 @@ import {
   type ReleaseCompat,
   type ReleaseContainer,
 } from "./torrentio";
+import { isWrongTitle, linkFileName, loadTitleFacts, titleFactsFor } from "./title-gate";
 import {
   isRealDebridConfigured,
   mapWithConcurrency,
@@ -352,10 +353,11 @@ async function fetchRankedTorrentioCandidates(
   imdbId: string,
   rdToken: string
 ): Promise<DebridCandidate[]> {
+  const facts = titleFactsFor(imdbId) ?? (await loadTitleFacts(imdbId, req.tmdbId, req.mediaType));
   if (req.mediaType === "tv" && req.season && req.episode) {
     const kitsu = await resolveKitsuEpisode(req.tmdbId, req.season, req.episode);
     if (kitsu) {
-      const byKitsu = await fetchTorrentioKitsuCandidates({ ...kitsu, rdToken });
+      const byKitsu = await fetchTorrentioKitsuCandidates({ ...kitsu, rdToken, facts });
       if (byKitsu.length) return byKitsu;
     }
   }
@@ -366,6 +368,7 @@ async function fetchRankedTorrentioCandidates(
     episode: req.episode,
     rdToken,
     originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
+    facts,
   });
 }
 
@@ -389,6 +392,26 @@ interface KeyBase {
   mediaType: MediaType;
   season: number;
   episode: number;
+}
+
+/**
+ * Whether a file a debrid service resolved, or one read back from the link
+ * cache, is another title than the one this key is for (see title-gate.ts).
+ * The last check before a link can be offered, and the one that reads the
+ * name of the very file that would play.
+ */
+function isOtherTitle(keyBase: KeyBase, release: string, url: string): boolean {
+  const other = isWrongTitle(titleFactsFor(keyBase.imdbId), {
+    mediaType: keyBase.mediaType,
+    release,
+    fileName: linkFileName(url),
+    season: keyBase.season || undefined,
+    episode: keyBase.episode || undefined,
+  });
+  if (other) {
+    console.info(JSON.stringify({ event: "debrid_other_title_rejected", imdbId: keyBase.imdbId, release, file: linkFileName(url) }));
+  }
+  return other;
 }
 
 function heightForQuality(quality: DebridQuality): 1080 | 2160 {
@@ -942,6 +965,10 @@ async function readCachedRdSlots(
     cachedBySlot.map(async (hit, index) => {
       const safeUrl = hit ? sanitizeStreamUrl(hit.url, rdToken) : null;
       if (!hit || !safeUrl) return { hit, safeUrl: null, validation: null };
+      // Links cached before releases were checked against the title.
+      if (isOtherTitle(keyBase, hit.title, safeUrl)) {
+        return { hit, safeUrl, validation: { acceptable: false, reason: "wrong_title" as const, totalBytes: null, status: null, elapsedMs: 0 } };
+      }
       const validation = await validateDebridMediaLink(
         safeUrl,
         keyBase.mediaType,
@@ -1096,6 +1123,7 @@ function buildRdSource(
 ): { record: CachedStreamRecord; source: PlaybackSource } | null {
   const safeUrl = sanitizeStreamUrl(resolved.directUrl, rdToken);
   if (!safeUrl) return null;
+  if (isOtherTitle(keyBase, resolved.title, safeUrl)) return null;
   const effectiveContainer = effectiveReleaseContainer(safeUrl, resolved.container);
   const record: CachedStreamRecord = {
     title: resolved.title,
@@ -1452,6 +1480,7 @@ function backgroundFillRemainingSlots(
 async function resolveFastBestNativeFromCache(req: ResolveDebridSourcesRequest): Promise<PlaybackSource[]> {
   const imdbId = await resolveImdbId(req.tmdbId, req.mediaType);
   if (!imdbId) return [];
+  await loadTitleFacts(imdbId, req.tmdbId, req.mediaType);
 
   const season = req.season ?? 0;
   const episode = req.episode ?? 0;
@@ -1482,8 +1511,8 @@ async function resolveFastBestNativeFromCache(req: ResolveDebridSourcesRequest):
       : undefined;
     const release = hit ? parseReleaseTitle(hit.title) : null;
     const playable =
-      !isNativeSlot(slot) ||
-      isDirectPlayDebridRelease(effectiveContainer, release?.audioCodec);
+      (!isNativeSlot(slot) || isDirectPlayDebridRelease(effectiveContainer, release?.audioCodec)) &&
+      !(hit && safeUrl && isOtherTitle(keyBase, hit.title, safeUrl));
     if (
       hit &&
       safeUrl &&
@@ -1553,6 +1582,7 @@ export async function resolveFastDebridSources(
 async function resolveFastAllDebridFromCache(req: ResolveDebridSourcesRequest): Promise<PlaybackSource[]> {
   const imdbId = await resolveImdbId(req.tmdbId, req.mediaType);
   if (!imdbId) return [];
+  await loadTitleFacts(imdbId, req.tmdbId, req.mediaType);
   const keyBase: KeyBase = {
     imdbId,
     mediaType: req.mediaType,
@@ -1610,7 +1640,7 @@ async function readCachedSources(
   QUALITIES.forEach((quality, i) => {
     const hit = cachedByQuality[i];
     const safeUrl = hit ? sanitize(hit.url) : null;
-    if (hit && safeUrl) {
+    if (hit && safeUrl && !isOtherTitle(keyBase, hit.title, safeUrl)) {
       hits.push(
         toPlaybackSource(provider, quality, keyBase.imdbId, keyBase.mediaType, keyBase.season, keyBase.episode, {
           ...hit,
@@ -1645,6 +1675,7 @@ export async function resolveDebridSources(
   try {
     const imdbId = await resolveImdbId(req.tmdbId, req.mediaType);
     if (!imdbId) return [];
+    await loadTitleFacts(imdbId, req.tmdbId, req.mediaType);
 
     const season = req.season ?? 0;
     const episode = req.episode ?? 0;
@@ -1705,6 +1736,7 @@ export async function resolveDebridSources(
               season: req.season,
               episode: req.episode,
               originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
+              facts: titleFactsFor(imdbId),
             });
 
         // ONE absolute deadline for the ENTIRE TorBox resolve — checkCached
@@ -1745,6 +1777,7 @@ export async function resolveDebridSources(
               if (!file) continue; // this candidate failed — try the next ranked one, still within the add cap
               const resolvedCandidate = toResolvedTorbox(cand, file, torboxKey);
               if (!resolvedCandidate) continue;
+              if (isOtherTitle(keyBase, resolvedCandidate.title, resolvedCandidate.directUrl)) continue;
               const record: CachedStreamRecord = {
                 title: resolvedCandidate.title,
                 source: resolvedCandidate.infoHash ?? resolvedCandidate.directUrl,
@@ -1798,6 +1831,7 @@ async function resolveAllDebridTier(
       season: req.season,
       episode: req.episode,
       originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
+      facts: titleFactsFor(keyBase.imdbId) ?? (await loadTitleFacts(keyBase.imdbId, req.tmdbId, req.mediaType)),
     }),
     titleRuntimeMinutes(req),
   ]);
@@ -1820,6 +1854,7 @@ async function resolveAllDebridTier(
     const safeUrl = sanitize(resolved.file.url);
     const candidate = ranked.find((c) => c.infoHash === resolved.target.infoHash);
     if (!safeUrl || !candidate) continue;
+    if (isOtherTitle(keyBase, candidate.title, safeUrl)) continue;
     const compat: ReleaseCompat =
       candidate.compat === "safari" || resolved.file.compat === "safari" ? "safari" : "native";
     const codec = resolved.file.codec !== "unknown" ? resolved.file.codec : candidate.codec;

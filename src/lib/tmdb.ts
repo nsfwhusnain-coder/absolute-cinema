@@ -156,6 +156,18 @@ async function tmdbFetch<T>(path: string, params: Record<string, string | number
 }
 
 // ---------- Types ----------
+export interface TmdbNames {
+  title?: string;
+  name?: string;
+  original_title?: string;
+  original_name?: string;
+  release_date?: string | null;
+  first_air_date?: string | null;
+  /** Films list theirs under `titles`, series under `results`. */
+  alternative_titles?: { titles?: { title: string }[]; results?: { title: string }[] };
+  translations?: { translations?: { data?: { title?: string; name?: string } }[] };
+}
+
 export interface TmdbMovie {
   id: number;
   title: string;
@@ -446,6 +458,10 @@ export const tmdb = {
 
   watchProviders: (id: number, type: "movie" | "tv") =>
     tmdbFetch<{ results: Record<string, TmdbWatchProviderRegion> }>(`/${type}/${id}/watch/providers`),
+
+  /** Every name a title goes by, in every language, with its dates: for telling a release of it from a namesake. */
+  names: (id: number, type: "movie" | "tv") =>
+    tmdbFetch<TmdbNames>(`/${type}/${id}`, { append_to_response: "alternative_titles,translations" }),
 
   /** IMDb id lookup — Torrentio (debrid tier) is keyed by imdb id, not tmdb id. */
   externalIds: (id: number, type: "movie" | "tv") =>
