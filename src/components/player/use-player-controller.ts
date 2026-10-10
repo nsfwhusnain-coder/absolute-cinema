@@ -286,7 +286,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
           // Autoplay blocked: show the play button rather than failing the source.
           if (err instanceof DOMException && err.name === "NotAllowedError") {
             clearTimers();
-            store.getState().set({ buffering: false, playing: false });
+            store.getState().set({ buffering: false, playing: false, autoplayBlocked: true });
           }
         });
       } catch (err) {
@@ -361,7 +361,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
     let lastTick = performance.now();
 
     const onPlaying = () => {
-      s().set({ playing: true, buffering: false });
+      s().set({ playing: true, buffering: false, autoplayBlocked: false });
       if (stallTimer.current) clearTimeout(stallTimer.current);
       // A first frame always settles the attach's start timer, whatever the
       // phase: re-attaching the same source (a remux audio switch) keeps the

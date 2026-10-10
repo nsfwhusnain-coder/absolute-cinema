@@ -728,12 +728,15 @@ html[data-tv="1"] :where(.glass, .glass-strong, .glass-clear) {
   text-shadow: 0 0 4px #000, 0 0 2px #000, 0 2px 3px rgba(0, 0, 0, 0.9);
 }
 
-/* Loading screen: the title settles in slowly; the hairline sweeps while nothing is buffering yet. */
+/*
+ * Loading screen: the title settles in slowly; the hairline sweeps while
+ * nothing is buffering yet. No blur in the title's entrance: WebKit clips the
+ * title's glow to a visible box for as long as a filter is animating on it.
+ */
 @keyframes loader-title-in {
   from {
     opacity: 0;
     letter-spacing: 0.8em;
-    filter: blur(6px);
   }
 }
 .loader-title h1 {

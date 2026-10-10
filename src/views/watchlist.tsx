@@ -20,11 +20,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import {
-  GlassPill,
-  GlassPillSegment,
-  GlassPillTabs,
-} from "@/components/glass-pill";
+import { GlassPillTabs } from "@/components/glass-pill";
 
 const staggerContainer = {
   hidden: {},
@@ -129,14 +125,6 @@ export function WatchlistView() {
       <div className="mx-auto max-w-7xl">
         <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div className="min-w-0">
-            <div className="mb-3 flex flex-wrap items-center gap-3">
-              <GlassPill>
-                <GlassPillSegment onClick={() => navigate("/")} aria-label="Home">
-                  <Home className="mr-1.5 h-4 w-4" />
-                  Home
-                </GlassPillSegment>
-              </GlassPill>
-            </div>
             <h1 className="font-display text-2xl font-bold tracking-tight sm:text-3xl">
               My List
             </h1>

@@ -279,7 +279,7 @@ function EmojiGrid({ avatar, color, onPick }: { avatar: string; color: string; o
           onChange={(e) => setTyped(e.target.value)}
           placeholder="Or type any emoji"
           aria-label="Any emoji"
-          className="h-10 min-w-0 flex-1 rounded-full border border-white/10 bg-white/[0.06] px-4 text-sm text-white placeholder:text-white/40 focus:border-white/30 focus:outline-none"
+          className="h-10 min-w-0 flex-1 rounded-full border border-white/10 bg-white/[0.06] px-4 text-base text-white placeholder:text-white/40 focus:border-white/30 focus:outline-none sm:text-sm"
         />
         <button
           type="submit"
@@ -328,7 +328,7 @@ function FacesGrid({ avatar, color, onPick }: { avatar: string; color: string; o
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search actors and directors"
           aria-label="Search famous faces"
-          className="h-10 w-full rounded-full border border-white/10 bg-white/[0.06] pl-10 pr-4 text-sm text-white placeholder:text-white/40 focus:border-white/30 focus:outline-none"
+          className="h-10 w-full rounded-full border border-white/10 bg-white/[0.06] pl-10 pr-4 text-base text-white placeholder:text-white/40 focus:border-white/30 focus:outline-none sm:text-sm"
         />
       </label>
       {isError ? (

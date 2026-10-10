@@ -17,3 +17,11 @@ export function isNavPathActive(pathname: string, path: string): boolean {
   if (path === "/") return pathname === "/";
   return pathname === path || pathname.startsWith(`${path}/`);
 }
+
+/**
+ * The player's own pages (/watch/…), which draw no site chrome. An exact
+ * prefix test, so My List (/watchlist) is not mistaken for one of them.
+ */
+export function isPlayerPath(pathname: string): boolean {
+  return pathname === "/watch" || pathname.startsWith("/watch/");
+}

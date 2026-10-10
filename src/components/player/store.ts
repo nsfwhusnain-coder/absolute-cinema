@@ -120,6 +120,8 @@ export interface PlayerState {
   startNote: string | null;
   /** The watch page's up-next card is showing (the player hides its own "Next Episode" button). */
   upNextVisible: boolean;
+  /** The browser refused to start playback without a tap or click (a page opened directly, not from a Play button). */
+  autoplayBlocked: boolean;
   set(partial: Partial<PlayerState>): void;
   showNotice(text: string, tone?: PlayerNotice["tone"]): void;
   reset(): void;
@@ -154,6 +156,7 @@ const initial = {
   notice: null,
   startNote: null,
   upNextVisible: false,
+  autoplayBlocked: false,
 };
 
 let noticeSeq = 0;

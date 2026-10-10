@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Home, LogOut, Search, Settings, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { PRIMARY_NAV, isNavPathActive } from "@/lib/nav";
+import { PRIMARY_NAV, isNavPathActive, isPlayerPath } from "@/lib/nav";
 import { NavLettermark } from "@/components/brand-mark";
 import { signOut, useSession } from "next-auth/react";
 import { useEffect, useRef, useState } from "react";
@@ -55,7 +55,7 @@ export function Navbar({ bottomNavEnabled = true, hubsEnabled = true }: NavbarPr
   const sessionStatus = useSession()?.status;
   const scrolled = useScrolledPast(SCROLL_SCRIM_THRESHOLD_PX);
 
-  if (pathname.startsWith("/watch") || pathname === "/login") return null;
+  if (isPlayerPath(pathname) || pathname === "/login") return null;
 
   // Every destination in this bar is behind auth, so rendering it to a
   // signed-out visitor offers six links that all redirect straight back to

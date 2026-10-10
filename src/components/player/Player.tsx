@@ -498,6 +498,8 @@ export function Player(props: PlayerProps) {
       onClick={(e) => {
         // Only the play button pauses; a click or tap elsewhere shows or hides the controls.
         if (panel !== "none") setPanel("none");
+        // Waiting on the viewer because the browser would not start by itself: any tap is "play".
+        else if (state.autoplayBlocked) actions.togglePlay();
         else onTouchTap(e.clientX, lastPointer.current !== "mouse");
       }}
       onDoubleClick={() => {
@@ -535,6 +537,13 @@ export function Player(props: PlayerProps) {
         />
       )}
       {started && state.buffering && !state.failureMessage && <BufferingSpinner />}
+      {state.autoplayBlocked && !state.failureMessage && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
+          <IconButton label="Play" onClick={actions.togglePlay} className="glass-clear pointer-events-auto" size="xl">
+            <Play className="h-7 w-7 translate-x-0.5 fill-current" />
+          </IconButton>
+        </div>
+      )}
 
       {state.failureMessage && (
         <FailureCard

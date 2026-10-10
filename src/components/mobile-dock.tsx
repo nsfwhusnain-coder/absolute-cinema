@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { useNavigate } from "@/hooks/use-navigate";
 import { cn } from "@/lib/utils";
-import { isNavPathActive } from "@/lib/nav";
+import { isNavPathActive, isPlayerPath } from "@/lib/nav";
 
 const DOCK_ITEMS = [
   { label: "Home", icon: Home, path: "/" },
@@ -36,7 +36,7 @@ export function MobileDock({ hubsEnabled = true }: MobileDockProps) {
   const navigate = useNavigate();
   const pathname = usePathname();
 
-  if (pathname.startsWith("/watch") || pathname === "/login") return null;
+  if (isPlayerPath(pathname) || pathname === "/login") return null;
 
   const items = hubsEnabled
     ? DOCK_ITEMS

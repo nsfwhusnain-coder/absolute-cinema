@@ -10,3 +10,14 @@ db/
 .browser-qa/
 transcode-cache/
 .runtime-cache/
+# Server-side state and tooling that must never be baked into an image:
+# database backups hold PIN hashes and debrid tokens.
+db-backups/
+data/
+docker-compose.override.yml
+*.bak-*
+.github/
+docs/
+.claude/
+.qa/
+tsconfig.tsbuildinfo
