@@ -2,6 +2,46 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.5.0] - 2026-10-10
+
+### Added
+- **TV remote in the player.** With nothing highlighted the picture has the
+  remote: OK pauses, Left and Right skip, Up or Down bring up the controls.
+  From there the D-pad moves between controls and OK presses the highlighted
+  one. Back closes a submenu, then the menu, then hides the controls, then
+  leaves. Play, Pause, Stop, Rewind, Fast-forward, Next and Previous work, and
+  the colour buttons open Subtitles (red), Audio (green), Episodes (yellow) and
+  Settings (blue). Skip Intro, Up Next, Still watching and Try again take focus
+  as they appear, so OK answers them.
+- **Remote buttons** in the player's Settings menu on a TV, listing all of the
+  above.
+- **Older TV browsers.** The site runs on smart-TV engines back to Chromium 76
+  (Hisense VIDAA) and on LG webOS (Chromium 87 to 108). Before this, 76 to 87
+  showed a blank page and 94 and below had no styling.
+- Back on a Hisense remote (it sends Backspace) is recognised everywhere.
+
+### Changed
+- On a TV, a page focuses its main action once it has loaded: Play on Home and
+  on a title, your profile on "Who's watching?".
+- Back closes an open menu or dialog before it leaves the page.
+- In a text field, Left and Right move the caret until it reaches the end, and
+  only then move to the next control.
+
+### Fixed
+- The dark scrims behind titles and descriptions were missing on every browser
+  older than Chromium 111 or Safari 16.2 (so on every TV, and on older iPads):
+  gradients written for a newer colour syntax were dropped whole.
+- Opening a title on a TV and pressing OK left the player: the page had put
+  focus on the Back button.
+- A profile deleted on another device, or a database restored from before it
+  existed, left that browser on loading screens for good. It is now signed out
+  and returned to the profile picker.
+- The loading screen showed "UNTITLED" until the title's details arrived.
+- On a TV the Search heading slid under the navigation bar.
+- `scripts/update.sh` could delete the rollback image it had just printed and
+  keep a stale one. The running image and the newest rollback are now kept.
+- The stream scraper's runtime cache is no longer tracked in the repository.
+
 ## [2.4.0] - 2026-10-10
 
 ### Added

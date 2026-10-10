@@ -28,6 +28,7 @@ starts in seconds, seeks instantly, even in 4K, and plays the same way in every 
 - [Quick start](#quick-start)
 - [First run](#first-run)
 - [How playback works](#how-playback-works)
+- [Keyboard and remote](#keyboard-and-remote)
 - [Configuration](#configuration)
 - [Updating and backups](#updating-and-backups)
 - [Development](#development)
@@ -43,7 +44,7 @@ starts in seconds, seeks instantly, even in 4K, and plays the same way in every 
 - **Never switches mid-film.** Once a server is playing it stays. A dropped connection is retried on the same server at the same position; only a server that genuinely cannot keep up is swapped for the next one, seamlessly.
 - **Remembers what worked.** Each title keeps a record of which server delivered it, at what resolution and how smoothly, so repeat plays and the next episode skip the search.
 - **Smooth on slow servers too.** The server reads ahead the next segments while you watch, so providers that are slow to answer no longer cause play-pause-play; a server that still cannot keep up is swapped for another at the same spot.
-- **A clean glass player.** One settings menu for subtitles, audio, quality, picture fit (fit, fill, stretch), speed, server, episodes, picture-in-picture, AirPlay and download; HDR on or off per device, timeline previews, resume where you left off, a loading screen that moves on every device, and full keyboard and touch control (tap to show controls, double-tap the sides to skip 10 seconds).
+- **A clean glass player.** One settings menu for subtitles, audio, quality, picture fit (fit, fill, stretch), speed, server, episodes, picture-in-picture, AirPlay and download; HDR on or off per device, timeline previews, resume where you left off, a loading screen that moves on every device, and full keyboard, touch and TV-remote control (tap to show controls, double-tap the sides to skip 10 seconds).
 - **Made for binge-watching.** Skip Intro and Skip Credits for anime (or skip them automatically), a next-episode countdown, "Still watching?" when you choose, Continue Watching that moves on to the next episode, and your audio and subtitle choice remembered per show.
 - **A sleep timer.** Pause after 15 minutes to 2 hours of playing, or at the end of the episode, the film or a few episodes; the sound fades out, and a dark sleep screen picks up exactly where it stopped.
 
@@ -62,7 +63,13 @@ starts in seconds, seeks instantly, even in 4K, and plays the same way in every 
 - Everything is saved per profile: quality, audio and subtitle language, subtitle size, autoplay, theme, list and history.
 - Adult-title filter per profile (behind the PIN when the profile has one).
 - **Clear** (frosted glass, the default) and **Solid** themes, twelve accent colours or any colour, three interface sizes, subtitle size, colour and font, and the rows Home shows.
-- Installable as an app (PWA) on phones, tablets and desktops; a TV mode with D-pad navigation works on smart-TV browsers.
+- Installable as an app (PWA) on phones, tablets and desktops.
+
+**On a TV**
+- Open it in the TV's own browser: Hisense VIDAA, LG webOS, Samsung Tizen, Android TV and Fire TV are recognised, and the site runs on browser engines back to Chromium 76. Larger type, a focus ring you can see from the sofa, and nothing important inside the edge a TV may crop.
+- The whole site works from the remote: the D-pad moves between titles and controls, OK opens, Back goes back (or closes what is open).
+- The player has a full [remote map](#keyboard-and-remote): OK to pause, Left and Right to skip, the transport buttons, and the colour buttons for subtitles, audio, episodes and settings.
+- If a TV is not recognised, open the site once with `?tv=1` at the end of the address (and `?tv=0` to turn TV mode off again); the choice is remembered.
 
 **Self-hosting**
 - One container, `docker compose up -d`, on any 64-bit Linux, macOS or Windows machine running Docker (amd64 or arm64). SQLite, no external database.
@@ -82,6 +89,8 @@ starts in seconds, seeks instantly, even in 4K, and plays the same way in every 
 | <img src="docs/screenshots/season.jpg" alt="Season episode list"> | <img src="docs/screenshots/search.jpg" alt="Search results"> |
 | **Settings** | **Create a profile** |
 | <img src="docs/screenshots/settings.jpg" alt="Settings"> | <img src="docs/screenshots/signup.jpg" alt="Create a profile"> |
+| **On a TV** | **On a TV, title page** |
+| <img src="docs/screenshots/tv-home.jpg" alt="Home in a TV browser, Play focused"> | <img src="docs/screenshots/tv-detail.jpg" alt="Title page in a TV browser"> |
 
 **Profile pictures**
 
@@ -169,6 +178,45 @@ flowchart LR
 - **Same behaviour in every browser.** Ranking only offers what the device can decode (HEVC and Dolby Vision where supported, H.264 or AV1 elsewhere), and one player engine handles HLS, native HLS on Apple devices, and plain files.
 - **Source memory stores evidence, never URLs.** Debrid and CDN links expire; "this server delivered real 2160p for this episode and someone watched 40 minutes" does not.
 - **Everything goes through your server.** Playlists and segments are proxied with SSRF protection, and debrid tokens are stripped from every URL before it reaches a browser.
+
+## Keyboard and remote
+
+**Keyboard, in the player** (press `?` for this list)
+
+| Key | Does |
+|---|---|
+| `Space` / `K` | Play or pause |
+| `←` / `J`, `→` / `L` | Skip back, skip forward (10 s, or the step set in Settings) |
+| `↑` / `↓` | Volume |
+| `M` | Mute |
+| `F` | Full screen |
+| `C` | Subtitles on or off |
+| `S` | Skip intro, recap or credits |
+| `N` | Next episode |
+| `<` / `>` | Slower / faster |
+| `P` | Picture in picture |
+| `Z` | Sleep timer |
+| `0` to `9` | Jump to 0% to 90% |
+| `Esc` | Close the menu, then leave the player |
+
+Everywhere else, `/` opens search and `?` lists the shortcuts.
+
+**TV remote, in the player** (Settings → Remote buttons shows this list on the TV)
+
+| Button | Does |
+|---|---|
+| OK | Play or pause; with a control highlighted, presses it |
+| Left / Right | Skip back or forward; hold to keep going |
+| Up / Down | Show the controls, then move between them |
+| Back | Close the submenu, then the menu, then hide the controls, then leave |
+| Play, Pause, Play/Pause | As labelled |
+| Rewind / Fast-forward | Skip back or forward |
+| Next / Previous | Next episode / start over |
+| Stop | Leave the player |
+| Red, Green, Yellow, Blue | Subtitles, Audio, Episodes, Settings |
+
+Back is read as each make of TV sends it (LG, Samsung, Hisense and Android-based sets).
+The TV's own volume buttons control the volume.
 
 ## Configuration
 
@@ -281,6 +329,11 @@ has no HEVC decoder, the best compatible version is 1080p.
 
 **Where is my data stored?** In `db/` on your own server. Nothing is sent anywhere except
 the requests to TMDB, Real-Debrid and the stream sources needed to play what you pick.
+
+**Does it work on my TV?** In the TV's built-in browser, yes: smart-TV browsers back to
+Chromium 76 are supported, which covers Hisense VIDAA and LG webOS sets from the last
+several years. What a given set can play is up to its own decoders; the player only
+offers versions the TV says it can decode. See [On a TV](#features).
 
 **Can several people watch at once?** Yes. Each profile has its own list, progress and
 preferences, and each 4K stream gets its own remux session.
