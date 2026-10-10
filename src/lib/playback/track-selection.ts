@@ -129,6 +129,29 @@ export function selectAudioTrack(
   return usable.find((track) => track.default) ?? usable[0] ?? null;
 }
 
+/** The language the viewer wants to hear for this title ("" when it cannot be known). */
+export function wantedAudioLanguage(selection: AudioTrackSelection): string {
+  const { preference, originalLanguage, preferredLanguage } = selection;
+  const wanted = preference === "english" ? "en" : preference === "preferred" ? preferredLanguage : originalLanguage;
+  return normalizeTrackLanguage(wanted);
+}
+
+/**
+ * True when a file certainly has no audio in the wanted language: every track
+ * states its language and none of them is it. A track that states nothing may
+ * be the one, so a file with any such track is never called lacking.
+ */
+export function lacksWantedAudio(
+  tracks: ReadonlyArray<{ language?: string | null }>,
+  selection: AudioTrackSelection
+): boolean {
+  const wanted = wantedAudioLanguage(selection);
+  if (!wanted || tracks.length === 0) return false;
+  const languages = tracks.map((track) => normalizeTrackLanguage(track.language));
+  if (languages.some((language) => !language || language === "und")) return false;
+  return !languages.includes(wanted);
+}
+
 export function isForcedSubtitleTrack(track: SelectableMediaTrack): boolean {
   return Boolean(track.forced) || /\bforced\b/.test(trackText(track));
 }

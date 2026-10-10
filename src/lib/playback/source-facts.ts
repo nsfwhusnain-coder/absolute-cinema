@@ -1,4 +1,5 @@
 import type { IdentityEvidence, PlaybackSource } from "./types";
+import { looksLikeReleaseName, releaseAudioCode } from "./release-language";
 
 /**
  * Provider-stamped identity. Label regex is a fallback only — CinemaOS and
@@ -68,10 +69,20 @@ export function normalizeAudioLanguageCode(raw: string | undefined | null): stri
   return value.slice(0, 3);
 }
 
-/** Infer a language code from provider/label text when the row was not stamped. */
+/**
+ * Infer a language code from a release name or a provider label when the row
+ * was not stamped.
+ *
+ * A release name is read by its tags alone (release-language.ts). It used to
+ * be searched whole for language names, which missed every tag a dub really
+ * carries (TRUEFRENCH, VFF, iTA, "rus", LATINO) and called "The French
+ * Dispatch" a French release.
+ */
 export function inferAudioLanguageFromText(text: string): string {
   const raw = text.trim();
   if (!raw) return "und";
+  // "Dual Áudio", spelt so, is a Brazilian release: Portuguese first, whatever else is in the file.
+  if (looksLikeReleaseName(raw)) return PORTUGUESE_RELEASE.test(raw) ? "pt" : releaseAudioCode(raw);
   if (ENGLISH_AUDIO_NAME.test(raw)) return "en";
   if (PORTUGUESE_RELEASE.test(raw)) return "pt";
   if (CINEMA_XX.test(raw)) return "xx";

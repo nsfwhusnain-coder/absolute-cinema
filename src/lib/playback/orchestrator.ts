@@ -98,6 +98,16 @@ function eligible(state: OrchestratorState, sources: readonly PlaybackSource[], 
   return sources.filter((s) => s.id !== exclude && !isCoolingDown(state.health[s.id], now));
 }
 
+/** Whether another source could take over from the active one right now. */
+export function hasAlternative(
+  state: OrchestratorState,
+  sources: readonly PlaybackSource[],
+  ranker: Ranker,
+  now: number
+): boolean {
+  return ranker.pick(eligible(state, sources, now, state.activeId)) !== null;
+}
+
 function recordFailure(state: OrchestratorState, id: string, now: number): Record<string, SourceHealth> {
   const prev = state.health[id] ?? { failures: 0, lastFailAt: 0, played: false };
   return { ...state.health, [id]: { ...prev, failures: prev.failures + 1, lastFailAt: now } };

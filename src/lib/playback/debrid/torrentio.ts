@@ -36,9 +36,11 @@
  * and it alone drives `compat`.
  */
 import { tmdb } from "@/lib/tmdb";
+import { cachedFetch } from "@/lib/server-cache";
 import type { MediaType } from "../types";
 import { isMoviePackRelease } from "../source-facts";
 import { isCaptureRelease, releaseQualityScore } from "../release-scorer";
+import { isUnwantedRelease, parseReleaseAudio, releaseAudioKind } from "../release-language";
 import { tvQueryIndex } from "../tv-index";
 
 export { isMoviePackRelease };
@@ -116,6 +118,10 @@ export interface DebridCandidate extends ParsedRelease {
   seeders: number;
   /** Selected file size from Torrentio's footer, when present. */
   sizeBytes?: number;
+  /** A dub, or a picture with another language's subtitles over it: kept only when nothing else exists. */
+  unwantedAudio?: boolean;
+  /** Several audio languages in one file: the original is in there, but only a remux can choose it. */
+  severalAudio?: boolean;
 }
 
 interface TorrentioStreamRaw {
@@ -559,6 +565,8 @@ function sortCandidates(
     const compatDiff = compatRank(a) - compatRank(b);
     if (compatDiff !== 0) return compatDiff;
     if (a.resolutionHeight !== b.resolutionHeight) return b.resolutionHeight - a.resolutionHeight;
+    const severalDiff = (a.severalAudio ? 1 : 0) - (b.severalAudio ? 1 : 0);
+    if (severalDiff !== 0) return severalDiff;
     return candidateRankScore(b, mediaType) - candidateRankScore(a, mediaType);
   });
 }
@@ -635,6 +643,12 @@ function selectTopPerClass(
        * survival gate, and it matches `compareDelivery` on the client: at equal
        * class, direct beats remux. Same ordering, different reason.
        */
+      // A release in the original language alone comes before one that only
+      // contains it: played directly, a multi-language file starts on
+      // whichever track its maker put first, which is usually the dub.
+      const aSeveral = a.severalAudio ? 1 : 0;
+      const bSeveral = b.severalAudio ? 1 : 0;
+      if (aSeveral !== bSeveral) return aSeveral - bSeveral;
       const aPlayable = isBrowserPlayableContainer(a.container) ? 1 : 0;
       const bPlayable = isBrowserPlayableContainer(b.container) ? 1 : 0;
       if (aPlayable !== bPlayable) return bPlayable - aPlayable;
@@ -643,6 +657,24 @@ function selectTopPerClass(
     out.push(...ranked.slice(0, cap));
   }
   return sortCandidates(out, mediaType);
+}
+
+const ANIME_ORIGINAL_LANGUAGE = "ja";
+/** Shares the cache entry content-class.ts fills for the same title. */
+const ORIGINAL_LANGUAGE_TTL_MS = 6 * 60 * 60 * 1000;
+
+/** The language a title was made in, from TMDB; null when it cannot be had (dubs are then judged against English). */
+export async function resolveOriginalLanguage(tmdbId: number, mediaType: MediaType): Promise<string | null> {
+  try {
+    const details = await cachedFetch(
+      `tmdb-anime-signals:${mediaType}:${tmdbId}`,
+      () => tmdb.animeSignals(mediaType, tmdbId),
+      ORIGINAL_LANGUAGE_TTL_MS
+    );
+    return details.original_language || null;
+  } catch {
+    return null;
+  }
 }
 
 /** TMDB -> IMDb id. Torrentio (and Real-Debrid magnets generally) are keyed by imdb id. */
@@ -662,6 +694,8 @@ export interface FetchTorrentioParams {
   episode?: number;
   /** Real-Debrid token baked into the Torrentio config path segment (2a). */
   rdToken: string;
+  /** The language the title was made in (ISO 639-1); English when not given. Dubs are judged against it. */
+  originalLanguage?: string | null;
 }
 
 export interface FetchTorrentioNoDebridParams {
@@ -669,6 +703,7 @@ export interface FetchTorrentioNoDebridParams {
   mediaType: MediaType;
   season?: number;
   episode?: number;
+  originalLanguage?: string | null;
 }
 
 /** `stream/movie/<imdb>.json` or `stream/series/<imdb>:<s>:<e>.json` — the resource path, identical for the configured and un-configured endpoints. */
@@ -708,7 +743,8 @@ async function fetchTorrentioJson(url: string): Promise<TorrentioResponseRaw | n
 function parseTorrentioStreams(
   data: TorrentioResponseRaw,
   configuredDebrid: boolean,
-  mediaType: MediaType
+  mediaType: MediaType,
+  originalLanguage?: string | null
 ): DebridCandidate[] {
   const streams = Array.isArray(data.streams) ? data.streams : [];
   const candidates: DebridCandidate[] = [];
@@ -746,12 +782,26 @@ function parseTorrentioStreams(
       url: s.url,
       seeders: parseSeeders(text),
       ...(sizeBytes != null ? { sizeBytes } : {}),
+      ...(isUnwantedRelease(text, originalLanguage) ? { unwantedAudio: true } : {}),
+      ...(releaseAudioKind(parseReleaseAudio(text), originalLanguage) === "multi" ? { severalAudio: true } : {}),
     });
   }
   return selectTopPerClass(
-    filterLeanDebridCandidates(candidates, mediaType),
+    filterLeanDebridCandidates(inOriginalLanguage(candidates), mediaType),
     mediaType
   ).slice(0, MAX_CANDIDATES);
+}
+
+/**
+ * Drops dubs, and releases with another language's subtitles over the
+ * picture, whenever anything else was found. A French or Russian release used
+ * to take a quality slot on size and seeders alone and then play as if it
+ * were the original. When a dub is all there is, it is still better than
+ * nothing to play.
+ */
+export function inOriginalLanguage<T extends { unwantedAudio?: boolean }>(candidates: T[]): T[] {
+  const wanted = candidates.filter((candidate) => !candidate.unwantedAudio);
+  return wanted.length > 0 ? wanted : candidates;
 }
 
 /**
@@ -780,7 +830,7 @@ export async function fetchTorrentioCandidates(
     const url = `${TORRENTIO_BASE}/${configSegment}/${kindPath}`;
     const data = await fetchTorrentioJson(url);
     if (!data) return [];
-    return parseTorrentioStreams(data, true, params.mediaType);
+    return parseTorrentioStreams(data, true, params.mediaType, params.originalLanguage);
   } catch {
     return [];
   }
@@ -800,7 +850,8 @@ export async function fetchTorrentioKitsuCandidates(params: {
     const url = `${TORRENTIO_BASE}/${configSegment}/stream/series/kitsu:${params.kitsuId}:${params.episode}.json`;
     const data = await fetchTorrentioJson(url);
     if (!data) return [];
-    return parseTorrentioStreams(data, true, "tv");
+    // Kitsu indexes anime, whose original language is Japanese.
+    return parseTorrentioStreams(data, true, "tv", ANIME_ORIGINAL_LANGUAGE);
   } catch {
     return [];
   }
@@ -824,7 +875,7 @@ export async function fetchTorrentioCandidatesNoDebrid(
     const url = `${TORRENTIO_BASE}/${buildKindPath(params)}`;
     const data = await fetchTorrentioJson(url);
     if (!data) return [];
-    return parseTorrentioStreams(data, false, params.mediaType);
+    return parseTorrentioStreams(data, false, params.mediaType, params.originalLanguage);
   } catch {
     return [];
   }

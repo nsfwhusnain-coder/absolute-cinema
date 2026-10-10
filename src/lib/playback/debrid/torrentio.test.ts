@@ -777,3 +777,44 @@ describe("isStereoscopicRelease", () => {
     ).toBe(false);
   });
 });
+
+describe("fetchTorrentioCandidates: the original language first", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function answer(titles: string[]): void {
+    const streams = titles.map((title, i) => ({ title: `${title}\n👤 ${900 - i} 💾 6 GB`, infoHash: String(i).repeat(40).slice(0, 40) }));
+    globalThis.fetch = (async () => new Response(JSON.stringify({ streams }), { status: 200 })) as unknown as typeof fetch;
+  }
+  const find = (originalLanguage?: string) =>
+    fetchTorrentioCandidates({ imdbId: "tt0000009", mediaType: "movie", rdToken: "test-rd-token", originalLanguage });
+
+  it("leaves dubs and foreign-subtitled releases out when the original was found, however well seeded", async () => {
+    answer([
+      "Movie.2024.TRUEFRENCH.1080p.WEB.H264.mp4",
+      "Movie.2024.1080p.WEB-DL.H264.RGzsRutracker.mp4",
+      "Movie.2024.1080p.HDTV.Subtitulado.Esp.H264.mp4",
+      "Movie.2024.1080p.WEB-DL.H264-NTb.mp4",
+    ]);
+    const titles = (await find()).map((c) => c.title);
+    expect(titles).toEqual(["Movie.2024.1080p.WEB-DL.H264-NTb.mp4"]);
+  });
+
+  it("puts a release in the original alone ahead of one that only contains it", async () => {
+    answer(["Movie.2024.MULTi.1080p.BluRay.H264.mp4", "Movie.2024.1080p.WEB-DL.H264-NTb.mp4"]);
+    const titles = (await find()).map((c) => c.title);
+    expect(titles).toEqual(["Movie.2024.1080p.WEB-DL.H264-NTb.mp4", "Movie.2024.MULTi.1080p.BluRay.H264.mp4"]);
+  });
+
+  it("still offers a dub when it is all there is", async () => {
+    answer(["Movie.2024.TRUEFRENCH.1080p.WEB.H264.mp4", "Movie.2024.iTA.1080p.WEB.H264.mp4"]);
+    expect((await find()).length).toBe(2);
+  });
+
+  it("judges against the language the title was made in", async () => {
+    answer(["Film.2019.FRENCH.1080p.BluRay.H264.mp4", "Film.2019.1080p.BluRay.English.Dubbed.H264.mp4"]);
+    expect((await find("fr")).map((c) => c.title)).toEqual(["Film.2019.FRENCH.1080p.BluRay.H264.mp4"]);
+  });
+});

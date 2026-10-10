@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, type RefObject } from "react";
 import type { PlaybackSource } from "@/lib/playback/types";
 import {
+  hasAlternative,
   initialOrchestratorState,
   onAwaitRefresh,
   onFirstFrame,
@@ -18,7 +19,8 @@ import {
 import { emitPlayerFeedback, setFeedbackTitleContext, clearFeedbackTitleContext } from "@/lib/playback/player-feedback";
 import { getPreferredProvider, getPreferredQualityHeight, getSavedPlaybackSpeed, setSavedPlaybackSpeed } from "@/lib/player-preferences";
 import type { PlaybackQualityPreference } from "@/lib/profile-preferences";
-import { normalizeTrackLanguage, selectAudioTrack } from "@/lib/playback/track-selection";
+import { lacksWantedAudio, normalizeTrackLanguage, selectAudioTrack } from "@/lib/playback/track-selection";
+import { isHdrLikeRange, videoFrameRange } from "@/lib/playback/dynamic-range";
 import { MediaEngine, type EngineAudioTrack } from "./engine";
 import { createRanker, resolvePlayable, type AudioChoice, type TitleContext } from "./playable";
 import { usePlayerState } from "./store";
@@ -54,6 +56,8 @@ const PROGRESS_REPORT_MS = 10_000;
 /** Watch time that proves a source works (feeds per-title source memory). */
 const SUSTAINED_PLAY_MS = 90_000;
 const TIME_UPDATE_MIN_MS = 250;
+/** Reported when a file is passed over for having no audio in the wanted language. */
+const WRONG_LANGUAGE_REASON = "no audio in the wanted language";
 
 export interface PlayerControllerOptions {
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -140,19 +144,35 @@ export function usePlayerController(options: PlayerControllerOptions) {
   );
 
   const startFailed = useCallback(
-    (reason: string) => {
+    (reason: string, why = "didn't respond") => {
       const state = orchestrator.current;
       if (state.phase !== "starting") return;
       const source = sourceById(state.activeId);
       if (source) {
         emitPlayerFeedback({ event: "handoff_failed", sourceId: source.id, provider: source.provider, reason, engine: engineRef.current?.kind });
         const name = source.label.split("•")[0]?.trim() || source.provider;
-        store.getState().set({ startNote: `${name} didn't respond, trying the next server` });
+        store.getState().set({ startNote: `${name} ${why}, trying the next server` });
       }
       const { sources, discovering } = optionsRef.current;
       apply(onStartFailed(state, sources, reason, discovering, ranker(), Date.now()));
     },
     [apply, ranker, sourceById]
+  );
+
+  /**
+   * True when the file about to play has no audio in the language the viewer
+   * wants and another source could take its place. Only at the start, and
+   * never against a server the viewer chose by hand.
+   */
+  const isDubToSkip = useCallback(
+    (tracks: ReadonlyArray<{ language?: string | null }>, audio: AudioChoice, originalLanguage?: string | null) => {
+      const state = orchestrator.current;
+      if (state.phase !== "starting" || state.pinned || state.everPlayed) return false;
+      const selection = { preference: audio.preference, originalLanguage, preferredLanguage: audio.language };
+      if (!lacksWantedAudio(tracks, selection)) return false;
+      return hasAlternative(state, optionsRef.current.sources, ranker(), Date.now());
+    },
+    [ranker]
   );
 
   const playbackFailed = useCallback(
@@ -257,6 +277,13 @@ export function usePlayerController(options: PlayerControllerOptions) {
       try {
         const resolved = await resolvePlayable(source, title, audio, startAt, video, abort.signal);
         if (abort.signal.aborted) return;
+        // The file's own track list is the one sure word on its language: a dub
+        // whose name gave nothing away is passed over while anything else can play.
+        if (override === undefined && resolved.remuxTracks && isDubToSkip(resolved.remuxTracks.audioTracks, audio, title.originalLanguage)) {
+          attaching.current = false;
+          startFailed(WRONG_LANGUAGE_REASON, "is in another language");
+          return;
+        }
         remuxDuration.current = resolved.durationS ?? null;
         const tracks = resolved.remuxTracks;
         s.set({
@@ -376,6 +403,11 @@ export function usePlayerController(options: PlayerControllerOptions) {
         const source = sourceById(orchestrator.current.activeId);
         orchestrator.current = onFirstFrame(orchestrator.current);
         s().set({ phase: "playing", decodedHeight: video.videoHeight, startNote: null });
+        // A file played directly says nothing about its range: ask the picture itself.
+        if (!isHdrLikeRange(s().dynamicRange)) {
+          const seen = videoFrameRange(video);
+          if (seen) s().set({ dynamicRange: seen });
+        }
         if (source && phase === "starting") {
           emitPlayerFeedback({
             event: "first_frame",

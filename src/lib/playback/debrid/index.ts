@@ -85,6 +85,7 @@ import {
   parseReleaseTitle,
   parseSizeBytes,
   resolveImdbId,
+  resolveOriginalLanguage,
   effectiveReleaseContainer,
   isDirectPlayDebridRelease,
   type DebridCandidate,
@@ -364,6 +365,7 @@ async function fetchRankedTorrentioCandidates(
     season: req.season,
     episode: req.episode,
     rdToken,
+    originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
   });
 }
 
@@ -1675,6 +1677,7 @@ export async function resolveDebridSources(
               mediaType: req.mediaType,
               season: req.season,
               episode: req.episode,
+              originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
             });
 
         // ONE absolute deadline for the ENTIRE TorBox resolve — checkCached
@@ -1770,6 +1773,7 @@ async function resolveAllDebridTier(
       mediaType: req.mediaType,
       season: req.season,
       episode: req.episode,
+      originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
     }),
     titleRuntimeMinutes(req),
   ]);

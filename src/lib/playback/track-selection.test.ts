@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  lacksWantedAudio,
   normalizeTrackLanguage,
   selectAudioTrack,
   selectSubtitleTrack,
+  wantedAudioLanguage,
 } from "./track-selection";
 
 describe("track selection", () => {
@@ -76,5 +78,35 @@ describe("track selection", () => {
     ];
     expect(selectSubtitleTrack(tracks, "english")?.id).toBe(2);
     expect(selectSubtitleTrack(tracks, "off")).toBeNull();
+  });
+});
+
+describe("the language a viewer wants to hear", () => {
+  test("is the title's own for Original, English for English, and theirs for My language", () => {
+    expect(wantedAudioLanguage({ preference: "original", originalLanguage: "ja", preferredLanguage: "fr" })).toBe("ja");
+    expect(wantedAudioLanguage({ preference: "english", originalLanguage: "ja", preferredLanguage: "fr" })).toBe("en");
+    expect(wantedAudioLanguage({ preference: "preferred", originalLanguage: "ja", preferredLanguage: "fra" })).toBe("fr");
+    expect(wantedAudioLanguage({ preference: "original", originalLanguage: null })).toBe("");
+  });
+
+  test("a file lacks it only when every track states a language and none is the one", () => {
+    const original = { preference: "original" as const, originalLanguage: "en" };
+    expect(lacksWantedAudio([{ language: "fre" }], original)).toBe(true);
+    expect(lacksWantedAudio([{ language: "rus" }, { language: "ukr" }], original)).toBe(true);
+    expect(lacksWantedAudio([{ language: "fre" }, { language: "eng" }], original)).toBe(false);
+    expect(lacksWantedAudio([{ language: "eng" }], original)).toBe(false);
+  });
+
+  test("a track that states nothing may be the original, so the file is kept", () => {
+    const original = { preference: "original" as const, originalLanguage: "en" };
+    expect(lacksWantedAudio([{ language: null }], original)).toBe(false);
+    expect(lacksWantedAudio([{ language: "und" }, { language: "fre" }], original)).toBe(false);
+    expect(lacksWantedAudio([], original)).toBe(false);
+    expect(lacksWantedAudio([{ language: "fre" }], { preference: "original", originalLanguage: null })).toBe(false);
+  });
+
+  test("an English dub of an anime lacks the original, and has it for a viewer who asked for English", () => {
+    expect(lacksWantedAudio([{ language: "eng" }], { preference: "original", originalLanguage: "ja" })).toBe(true);
+    expect(lacksWantedAudio([{ language: "eng" }], { preference: "english", originalLanguage: "ja" })).toBe(false);
   });
 });

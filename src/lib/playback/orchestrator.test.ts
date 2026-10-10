@@ -3,6 +3,7 @@ import type { PlaybackSource } from "./types";
 import {
   FOUR_K_GRACE_MS,
   LOW_QUALITY_GRACE_MS,
+  hasAlternative,
   PLAYED_FAIL_COOLDOWN_MS,
   START_FAIL_COOLDOWN_MS,
   initialOrchestratorState,
@@ -178,3 +179,15 @@ describe("orchestrator", () => {
   });
 });
 
+describe("hasAlternative", () => {
+  it("is true while another source could take over, and false once the rest have failed", () => {
+    const starting = onRoster(initialOrchestratorState, [A, B], false, ranker, T0).state;
+    expect(starting.activeId).toBe("a");
+    expect(hasAlternative(starting, [A, B], ranker, T0)).toBe(true);
+    expect(hasAlternative(starting, [A], ranker, T0)).toBe(false);
+    // B started and failed a moment ago: it is cooling down, so A has nothing to hand over to.
+    const afterB = onStartFailed({ ...starting, activeId: "b" }, [A, B], "timeout", false, ranker, T0).state;
+    expect(hasAlternative({ ...afterB, activeId: "a" }, [A, B], ranker, T0 + 1000)).toBe(false);
+    expect(hasAlternative({ ...afterB, activeId: "a" }, [A, B], ranker, T0 + START_FAIL_COOLDOWN_MS + 1)).toBe(true);
+  });
+});
