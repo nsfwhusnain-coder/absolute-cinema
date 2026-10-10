@@ -24,6 +24,8 @@ export interface ProxySource {
 
 const UPSTREAM_TIMEOUT_MS = 20_000;
 
+const DEFAULT_WINDOW_BYTES = 128 * 1024 * 1024;
+
 /**
  * Upstream is asked for this much at a time, and for the next piece only once
  * this one has been handed to ffmpeg.
@@ -31,14 +33,15 @@ const UPSTREAM_TIMEOUT_MS = 20_000;
  * Bun's fetch downloads a response as fast as the network delivers it whether
  * or not anyone is reading it. ffmpeg is paused (SIGSTOP) whenever it runs far
  * ahead of the viewer, and one open-ended request then kept filling memory
- * with the rest of the file: 20 GB in twenty minutes for a 4K release, until
- * the host ran out and went down. A window bounds what can pile up, per run,
- * to its own size. Each one costs a round trip, on a connection kept open.
+ * with the rest of the file. A window bounds what can wait in memory, per run,
+ * to its own size.
+ *
+ * Each window is a request, and a debrid CDN takes most of a second to answer
+ * one (0.84 s measured on a connection kept open). 128 MB keeps that under a
+ * tenth of the time on a link only just fast enough for a 4K release, where
+ * it matters; 16 MB cost a third of the throughput there.
  */
-export const UPSTREAM_WINDOW_BYTES = 16 * 1024 * 1024;
-
-/** A window being discarded after its reader left is given this long to finish arriving. */
-const DISCARD_TIMEOUT_MS = 10_000;
+export const UPSTREAM_WINDOW_BYTES = Number(process.env.REMUX_WINDOW_BYTES) || DEFAULT_WINDOW_BYTES;
 
 /** Parses `bytes=a-` / `bytes=a-b` against a known size; null for unsatisfiable. */
 export function parseRange(header: string | undefined, totalSize: number): { start: number; end: number } | null {
@@ -176,13 +179,12 @@ export function windowEnd(offset: number, end: number, windowBytes: number): num
  * Copies one upstream response to `res`, reporting each chunk as it is handed
  * over.
  *
- * When the reader hangs up mid-response (every seek kills a run this way), the
- * rest of the window is still read to its end and thrown away. Aborting a
- * request whose response has data waiting leaks that data under Bun (1.3.14
- * kept about 19 MB per abort for the life of the process, measured), and a
- * body read to its end is the one ending measured to free everything.
- * Finishing a window costs at most its own size in download. Only the wait
- * for headers, when nothing has arrived yet, is ended by an abort.
+ * When the reader hangs up mid-response (every seek kills a run this way) the
+ * body is cancelled, which stops the download and frees what had arrived. The
+ * request is never aborted once its response has started: under Bun (1.3.14)
+ * an aborted response keeps the data it had waiting for the life of the
+ * process, about 19 MB per abort when measured. Only the wait for headers,
+ * when nothing has arrived yet, is ended by an abort.
  */
 async function copyWindow(
   res: ServerResponse,
@@ -207,23 +209,18 @@ async function copyWindow(
     throw new Error(`upstream HTTP ${upstream.status}`);
   }
   const reader = upstream.body.getReader();
-  // The last resort for an upstream that stops sending: give up on the window.
-  let giveUp: ReturnType<typeof setTimeout> | null = null;
-  client.release = () => {
-    giveUp ??= setTimeout(() => void reader.cancel().catch(() => {}), DISCARD_TIMEOUT_MS);
-  };
+  client.release = () => void reader.cancel().catch(() => {});
   if (client.gone) client.release();
   try {
-    for (;;) {
+    while (!client.gone) {
       const { done, value } = await reader.read();
-      if (done) break;
-      if (client.gone) continue;
+      if (done || client.gone) break;
       await write(res, value, client);
       written(value.length);
     }
   } finally {
     client.release = NOTHING;
-    if (giveUp) clearTimeout(giveUp);
+    await reader.cancel().catch(() => {});
   }
 }
 

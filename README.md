@@ -232,6 +232,7 @@ Everything is optional. Copy [`.env.example`](.env.example) to `.env` to overrid
 | `REMUX_ENABLED` | `1` | Serve MKV releases as seekable streams |
 | `REMUX_CACHE_MAX_BYTES` | 50 GiB | Disk the remux cache may use |
 | `REMUX_MIN_FREE_BYTES` | 5 GiB | Free space the remux cache always leaves |
+| `REMUX_WINDOW_BYTES` | 128 MiB | How much of a release each remux run downloads at a time, and so the most it can hold in memory; lower it on a machine short of RAM |
 | `BROWSER_POOL_SIZE` | `1` | Headless Chromium workers for web sources (1–4) |
 | `AC_MEMORY_LIMIT` | `8g` | Most memory the container may use; a fault inside it then restarts a helper instead of exhausting the machine |
 | `TORBOX_API_KEY` | – | Optional TorBox account as an extra debrid source |

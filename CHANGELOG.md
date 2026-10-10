@@ -15,10 +15,11 @@ All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](ht
   more slowly, whenever ffmpeg was paused for running ahead of the viewer.
   - Disconnects are now detected from the request and socket, for the proxy
     and for the segments sent to the player.
-  - The source is fetched in 16 MB pieces, the next only once the last has
-    been handed to ffmpeg, so what can wait in memory is bounded per run.
-  - A piece in flight when ffmpeg leaves is finished and discarded, since an
-    aborted download is not freed by the runtime.
+  - The source is fetched in pieces (128 MB, `REMUX_WINDOW_BYTES`), the next
+    only once the last has been handed to ffmpeg, so what can wait in memory
+    is bounded per run.
+  - A piece in flight when ffmpeg leaves is cancelled at once. It is never
+    aborted: the runtime does not free an aborted download.
 
 ### Changed
 - The container has a memory ceiling (`AC_MEMORY_LIMIT`, 8 GB by default), so
