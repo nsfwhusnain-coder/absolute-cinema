@@ -1,11 +1,9 @@
 import { Skeleton } from "@/components/ui/skeleton";
+import { HERO_HEIGHT_CLASS } from "@/components/hero-carousel";
 
 export function HeroSkeleton() {
   return (
-    <Skeleton
-      className="w-full rounded-none"
-      style={{ height: "clamp(680px, 92vh, 1040px)" }}
-    />
+    <Skeleton className={`w-full rounded-none ${HERO_HEIGHT_CLASS}`} />
   );
 }
 

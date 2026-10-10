@@ -7,6 +7,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
+  // The same files eslint-config-next registers its plugins for: a rule named
+  // here for any other file (a .cjs build plugin) has no plugin to resolve to.
+  files: ["**/*.{js,jsx,mjs,ts,tsx,mts,cts}"],
   rules: {
     // TypeScript rules
     "@typescript-eslint/no-explicit-any": "off",
@@ -46,6 +49,12 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "no-undef": "off",
     "no-unreachable": "off",
     "no-useless-escape": "off",
+  },
+}, {
+  // CommonJS by definition: PostCSS loads its plugins with require().
+  files: ["**/*.cjs"],
+  rules: {
+    "@typescript-eslint/no-require-imports": "off",
   },
 }, {
   ignores: [

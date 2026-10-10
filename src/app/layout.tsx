@@ -8,6 +8,7 @@ import { authOptions } from "@/lib/auth";
 import { PWARegister } from "@/components/pwa-register";
 import { TvSpatialNavigation } from "@/components/tv-spatial-navigation";
 import { tvDetectionBootstrapScript } from "@/lib/tv-detect";
+import { engineFallbackScript } from "@/lib/engine-fallbacks";
 import { legacyStorageMigrationScript } from "@/lib/storage-migration";
 import { appearanceBootstrapScript } from "@/lib/appearance";
 
@@ -80,6 +81,7 @@ export default async function RootLayout({
       >
         {/* Must run before anything paints — it decides the root font size.
             See tvDetectionBootstrapScript() for why this cannot wait for React. */}
+        <script dangerouslySetInnerHTML={{ __html: engineFallbackScript() }} />
         <script dangerouslySetInnerHTML={{ __html: legacyStorageMigrationScript() }} />
         <script dangerouslySetInnerHTML={{ __html: appearanceBootstrapScript() }} />
         <script dangerouslySetInnerHTML={{ __html: tvDetectionBootstrapScript() }} />

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
-import { HeroCarousel } from "@/components/hero-carousel";
+import { HERO_HEIGHT_CLASS, HeroCarousel } from "@/components/hero-carousel";
 import { TopTenRow } from "@/components/top-ten-row";
 import { MovieRow, RAIL_PAD_LEFT } from "@/components/movie-row";
 import { Shuffle } from "lucide-react";
@@ -324,10 +324,7 @@ export function HomeView() {
       ) : featured.length ? (
         <HeroCarousel items={featured} />
       ) : (
-        <div
-          className="flex w-full items-center justify-center"
-          style={{ height: "clamp(680px, 92vh, 1040px)" }}
-        >
+        <div className={`flex w-full items-center justify-center ${HERO_HEIGHT_CLASS}`}>
           <BrowseError
             label="featured picks"
             hint="If this keeps happening, check the server's TMDB API key."

@@ -23,8 +23,12 @@ const CANVAS = "#0a0a0f";
 const HERO_FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-transparent";
 
-/** Layout height only — paint stack may bleed below this. */
-const HERO_LAYOUT_HEIGHT = "clamp(680px, 92vh, 1040px)";
+/**
+ * Layout height only — paint stack may bleed below this. A class rather than
+ * an inline style: the stylesheet carries a plain 92vh ahead of the clamp()
+ * for engines without it, which an inline style cannot.
+ */
+export const HERO_HEIGHT_CLASS = "h-[clamp(680px,92vh,1040px)]";
 const IMAGE_BLEED_DESKTOP_PX = 200;
 const IMAGE_BLEED_MOBILE_PX = 120;
 const CONTENT_PAD_BOTTOM_PX = 108;
@@ -124,10 +128,9 @@ function HeroTitle({
           aria-hidden
           className={
             showLogo
-              ? "h-auto max-h-full w-auto object-contain object-left-bottom drop-shadow-lg"
+              ? "h-auto max-h-full w-auto max-w-[min(560px,42vw)] object-contain object-left-bottom drop-shadow-lg"
               : "hidden"
           }
-          style={{ maxWidth: "min(560px, 42vw)" }}
           ref={(el) => {
             if (el?.complete && el.naturalWidth > 0) {
               queueMicrotask(() => setLogoReady(true));
@@ -265,11 +268,8 @@ export function HeroCarousel({ items }: Props) {
 
   return (
     <div
-      className="relative w-full"
-      style={{
-        height: HERO_LAYOUT_HEIGHT,
-        backgroundColor: "transparent",
-      }}
+      className={`relative w-full ${HERO_HEIGHT_CLASS}`}
+      style={{ backgroundColor: "transparent" }}
       onMouseEnter={() => {
         if (!hoverSuppressed.current) setPaused(true);
       }}

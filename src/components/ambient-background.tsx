@@ -42,10 +42,9 @@ export function AmbientBackground() {
   const layer = (tint: string, opacity: number) => (
     <div
       aria-hidden
-      className="pointer-events-none absolute inset-x-0 top-0"
+      // Long enough that rails sit in the wash; soft stop into canvas.
+      className="pointer-events-none absolute inset-x-0 top-0 h-[min(1400px,160vh)]"
       style={{
-        // Long enough that rails sit in the wash; soft stop into canvas
-        height: "min(1400px, 160vh)",
         opacity,
         transition: "opacity 900ms cubic-bezier(0.16, 1, 0.3, 1)",
         background: `linear-gradient(180deg, ${tint} 0%, ${tint} 18%, ${CANVAS} 72%, ${CANVAS} 100%)`,

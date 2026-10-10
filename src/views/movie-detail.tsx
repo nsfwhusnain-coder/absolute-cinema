@@ -2,6 +2,7 @@
 
 import { CollectionRow } from "@/components/collection-row";
 import { preloadLoaderEngine } from "@/components/loader/cinematic-loader";
+import { languageName } from "@/lib/language-name";
 import { fetchLoaderLook, loaderLookQueryKey } from "@/lib/loader/look-client";
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
@@ -44,15 +45,12 @@ interface Props {
   initialData?: Record<string, any>;
 }
 
-const CURRENCY_FORMAT = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
-const LANGUAGE_NAMES = new Intl.DisplayNames(["en"], { type: "language" });
-
+// Both limits: older engines (Chromium 76) throw when the maximum is below the currency's default minimum of 2.
+const CURRENCY_FORMAT = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: 0 });
+/** The language's English name; the code itself where the engine has no names for languages (older TVs). */
 function formatLanguage(code: string): string {
-  try {
-    return LANGUAGE_NAMES.of(code) || code.toUpperCase();
-  } catch {
-    return code.toUpperCase();
-  }
+  const name = languageName(code);
+  return name === code ? code.toUpperCase() : name;
 }
 
 export function DetailView({ mediaType, id, initialData }: Props) {
@@ -439,6 +437,7 @@ function DetailContent({
             <div className="mt-1 flex flex-wrap items-center gap-2.5">
               <Button
                 type="button"
+                data-tv-first-focus
                 onClick={() =>
                   navigate(
                     mediaType === "tv"
