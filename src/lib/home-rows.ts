@@ -11,11 +11,11 @@ export interface HomeRowOption {
 
 export const HOME_ROWS: readonly HomeRowOption[] = [
   { id: "because", label: "Because you watched…" },
-  { id: "acclaimed", label: "Acclaimed Right Now" },
   { id: "trending-movies", label: "Trending Movies" },
   { id: "trending-series", label: "Trending Series" },
-  { id: "anime", label: "Popular Anime" },
-  { id: "new-digital", label: "New on Digital" },
+  { id: "new-digital", label: "New Movies" },
+  { id: "new-series", label: "New Series" },
+  { id: "acclaimed", label: "Acclaimed Right Now" },
   { id: "netflix-movies", label: "Movies on Netflix" },
   { id: "netflix-series", label: "TV Series on Netflix" },
   ...STREAMING_SERVICES.map((s) => ({ id: `service:${s.slug}`, label: s.name })),

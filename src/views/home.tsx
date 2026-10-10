@@ -12,6 +12,7 @@ import { useNavigate } from "@/hooks/use-navigate";
 import { MovieCard } from "@/components/movie-card";
 import { CardOverflowMenu } from "@/components/card-overflow-menu";
 import { heroPicks, showcase, tmdbImageUrl, withoutAdultTitles } from "@/lib/tmdb";
+import { belongsOnAnimeShelf, withoutAnimeTitles, type TmdbAnimeSignals } from "@/lib/tmdb-anime";
 import { useHideAdult } from "@/hooks/use-hide-adult";
 import {
   mediaKey,
@@ -38,6 +39,8 @@ import { collapseContinueItems } from "@/lib/continue-watching";
 import { PREFERENCES_QUERY_KEY, fetchPreferences } from "@/lib/preferences-client";
 
 const RAIL_CARD_LIMIT = 16;
+/** Raised when the feed's contents change, so browsers do not serve a copy cached before the change. */
+const HOME_FEED_VERSION = 2;
 /** Banner slides: the week's biggest well-reviewed titles. */
 const HERO_COUNT = 6;
 const RAIL_STACK_GAP = 40;
@@ -111,7 +114,7 @@ interface HomeFeed {
  * twenty: from outside the house each wave of six requests cost a round trip.
  */
 async function fetchHomeFeed(): Promise<HomeFeed> {
-  const res = await fetch("/api/home");
+  const res = await fetch(`/api/home?v=${HOME_FEED_VERSION}`);
   if (!res.ok) throw new Error("Could not load the home page");
   return res.json() as Promise<HomeFeed>;
 }
@@ -132,6 +135,24 @@ function isTotalCatalogFailure(catalog: HomeCatalog | undefined): boolean {
 
 
 const TOP_TEN_COUNT = 10;
+
+/** The title "Because you watched…" is built on, as its detail response describes it. */
+interface SeedDetails {
+  recommendations?: { results?: TmdbListItem[] };
+  genres?: { id: number; name?: string }[];
+  original_language?: string;
+  origin_country?: string[];
+  production_countries?: { iso_3166_1?: string }[];
+}
+
+function seedAnimeSignals(seed: SeedDetails): TmdbAnimeSignals {
+  return {
+    genres: seed.genres,
+    originalLanguage: seed.original_language,
+    originCountry: seed.origin_country,
+    productionCountries: seed.production_countries,
+  };
+}
 
 type TrendingEntry = TmdbListItem & { media_type: "movie" | "tv" };
 
@@ -182,15 +203,17 @@ export function HomeView() {
     queryFn: async () => {
       const res = await fetch(`/api/tmdb/${recSeedMediaType}/${recSeed!.tmdbId}`);
       if (!res.ok) throw new Error("Failed to load recommendations");
-      const data = (await res.json()) as { recommendations?: { results?: TmdbListItem[] } };
-      return data.recommendations?.results ?? [];
+      const data = (await res.json()) as SeedDetails;
+      const recommendations = data.recommendations?.results ?? [];
+      // Anime is recommended to someone watching anime, and to nobody else.
+      return belongsOnAnimeShelf(seedAnimeSignals(data)) ? recommendations : withoutAnimeTitles(recommendations);
     },
     enabled: !!recSeed,
     staleTime: 6 * 60 * 60 * 1000,
   });
 
   const feed = useQuery({
-    queryKey: ["home-feed-v1"],
+    queryKey: ["home-feed", HOME_FEED_VERSION],
     queryFn: fetchHomeFeed,
     staleTime: 60 * 60 * 1000,
     gcTime: 12 * 60 * 60 * 1000,
@@ -371,18 +394,6 @@ export function HomeView() {
 
             <TopTenRow title="Top 10 Today" items={heroPool.slice(0, TOP_TEN_COUNT)} />
 
-            {shows("acclaimed") && <LazyRail minHeight={360}>
-              <CatalogRail
-                title="Acclaimed Right Now"
-                sources={[
-                  { path: "discover/movie/acclaimed", mediaType: "movie" },
-                  { path: "discover/tv/acclaimed", mediaType: "tv" },
-                ]}
-                exclude={topTen}
-                showcaseOnly
-              />
-            </LazyRail>}
-
             {shows("trending-movies") && rows?.trendingMovies.length ? (
               <MovieRow title="Trending Movies" viewAllHref="/browse/trending-movies">
                 {rows.trendingMovies.slice(0, RAIL_CARD_LIMIT).map((m) => (
@@ -403,20 +414,33 @@ export function HomeView() {
               </MovieRow>
             ) : null}
 
-            {shows("anime") && <LazyRail minHeight={360}>
+            {shows("new-digital") && <LazyRail minHeight={360}>
               <CatalogRail
-                title="Popular Anime"
-                viewAllHref="/browse/anime-trending"
-                sources={[{ path: "discover/anime/trending", mediaType: "tv" }]}
+                title="New Movies"
+                viewAllHref="/browse/new-digital"
+                sources={[{ path: "discover/movie/new-digital", mediaType: "movie" }]}
+                exclude={topTen}
                 showcaseOnly
               />
             </LazyRail>}
 
-            {shows("new-digital") && <LazyRail minHeight={360}>
+            {shows("new-series") && <LazyRail minHeight={360}>
               <CatalogRail
-                title="New on Digital"
-                viewAllHref="/browse/new-digital"
-                sources={[{ path: "discover/movie/new-digital", mediaType: "movie" }]}
+                title="New Series"
+                viewAllHref="/browse/new-series"
+                sources={[{ path: "discover/tv/new", mediaType: "tv" }]}
+                exclude={topTen}
+              />
+            </LazyRail>}
+
+            {shows("acclaimed") && <LazyRail minHeight={360}>
+              <CatalogRail
+                title="Acclaimed Right Now"
+                sources={[
+                  { path: "discover/movie/acclaimed", mediaType: "movie" },
+                  { path: "discover/tv/acclaimed", mediaType: "tv" },
+                ]}
+                exclude={topTen}
                 showcaseOnly
               />
             </LazyRail>}

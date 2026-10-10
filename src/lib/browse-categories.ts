@@ -81,11 +81,18 @@ const STATIC_CATEGORIES: Record<string, BrowseCategory> = {
   ...serviceCategories(),
   "new-digital": {
     slug: "new-digital",
-    title: "New on Digital",
+    title: "New Movies",
     mediaType: "movie",
     paged: true,
     tmdbPathForPage: (page) =>
       page <= 1 ? "discover/movie/new-digital" : `discover/movie/new-digital?page=${page}`,
+  },
+  "new-series": {
+    slug: "new-series",
+    title: "New Series",
+    mediaType: "tv",
+    paged: true,
+    tmdbPathForPage: (page) => (page <= 1 ? "discover/tv/new" : `discover/tv/new?page=${page}`),
   },
   "trending-movies": {
     slug: "trending-movies",

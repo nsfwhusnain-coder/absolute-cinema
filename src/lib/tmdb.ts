@@ -6,6 +6,7 @@
 import { db } from "@/lib/db";
 import { OPERATOR_TMDB_ENV, OPERATOR_TMDB_SETTING_KEY } from "@/lib/operator-keys";
 import { trimTmdbDetails } from "@/lib/tmdb-detail-trim";
+import { ANIME_SHELF_LANGUAGES } from "@/lib/tmdb-anime";
 
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_TIMEOUT_MS = 10_000;
@@ -369,6 +370,7 @@ export const tmdb = {
       "vote_count.gte": type === "movie" ? 300 : 150,
       sort_by: "popularity.desc",
       include_adult: false,
+      ...NOT_ANIME,
       page,
     });
   },
@@ -469,6 +471,7 @@ export const tmdb = {
       page,
       sort_by: "popularity.desc",
       include_adult: false,
+      ...NOT_ANIME,
     }),
 
   /** Discover titles available on a streaming provider (e.g. Netflix = 8). */
@@ -488,6 +491,7 @@ export const tmdb = {
       "vote_average.gte": PROVIDER_MIN_RATING,
       "vote_count.gte": type === "movie" ? 250 : 120,
       include_adult: false,
+      ...NOT_ANIME,
     }),
 
   /**
@@ -506,17 +510,34 @@ export const tmdb = {
       "vote_average.gte": NEW_RELEASE_MIN_RATING,
       sort_by: "popularity.desc",
       include_adult: false,
+      ...NOT_ANIME,
+      page,
+    });
+  },
+
+  /** Series that premiered in the last few months and have been well received so far. */
+  newSeries: (page = 1) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const since = new Date(Date.now() - NEW_RELEASE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
+    return tmdbFetch<TmdbPaged<TmdbTv>>("/discover/tv", {
+      "first_air_date.gte": since,
+      "first_air_date.lte": today,
+      "vote_count.gte": NEW_SERIES_MIN_VOTES,
+      "vote_average.gte": NEW_RELEASE_MIN_RATING,
+      sort_by: "popularity.desc",
+      include_adult: false,
+      ...NOT_ANIME,
       page,
     });
   },
 
   /**
-   * Japanese animation. `kind`: trending, season (aired in the last few
+   * The Anime section: Japanese animation, with Chinese and Korean animation alongside. `kind`: trending, season (aired in the last few
    * months), top, movies, acclaimed (recent and loved: the Anime page hero),
    * or genre-<TMDB TV genre id>.
    */
   anime: (kind: string, page = 1) => {
-    const base = { with_genres: ANIME_GENRE_ID, with_original_language: "ja", include_adult: false, page };
+    const base = { with_genres: ANIME_GENRE_ID, with_original_language: ANIME_SHELF_LANGUAGES.join("|"), include_adult: false, page };
     const since = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
     if (kind === "movies") {
       return tmdbFetch<TmdbPaged<TmdbMovie>>("/discover/movie", { ...base, sort_by: "popularity.desc", "vote_count.gte": 100 });
@@ -558,8 +579,13 @@ export const tmdb = {
 export const NETFLIX_PROVIDER_ID = 8;
 
 const NEW_RELEASE_WINDOW_DAYS = 120;
-/** TMDB's Animation genre; with original language Japanese it means anime. */
+/** TMDB's Animation genre; with an East Asian original language it is shelved as anime. */
 const ANIME_GENRE_ID = 16;
+/** TMDB's "anime" keyword. Excluding it keeps anime out of general discover lists; it has a section of its own. */
+const ANIME_KEYWORD_ID = 210024;
+const NOT_ANIME = { without_keywords: ANIME_KEYWORD_ID } as const;
+/** A new series has had less time to collect votes than a film on digital release. */
+const NEW_SERIES_MIN_VOTES = 40;
 /** How far back the Movies/Shows "acclaimed now" picks may reach. */
 const ACCLAIMED_WINDOW_DAYS = 540;
 const NEW_RELEASE_MIN_VOTES = 60;

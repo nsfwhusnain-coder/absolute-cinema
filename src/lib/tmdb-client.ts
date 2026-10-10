@@ -11,6 +11,8 @@ export type TmdbListItem = MovieCardData & {
   genre_ids?: number[];
   overview?: string;
   popularity?: number;
+  original_language?: string;
+  origin_country?: string[];
 };
 
 export interface TmdbPagedClient {

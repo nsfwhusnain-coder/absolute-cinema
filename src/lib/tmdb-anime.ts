@@ -65,3 +65,33 @@ export function keywordsFromTmdbAppend(raw: {
   const rows = raw?.keywords ?? raw?.results ?? [];
   return rows.map((row) => row.name ?? "").filter(Boolean);
 }
+
+/**
+ * Where a title is shelved in the catalog. Wider than `isTmdbAnimeTitle`
+ * (which decides how a title is played): Chinese donghua and Korean aeni look
+ * and browse like anime, so they live in the Anime section with it.
+ */
+export const ANIME_SHELF_LANGUAGES = ["ja", "zh", "ko"] as const;
+const ANIME_SHELF_COUNTRIES = new Set(["JP", "CN", "KR", "TW", "HK"]);
+
+export function belongsOnAnimeShelf(signals: TmdbAnimeSignals): boolean {
+  if (isTmdbAnimeTitle(signals)) return true;
+  if (!collectGenreIds(signals).has(TMDB_ANIMATION_GENRE_ID)) return false;
+  const language = (signals.originalLanguage ?? "").trim().toLowerCase();
+  if ((ANIME_SHELF_LANGUAGES as readonly string[]).includes(language)) return true;
+  return originCountries(signals).some((code) => ANIME_SHELF_COUNTRIES.has(code));
+}
+
+/** A title as TMDB's list endpoints return it. */
+export interface TmdbListTitle {
+  genre_ids?: number[];
+  original_language?: string;
+  origin_country?: string[];
+}
+
+/** Anime has its own section; general lists (trending, popular, by genre or service) leave it out. */
+export function withoutAnimeTitles<T extends TmdbListTitle>(items: readonly T[]): T[] {
+  return items.filter(
+    (item) => !belongsOnAnimeShelf({ genreIds: item.genre_ids, originalLanguage: item.original_language, originCountry: item.origin_country })
+  );
+}
