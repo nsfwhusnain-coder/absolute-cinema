@@ -12,6 +12,8 @@
  * SeekHead positions are relative to the Segment's data start.
  */
 
+import { parseDolbyVisionRecord, type DolbyVisionInfo } from "./dolby-vision";
+
 export const EBML_ID = 0x1a45dfa3;
 export const SEGMENT_ID = 0x18538067;
 export const SEEK_HEAD_ID = 0x114d9b74;
@@ -43,6 +45,9 @@ export const VIDEO_ID = 0xe0;
 export const COLOUR_ID = 0x55b0;
 export const TRANSFER_CHARACTERISTICS_ID = 0x55ba;
 export const CODEC_PRIVATE_ID = 0x63a2;
+export const BLOCK_ADDITION_MAPPING_ID = 0x41e4;
+export const BLOCK_ADD_ID_TYPE_ID = 0x41e7;
+export const BLOCK_ADD_ID_EXTRA_DATA_ID = 0x41ed;
 
 /** ITU-T H.273 transfer characteristics that mean HDR. */
 const TRANSFER_PQ = 16;
@@ -55,6 +60,9 @@ export function dynamicRangeFromTransfer(transfer: number | null): DynamicRange 
   if (transfer === TRANSFER_HLG) return "HLG";
   return "SDR";
 }
+
+/** BlockAddIDType values that carry a Dolby Vision configuration record: "dvcC" and "dvvC". */
+const DOLBY_VISION_MAPPING_TYPES = new Set([0x64766343, 0x64767643]);
 
 const VIDEO_TRACK_TYPE = 1;
 const AUDIO_TRACK_TYPE = 2;
@@ -185,6 +193,8 @@ export interface SegmentLayout {
   /** Codec ID of the video track, e.g. V_MPEGH/ISO/HEVC. */
   videoCodecId: string | null;
   dynamicRange: DynamicRange;
+  /** Set when the video track carries a Dolby Vision configuration. */
+  dolbyVision: DolbyVisionInfo | null;
   audioTracks: MkvAudioTrack[];
   subtitleTracks: MkvSubtitleTrack[];
   /** The video is 10-bit/4:2:2/4:4:4 H.264, which no browser decodes. */
@@ -211,6 +221,7 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
     videoTrack: null,
     videoCodecId: null,
     dynamicRange: "SDR",
+    dolbyVision: null,
     audioTracks: [],
     subtitleTracks: [],
     videoUndecodable: false,
@@ -254,6 +265,7 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
         let channels: number | null = null;
         let transfer: number | null = null;
         let avcProfile: number | null = null;
+        let dolbyVision: DolbyVisionInfo | null = null;
         for (const field of children(head, entry.dataStart, entry.dataStart + entry.size)) {
           if (field.id === TRACK_NUMBER_ID) number = readUint(head, field);
           else if (field.id === TRACK_TYPE_ID) type = readUint(head, field);
@@ -264,6 +276,7 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
           else if (field.id === FLAG_DEFAULT_ID) isDefault = readUint(head, field) === 1;
           else if (field.id === FLAG_FORCED_ID) isForced = readUint(head, field) === 1;
           else if (field.id === CODEC_PRIVATE_ID && field.size > 1) avcProfile = head[field.dataStart + 1] ?? null;
+          else if (field.id === BLOCK_ADDITION_MAPPING_ID) dolbyVision = readDolbyVisionMapping(head, field) ?? dolbyVision;
           else if (field.id === VIDEO_ID) {
             for (const video of children(head, field.dataStart, field.dataStart + field.size)) {
               if (video.id !== COLOUR_ID) continue;
@@ -281,6 +294,7 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
           layout.videoTrack = number;
           layout.videoCodecId = codecId || null;
           layout.dynamicRange = dynamicRangeFromTransfer(transfer);
+          layout.dolbyVision = dolbyVision;
           layout.videoUndecodable =
             codecId === "V_MPEG4/ISO/AVC" && avcProfile !== null && UNDECODABLE_AVC_PROFILES.has(avcProfile);
         }
@@ -315,6 +329,17 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
     layout.durationS = (rawDuration * layout.timestampScaleNs) / NS_PER_SECOND;
   }
   return layout;
+}
+
+/** The Dolby Vision configuration inside a BlockAdditionMapping, or null when it maps something else. */
+function readDolbyVisionMapping(head: Uint8Array, mapping: EbmlElement): DolbyVisionInfo | null {
+  let type = 0;
+  let record: Uint8Array | null = null;
+  for (const field of children(head, mapping.dataStart, mapping.dataStart + mapping.size)) {
+    if (field.id === BLOCK_ADD_ID_TYPE_ID) type = readUint(head, field);
+    if (field.id === BLOCK_ADD_ID_EXTRA_DATA_ID) record = head.subarray(field.dataStart, field.dataStart + field.size);
+  }
+  return record && DOLBY_VISION_MAPPING_TYPES.has(type) ? parseDolbyVisionRecord(record) : null;
 }
 
 /** Keyframe times (seconds, ascending, de-duplicated) for one track from a Cues payload. */
@@ -357,6 +382,7 @@ export interface KeyframeIndex {
   keyframes: number[];
   videoCodecId: string | null;
   dynamicRange: DynamicRange;
+  dolbyVision: DolbyVisionInfo | null;
   audioTracks: MkvAudioTrack[];
   subtitleTracks: MkvSubtitleTrack[];
   videoUndecodable: boolean;
@@ -395,6 +421,7 @@ export async function readMkvKeyframes(fetchRange: RangeFetcher): Promise<Keyfra
     keyframes,
     videoCodecId: layout.videoCodecId,
     dynamicRange: layout.dynamicRange,
+    dolbyVision: layout.dolbyVision,
     audioTracks: layout.audioTracks,
     subtitleTracks: layout.subtitleTracks,
     videoUndecodable: layout.videoUndecodable,

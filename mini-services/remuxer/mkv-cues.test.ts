@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
+  BLOCK_ADDITION_MAPPING_ID,
+  BLOCK_ADD_ID_EXTRA_DATA_ID,
+  BLOCK_ADD_ID_TYPE_ID,
   CLUSTER_ID,
   CODEC_ID_ID,
   CUES_ID,
@@ -56,10 +59,10 @@ const float64 = (value: number) => {
 };
 
 /** A minimal MKV: header, SeekHead → Cues, Info, Tracks (video + 2 audio), a Cluster, Cues. */
-function buildMkv(cueTimesMs: number[]): Uint8Array {
+function buildMkv(cueTimesMs: number[], videoExtras: number[] = []): Uint8Array {
   const info = el(INFO_ID, [...el(TIMESTAMP_SCALE_ID, uint(1_000_000)), ...el(DURATION_ID, float64(60_000))]);
   const tracks = el(TRACKS_ID, [
-    ...el(TRACK_ENTRY_ID, [...el(TRACK_NUMBER_ID, [1]), ...el(TRACK_TYPE_ID, [1]), ...el(CODEC_ID_ID, str("V_MPEGH/ISO/HEVC"))]),
+    ...el(TRACK_ENTRY_ID, [...el(TRACK_NUMBER_ID, [1]), ...el(TRACK_TYPE_ID, [1]), ...el(CODEC_ID_ID, str("V_MPEGH/ISO/HEVC")), ...videoExtras]),
     ...el(TRACK_ENTRY_ID, [...el(TRACK_NUMBER_ID, [2]), ...el(TRACK_TYPE_ID, [2]), ...el(CODEC_ID_ID, str("A_EAC3")), ...el(LANGUAGE_ID, str("spa"))]),
     ...el(TRACK_ENTRY_ID, [
       ...el(TRACK_NUMBER_ID, [3]),
@@ -120,6 +123,19 @@ describe("Matroska index", () => {
     expect(index?.keyframes).toEqual([0, 3.42, 6.84, 10.302]);
     expect(index?.durationS).toBe(60);
     expect(requests.length).toBe(2);
+  });
+
+  it("reads a Dolby Vision configuration from the video track's block addition mapping", () => {
+    // Profile 5, level 6, no compatible base layer, as a "dvcC" mapping.
+    const record = [1, 0, 0x0a, 0x35, 0x00, ...new Array<number>(19).fill(0)];
+    const mapping = el(BLOCK_ADDITION_MAPPING_ID, [...el(BLOCK_ADD_ID_TYPE_ID, str("dvcC")), ...el(BLOCK_ADD_ID_EXTRA_DATA_ID, record)]);
+    expect(parseSegmentLayout(buildMkv([0, 1000], mapping))!.dolbyVision).toEqual({ profile: 5, level: 6, baseLayer: "none" });
+    expect(parseSegmentLayout(file)!.dolbyVision).toBeNull();
+  });
+
+  it("ignores block addition mappings that are not Dolby Vision", () => {
+    const mapping = el(BLOCK_ADDITION_MAPPING_ID, [...el(BLOCK_ADD_ID_TYPE_ID, str("hvcE")), ...el(BLOCK_ADD_ID_EXTRA_DATA_ID, new Array<number>(24).fill(1))]);
+    expect(parseSegmentLayout(buildMkv([0, 1000], mapping))!.dolbyVision).toBeNull();
   });
 
   it("returns null for data that is not Matroska", async () => {

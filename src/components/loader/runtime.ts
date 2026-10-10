@@ -35,6 +35,10 @@ const FRAME_SAMPLE = 45;
 const INTRO_S = 2.2;
 const EXIT_S = 0.9;
 const PALETTE_BLEND_S = 1.4;
+/** Scene time drawn before the canvas is worth showing: its light has risen from black by then. */
+const READY_AFTER_S = 0.9;
+/** Shaders that have not reported in by now are drawn anyway rather than waited on forever. */
+const COMPILE_WAIT_MS = 4000;
 
 export interface LoaderHandle {
   setPalette(palette: LoaderPalette): void;
@@ -49,8 +53,13 @@ export interface LoaderOptions {
   mode: CurrentsMode;
   /** 1 on capable devices; lower trims particle counts and resolution. */
   quality: number;
+  /** The scene is drawing and bright enough to show. */
+  onReady?(): void;
+  /** The GPU gave up (context lost, a shader failed): the scene is gone for good. */
+  onLost?(): void;
 }
 
+/** Starts the scene, or returns null where the device has no working WebGL for it (the caller keeps its CSS backdrop). */
 export function startLoader(canvas: HTMLCanvasElement, options: LoaderOptions): LoaderHandle | null {
   let renderer: THREE.WebGLRenderer;
   try {
@@ -58,6 +67,16 @@ export function startLoader(canvas: HTMLCanvasElement, options: LoaderOptions): 
   } catch {
     return null;
   }
+  try {
+    return runScene(renderer, canvas, options);
+  } catch {
+    // A context that arrives already lost fails somewhere in set-up rather than at creation.
+    renderer.dispose();
+    return null;
+  }
+}
+
+function runScene(renderer: THREE.WebGLRenderer, canvas: HTMLCanvasElement, options: LoaderOptions): LoaderHandle {
   // Colours are authored as sRGB values and written straight out.
   renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
   let scale = BASE_RENDER_SCALE * (options.quality < 1 ? 0.75 : 1);
@@ -116,12 +135,17 @@ export function startLoader(canvas: HTMLCanvasElement, options: LoaderOptions): 
   const timer = new THREE.Timer();
   let frameMs = 0;
   let frames = 0;
+  let ready = false;
   const frame = () => {
     timer.update();
     const delta = Math.min(timer.getDelta(), 0.1);
     uniforms.uTime.value += delta;
     active.update(uniforms.uTime.value, delta);
     film?.render(uniforms.uTime.value);
+    if (!ready && uniforms.uTime.value >= READY_AFTER_S) {
+      ready = true;
+      options.onReady?.();
+    }
     // Adaptive quality: if the device is struggling, draw fewer pixels.
     frameMs += delta * 1000;
     if (++frames >= FRAME_SAMPLE) {
@@ -146,24 +170,27 @@ export function startLoader(canvas: HTMLCanvasElement, options: LoaderOptions): 
     timer.update();
     gsap.to(uniforms.uIntensity, { value: 1, duration: INTRO_S, ease: "power2.out" });
     active.evolve();
-    if (!document.hidden) renderer.setAnimationLoop(frame);
+    // Not gated on document.hidden: the browser already holds animation frames
+    // back for a hidden page, and a home-screen web app on iOS can report
+    // "hidden" after returning from the background, which left the canvas blank.
+    renderer.setAnimationLoop(frame);
   };
+  // A context the GPU process took back (memory pressure next to a 4K decode,
+  // common on tablets) never draws again. Stop, and let the page show its own backdrop.
+  const lose = () => {
+    if (disposed) return;
+    renderer.setAnimationLoop(null);
+    options.onLost?.();
+  };
+  canvas.addEventListener("webglcontextlost", lose);
+  renderer.debug.onShaderError = lose;
+  let compileTimer: ReturnType<typeof setTimeout> | null = null;
   if (typeof renderer.compileAsync === "function") {
     renderer.compileAsync(scene, camera).then(begin, begin);
+    compileTimer = setTimeout(begin, COMPILE_WAIT_MS);
   } else {
     begin();
   }
-
-  const onVisibility = () => {
-    if (!running) return;
-    if (document.hidden) {
-      renderer.setAnimationLoop(null);
-    } else {
-      timer.update();
-      renderer.setAnimationLoop(frame);
-    }
-  };
-  document.addEventListener("visibilitychange", onVisibility);
 
   return {
     setPalette(palette) {
@@ -187,7 +214,8 @@ export function startLoader(canvas: HTMLCanvasElement, options: LoaderOptions): 
       if (disposed) return;
       disposed = true;
       renderer.setAnimationLoop(null);
-      document.removeEventListener("visibilitychange", onVisibility);
+      if (compileTimer) clearTimeout(compileTimer);
+      canvas.removeEventListener("webglcontextlost", lose);
       observer.disconnect();
       gsap.killTweensOf([uniforms.uIntensity, uniforms.uBg.value, uniforms.uMain.value, uniforms.uAccent.value, uniforms.uHighlight.value]);
       active.dispose();

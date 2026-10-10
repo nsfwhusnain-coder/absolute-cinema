@@ -2,12 +2,14 @@
 
 import { create } from "zustand";
 import type { Phase } from "@/lib/playback/orchestrator";
+import { parseHdrOutput, type HdrOutput } from "@/lib/playback/dynamic-range";
 import type { EngineAudioTrack, QualityLevel } from "./engine";
 
 export const PLAYBACK_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
 
 const VOLUME_KEY = "absolute-cinema:player-volume";
 const FIT_KEY = "absolute-cinema:player-fit";
+const HDR_KEY = "absolute-cinema:player-hdr";
 
 /** How the picture fills the screen: letterboxed, cropped to fill, or stretched. */
 export type VideoFit = "contain" | "cover" | "fill";
@@ -23,6 +25,14 @@ function readFit(): VideoFit {
     return value === "cover" || value === "fill" ? value : "contain";
   } catch {
     return "contain";
+  }
+}
+
+function readHdrOutput(): HdrOutput {
+  try {
+    return parseHdrOutput(window.localStorage.getItem(HDR_KEY));
+  } catch {
+    return parseHdrOutput(null);
   }
 }
 
@@ -101,6 +111,8 @@ export interface PlayerState {
   remuxAudio: { tracks: RemuxAudioTrack[]; active: number | null } | null;
   cueText: string;
   videoFit: VideoFit;
+  /** HDR video shown as HDR, or kept to the standard range (this device). */
+  hdrOutput: HdrOutput;
   /** User's chosen maximum/target height; "auto" lets the player decide. */
   qualityChoice: "auto" | number;
   notice: PlayerNotice | null;
@@ -150,11 +162,13 @@ export const usePlayerState = create<PlayerState>((set) => ({
   ...initial,
   volume: typeof window === "undefined" ? 1 : readVolume(),
   videoFit: typeof window === "undefined" ? "contain" : readFit(),
+  hdrOutput: typeof window === "undefined" ? parseHdrOutput(null) : readHdrOutput(),
   muted: false,
   set: (partial) => {
     try {
       if (partial.volume !== undefined) window.localStorage.setItem(VOLUME_KEY, String(partial.volume));
       if (partial.videoFit !== undefined) window.localStorage.setItem(FIT_KEY, partial.videoFit);
+      if (partial.hdrOutput !== undefined) window.localStorage.setItem(HDR_KEY, partial.hdrOutput);
     } catch {
       /* private mode: the change still applies to this session */
     }

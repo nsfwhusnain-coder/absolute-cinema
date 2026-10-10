@@ -20,6 +20,7 @@ import {
   type SelectableMediaTrack,
 } from "../../src/lib/playback/track-selection";
 import { httpRangeFetcher, readMkvKeyframes, type MkvAudioTrack, type MkvSubtitleTrack } from "./mkv-cues";
+import { deliveredRange, dolbyVisionDelivery, type DeliveredRange } from "./dolby-vision";
 import { VttStreamParser, type VttCue } from "./vtt-stream";
 import type { ProxySource } from "./source-proxy";
 import { firstVideoDecodeTime, readVideoTrackInfo, stripEditLists, type VideoTrackInfo } from "./mp4-boxes";
@@ -103,6 +104,8 @@ interface Session {
   audioIndex: number | null;
   subtitles: Array<{ track: MkvSubtitleTrack; cues: Map<string, VttCue> }>;
   hevc: boolean;
+  /** Delivered as Dolby Vision (its configuration box written, sample entry dvh1). */
+  dolbyVision: boolean;
   init: Uint8Array | null;
   video: VideoTrackInfo | null;
   runs: Run[];
@@ -117,13 +120,21 @@ export interface VodSessionInfo {
   durationS: number;
   segments: number;
   videoCodecId: string | null;
-  dynamicRange: "SDR" | "PQ" | "HLG";
+  /** What the viewer receives: SDR, PQ (HDR10), HLG or DV (Dolby Vision). */
+  dynamicRange: DeliveredRange;
   audio: { language: string | null; name: string | null; channels: number | null; codecId: string } | null;
   /** Position of `audio` in `audioTracks`. */
   audioIndex: number | null;
   audioTracks: Array<{ index: number; language: string | null; name: string | null; channels: number | null; codecId: string }>;
   subtitles: Array<{ index: number; language: string | null; name: string | null; isDefault: boolean; isForced: boolean }>;
 }
+
+/** What the viewer's browser and screen can do beyond the common baseline. */
+export interface VodViewer {
+  decodesDolbyVision: boolean;
+}
+
+const BASELINE_VIEWER: VodViewer = { decodesDolbyVision: false };
 
 /** Automatic audio choice, or an explicit track the viewer picked. */
 export interface VodAudioRequest extends AudioTrackSelection {
@@ -147,10 +158,18 @@ function log(message: string): void {
   console.log(`[vod] ${message}`);
 }
 
-function sessionId(url: string, audio: VodAudioRequest): string {
+function sessionId(url: string, audio: VodAudioRequest, viewer: VodViewer): string {
   return createHash("sha256")
     .update(
-      [VOD_VERSION, url, audio.preference, audio.originalLanguage ?? "", audio.preferredLanguage ?? "", audio.audioIndex ?? ""].join("|")
+      [
+        VOD_VERSION,
+        url,
+        audio.preference,
+        audio.originalLanguage ?? "",
+        audio.preferredLanguage ?? "",
+        audio.audioIndex ?? "",
+        viewer.decodesDolbyVision ? "dv" : "",
+      ].join("|")
     )
     .digest("hex")
     .slice(0, 24);
@@ -176,14 +195,15 @@ export async function openVodSession(
   cacheRoot: string,
   url: string,
   audio: VodAudioRequest,
-  startAtS = 0
+  startAtS = 0,
+  viewer: VodViewer = BASELINE_VIEWER
 ): Promise<VodSessionInfo> {
-  const id = sessionId(url, audio);
+  const id = sessionId(url, audio, viewer);
   let session = sessions.get(id);
   if (!session) {
     let pending = opening.get(id);
     if (!pending) {
-      pending = createSession(cacheRoot, id, url, audio).finally(() => opening.delete(id));
+      pending = createSession(cacheRoot, id, url, audio, viewer).finally(() => opening.delete(id));
       opening.set(id, pending);
     }
     session = await pending;
@@ -197,13 +217,16 @@ export async function openVodSession(
   return session.info;
 }
 
-async function createSession(cacheRoot: string, id: string, url: string, audio: VodAudioRequest): Promise<Session> {
+async function createSession(cacheRoot: string, id: string, url: string, audio: VodAudioRequest, viewer: VodViewer): Promise<Session> {
   const fetcher = httpRangeFetcher(url, RANGE_TIMEOUT_MS);
   const index = await readMkvKeyframes(fetcher).catch((err: unknown) => {
     throw new VodError(`index read failed: ${err instanceof Error ? err.message : String(err)}`, 502);
   });
   if (!index) throw new VodError("source has no keyframe index", 415);
   if (index.videoUndecodable) throw new VodError("10-bit H.264 video cannot play in browsers", 415);
+  const delivery = dolbyVisionDelivery(index.dolbyVision, viewer.decodesDolbyVision);
+  if (delivery === "unplayable") throw new VodError("Dolby Vision without an HDR10 layer needs a Dolby Vision screen", 415);
+  const asDolbyVision = delivery === "dolby-vision";
   const totalSize = fetcher.size();
   if (!totalSize) throw new VodError("source size unknown", 502);
   const audioTrack = chooseAudio(index.audioTracks, audio);
@@ -223,6 +246,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
     audioIndex: audioTrack?.audioIndex ?? null,
     subtitles: textSubtitles.map((track) => ({ track, cues: new Map<string, VttCue>() })),
     hevc: /HEVC/i.test(index.videoCodecId ?? ""),
+    dolbyVision: asDolbyVision,
     init: null,
     video: null,
     runs: [],
@@ -234,7 +258,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
       durationS: index.durationS,
       segments: bounds.length - 1,
       videoCodecId: index.videoCodecId,
-      dynamicRange: index.dynamicRange,
+      dynamicRange: deliveredRange(index.dynamicRange, index.dolbyVision, asDolbyVision),
       audio: audioTrack
         ? { language: audioTrack.language, name: audioTrack.name, channels: audioTrack.channels, codecId: audioTrack.codecId }
         : null,
@@ -256,7 +280,8 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
     },
   };
   sessions.set(id, session);
-  log(`open ${id}: ${index.durationS.toFixed(0)}s, ${bounds.length - 1} segments, ${index.keyframes.length} keyframes, audio #${session.audioIndex}`);
+  const range = index.dolbyVision ? `Dolby Vision profile ${index.dolbyVision.profile} as ${session.info.dynamicRange}` : session.info.dynamicRange;
+  log(`open ${id}: ${index.durationS.toFixed(0)}s, ${bounds.length - 1} segments, ${index.keyframes.length} keyframes, audio #${session.audioIndex}, ${range}`);
   return session;
 }
 
@@ -277,8 +302,13 @@ function ffmpegArgs(session: Session, startTime: number): string[] {
     args.push("-map", `0:a:${session.audioIndex}`, "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ac", "2");
   }
   args.push("-c:v", "copy");
+  // Dolby Vision is only recognised with its configuration box, which ffmpeg
+  // writes under -strict unofficial, and a dvh1 sample entry. Without them
+  // the stream is treated as plain HEVC, right for a file with an HDR10
+  // layer and badly wrong (green and purple) for one without.
+  if (session.dolbyVision) args.push("-strict", "unofficial", "-tag:v", "dvh1");
   // Apple players and Safari MSE only accept HEVC tagged hvc1.
-  if (session.hevc) args.push("-tag:v", "hvc1");
+  else if (session.hevc) args.push("-tag:v", "hvc1");
   args.push(
     "-copyts",
     "-map_metadata", "-1",

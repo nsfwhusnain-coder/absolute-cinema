@@ -5,8 +5,8 @@
  * Internal only (127.0.0.1:3040); the Next.js app authenticates viewers and
  * proxies these routes.
  *
- *   GET /vod/open?u=<url>&audioPreference=&originalLanguage=&audioLanguage=&audioIndex=&startAt=
- *        → { id, durationS, segments, videoCodecId, audio, audioIndex, audioTracks, subtitles }
+ *   GET /vod/open?u=<url>&audioPreference=&originalLanguage=&audioLanguage=&audioIndex=&startAt=&dolbyVision=
+ *        → { id, durationS, segments, videoCodecId, dynamicRange, audio, audioIndex, audioTracks, subtitles }
  *   GET /vod/<id>/index.m3u8   complete VOD playlist
  *   GET /vod/<id>/init.mp4     initialisation segment
  *   GET /vod/<id>/<n>.m4s      media segment n (produced on demand)
@@ -80,7 +80,8 @@ const server = createServer(async (req, res) => {
       const input = url.searchParams.get("u") ?? "";
       if (!/^https?:\/\//.test(input)) return send(res, 400, JSON.stringify({ error: "bad url" }), "application/json");
       const startAt = Math.min(MAX_START_AT_S, Math.max(0, Number(url.searchParams.get("startAt")) || 0));
-      const info = await openVodSession(CACHE_DIR, input, parseAudio(url), startAt);
+      const viewer = { decodesDolbyVision: url.searchParams.get("dolbyVision") === "1" };
+      const info = await openVodSession(CACHE_DIR, input, parseAudio(url), startAt, viewer);
       return send(res, 200, JSON.stringify(info), "application/json");
     }
     const src = url.pathname.match(/^\/src\/([a-f0-9]{24})$/);

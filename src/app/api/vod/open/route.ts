@@ -10,7 +10,7 @@ const LANGUAGE = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/;
 
 /**
  * GET /api/vod/open?type=&id=&sourceId=&ticket=&season=&episode=&startAt=
- *                  &audioPreference=&originalLanguage=&audioLanguage=
+ *                  &audioPreference=&originalLanguage=&audioLanguage=&dolbyVision=
  *
  * Opens a seekable video-on-demand remux of an MKV source and returns the
  * playlist URL plus the title's real duration.
@@ -53,6 +53,8 @@ export async function GET(req: NextRequest) {
   }
   const audioIndex = optionalInt("audioIndex");
   if (audioIndex !== undefined && Number.isInteger(audioIndex) && audioIndex >= 0) worker.set("audioIndex", String(audioIndex));
+  // The viewer's browser said it decodes Dolby Vision.
+  if (params.get("dolbyVision") === "1") worker.set("dolbyVision", "1");
 
   const res = await fetch(`${REMUXER_URL}/vod/open?${worker}`, { signal: AbortSignal.timeout(OPEN_TIMEOUT_MS) }).catch(
     () => null

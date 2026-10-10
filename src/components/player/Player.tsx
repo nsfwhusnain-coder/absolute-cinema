@@ -22,7 +22,7 @@ import type { PlaybackSource } from "@/lib/playback/types";
 import type { PlaybackQualityPreference, SubtitlePreference } from "@/lib/profile-preferences";
 import { sourceDelivery, sourceMaxHeight } from "@/lib/playback/source-quality";
 import { useHoverPreview } from "@/hooks/use-hover-preview";
-import { hdrSdrDisplayMap } from "@/lib/playback/hdr-sdr-map";
+import { dynamicRangeBadge, dynamicRangeLimit, hdrOutputControllable, type HdrOutput } from "@/lib/playback/dynamic-range";
 import { buildDownloadOptions, downloadDetailLine, downloadFilename, downloadSizeLabel } from "@/lib/playback/download-options";
 import { cn } from "@/lib/utils";
 import { usePlayerState, PLAYBACK_SPEEDS, VIDEO_FITS, type PlayerState } from "./store";
@@ -79,6 +79,12 @@ const SKIP_TAIL_S = 2;
 const SKIP_LENGTH_TOLERANCE_S = 20;
 /** Seconds buffered that the start-up progress bar counts as full. */
 const START_BUFFER_S = 4;
+
+/** Offered under Picture on screens that show HDR; remembered on this device. */
+const HDR_OUTPUTS: { value: HdrOutput; label: string; detail: string }[] = [
+  { value: "on", label: "On", detail: "Brighter highlights on HDR screens" },
+  { value: "off", label: "Off", detail: "Standard range: deeper blacks on LCD screens" },
+];
 
 /** "sleep" is the sleep menu opened from its own button; "sleep-settings" the same menu reached through Settings. */
 type Panel =
@@ -218,13 +224,11 @@ export function Player(props: PlayerProps) {
   const sleepActive = useSleepTimer((s) => s.timer.setting.kind !== "off");
   const mediaType = props.title.mediaType;
   const hasNextEpisode = Boolean(props.tv?.onNextEpisode);
-  // HDR on an SDR display looks crushed and dim; lift shadows unless the screen is HDR.
-  const videoFilter = useMemo(() => {
-    if (state.dynamicRange === "SDR" || typeof window === "undefined") return undefined;
-    if (window.matchMedia?.("(dynamic-range: high)").matches) return undefined;
-    const filter = hdrSdrDisplayMap({ dynamicRange: state.dynamicRange }).cssFilter;
-    return filter === "none" ? undefined : filter;
-  }, [state.dynamicRange]);
+  // The picture is never filtered: the browser maps HDR to the screen, and
+  // the only say the player has is whether HDR is held to the standard range.
+  const [hdrControllable] = useState(hdrOutputControllable);
+  const rangeLimit = hdrControllable ? dynamicRangeLimit(state.hdrOutput) : undefined;
+  const rangeBadge = dynamicRangeBadge(state.dynamicRange, hdrControllable ? state.hdrOutput : "on");
 
   // Controls auto-hide while playing.
   const poke = useCallback(() => {
@@ -506,7 +510,7 @@ export function Player(props: PlayerProps) {
           "main-player absolute inset-0 h-full w-full bg-black",
           state.videoFit === "cover" ? "object-cover" : state.videoFit === "fill" ? "object-fill" : "object-contain"
         )}
-        style={videoFilter ? { filter: videoFilter } : undefined}
+        style={rangeLimit ? ({ dynamicRangeLimit: rangeLimit } as React.CSSProperties) : undefined}
         playsInline
         preload="auto"
         x-webkit-airplay="allow"
@@ -572,6 +576,7 @@ export function Player(props: PlayerProps) {
           {nowHeight > 0 && (
             <div className={cn("glass-clear hidden items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold sm:flex", fade(controlsShown))}>
               <Sparkles className="h-3.5 w-3.5" /> {qualityLabel(nowHeight)}
+              {rangeBadge && <span className="font-medium text-white/70">{rangeBadge}</span>}
             </div>
           )}
         </div>
@@ -780,6 +785,19 @@ export function Player(props: PlayerProps) {
               {VIDEO_FITS.map((fit) => (
                 <MenuItem key={fit.value} label={fit.label} detail={fit.detail} selected={state.videoFit === fit.value} onClick={() => usePlayerState.getState().set({ videoFit: fit.value })} />
               ))}
+              {hdrControllable && (
+                <MenuSection label="HDR">
+                  {HDR_OUTPUTS.map((option) => (
+                    <MenuItem
+                      key={option.value}
+                      label={option.label}
+                      detail={option.detail}
+                      selected={state.hdrOutput === option.value}
+                      onClick={() => usePlayerState.getState().set({ hdrOutput: option.value })}
+                    />
+                  ))}
+                </MenuSection>
+              )}
             </PlayerMenu>
           )}
           {panel === "download" && (

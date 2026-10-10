@@ -2,6 +2,7 @@ import type { PlaybackSource } from "@/lib/playback/types";
 import { decidePlayback } from "@/lib/playback/decide-playback";
 import { isSourcePlayableHere, sourceDelivery, sourceMaxHeight } from "@/lib/playback/source-quality";
 import { preferNativeHls } from "@/lib/playback/player-engine";
+import { supportsDolbyVision } from "@/lib/playback/decode-capability";
 import type { Ranker } from "@/lib/playback/orchestrator";
 import type { Playable } from "./engine";
 import type { RemuxAudioTrack, StreamSubtitleTrack } from "./store";
@@ -110,7 +111,7 @@ export interface ResolvedPlayable {
   playable: Playable;
   /** True length when the server knows it (remux). */
   durationS?: number;
-  /** SDR, PQ (HDR10 / Dolby Vision) or HLG when the server read it from the file. */
+  /** SDR, PQ (HDR10), HLG or DV (Dolby Vision) when the server read it from the file. */
   dynamicRange?: string;
   remux: boolean;
   /** Subtitle and audio tracks inside a remuxed file. */
@@ -148,6 +149,7 @@ export async function resolvePlayable(
     if (title.season != null) params.set("season", String(title.season));
     if (title.episode != null) params.set("episode", String(title.episode));
     if (title.originalLanguage) params.set("originalLanguage", title.originalLanguage);
+    if (supportsDolbyVision()) params.set("dolbyVision", "1");
     const timeout = timeoutSignal(VOD_OPEN_TIMEOUT_MS, signal);
     const res = await fetch(`/api/vod/open?${params}`, { signal: timeout.signal }).finally(timeout.done);
     const body = (await res.json().catch(() => ({}))) as {

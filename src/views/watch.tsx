@@ -23,6 +23,8 @@ import { PREFERENCES_QUERY_KEY, fetchPreferences } from "@/lib/preferences-clien
 import type { SkipSegment } from "@/lib/playback/skip-times";
 import { fetchLoaderLook, loaderLookQueryKey } from "@/lib/loader/look-client";
 import { preloadLoaderEngine } from "@/components/loader/cinematic-loader";
+import { LoaderBackdrop, NEUTRAL_PALETTE } from "@/components/loader/loader-backdrop";
+import type { LoaderPalette } from "@/lib/loader/palette";
 import { resolveNextEpisode, type AiredEpisode, type SeasonMeta } from "@/lib/playback/next-episode";
 import { tvSeasonQuery } from "@/lib/tv-season-query";
 import { resumeTvEpisode } from "@/lib/continue-watching";
@@ -637,7 +639,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
       className="relative m-0 h-full w-full max-w-none overflow-hidden bg-black p-0"
     >
       {!mounted ? (
-        <WatchBoot />
+        <WatchBoot palette={loaderLook?.palette} />
       ) : !session ? (
         <div className="flex h-full flex-col items-center justify-center gap-3 text-white/70">
           <User className="h-10 w-10 text-white" />
@@ -763,20 +765,21 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
           )}
         </div>
       ) : (
-        <WatchBoot />
+        <WatchBoot palette={loaderLook?.palette} />
       )}
     </div>
   );
 }
 
 /**
- * The player's black stage and hairline, shown for the few hundred milliseconds
- * before the player itself mounts, so a spinner or blank page never stands in
- * for the loading screen.
+ * The loading screen's backdrop and hairline, shown for the few hundred
+ * milliseconds before the player itself mounts. The player's loader continues
+ * the same backdrop mid-drift, so the two read as one screen.
  */
-function WatchBoot() {
+function WatchBoot({ palette }: { palette?: LoaderPalette }) {
   return (
     <div className="absolute inset-0 bg-black" aria-busy="true" aria-label="Loading">
+      <LoaderBackdrop palette={palette ?? NEUTRAL_PALETTE} />
       <div className="absolute inset-x-0 bottom-[9vh] flex justify-center">
         <div className="h-px w-40 overflow-hidden bg-white/10 sm:w-56" aria-hidden>
           <div className="loader-hairline h-full w-1/3 bg-white/70" />

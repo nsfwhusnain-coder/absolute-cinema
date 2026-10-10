@@ -30,6 +30,12 @@ export const AV1_PROBE_TYPES: readonly string[] = [
   'video/mp4; codecs="av01"',
 ];
 
+/** Dolby Vision profile 5 (the one with no HDR10 layer to fall back on), in both sample-entry spellings. */
+export const DOLBY_VISION_PROBE_TYPES: readonly string[] = [
+  'video/mp4; codecs="dvh1.05.06"',
+  'video/mp4; codecs="dvhe.05.06"',
+];
+
 export interface DecodeSupport {
   /** Any transport reports this codec as decodable. */
   supported: boolean;
@@ -129,6 +135,11 @@ export function supportsHevc(): boolean {
 
 export function supportsAv1(): boolean {
   return av1Support().supported;
+}
+
+/** True where the browser decodes Dolby Vision itself (Safari on Apple screens that support it). */
+export function supportsDolbyVision(): boolean {
+  return probeDecodeSync(DOLBY_VISION_PROBE_TYPES).supported;
 }
 
 interface DecodingInfo {

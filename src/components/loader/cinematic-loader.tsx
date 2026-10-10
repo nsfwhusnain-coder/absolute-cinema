@@ -5,6 +5,7 @@ import type { LoaderPalette } from "@/lib/loader/palette";
 import { currentsMode, pickScene, readSceneOverride, type CurrentsMode, type LoaderSceneId } from "@/lib/loader/select";
 import { cn } from "@/lib/utils";
 import { SCENE_PALETTES } from "./scenes/common";
+import { LoaderBackdrop } from "./loader-backdrop";
 import type { LoaderHandle } from "./runtime";
 
 /** How long to wait for a title's genres before choosing a scene without them. */
@@ -12,6 +13,8 @@ const LOOK_WAIT_MS = 700;
 /** Idle time the browser is given before the scene engine is fetched in the background. */
 const WARM_IDLE_TIMEOUT_MS = 5000;
 const WARM_FALLBACK_DELAY_MS = 2500;
+/** The GPU scene fades in over the backdrop, and the loader lingers this long when leaving without one. */
+const SCENE_FADE_MS = 900;
 
 /** What the loader needs about a title: its colours and genres. */
 export interface LoaderLook {
@@ -22,7 +25,8 @@ export interface LoaderLook {
 /** Warm the engine and this title's colours before Play, so the loader appears at once. */
 export function preloadLoaderEngine(): void {
   if (loaderEffects() === "static") return;
-  void import("./runtime");
+  // A failed download is not an error worth surfacing: the loader runs without the engine.
+  void import("./runtime").catch(() => undefined);
 }
 
 /**
@@ -55,9 +59,13 @@ export function loaderEffects(): "static" | "low" | "full" {
 }
 
 /**
- * A continuously evolving scene behind the loading screen. It picks a scene
- * that suits the film, paints it in the film's colours, and when `leaving`
- * turns true plays its exit, frees the GPU and calls `onGone`.
+ * The loading screen's picture. A CSS backdrop in the film's colours is there
+ * from the first paint; on devices that can afford it a GPU scene suited to
+ * the film is drawn over it and fades in once it is really drawing. Whatever
+ * goes wrong with the scene (its engine fails to download, the device has no
+ * WebGL to spare, the context is lost mid-wait) the backdrop carries on, so
+ * the screen is never still. When `leaving` turns true the scene plays its
+ * exit, frees the GPU and calls `onGone`.
  */
 export function CinematicLoader({ look, leaving, onGone }: { look?: LoaderLook; leaving: boolean; onGone: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -67,7 +75,7 @@ export function CinematicLoader({ look, leaving, onGone }: { look?: LoaderLook; 
     look ? { scene: readSceneOverride() ?? pickScene(look.genres), mode: currentsMode(look.genres) } : null
   );
   const [effects] = useState(loaderEffects);
-  const [fallback, setFallback] = useState(effects === "static");
+  const [sceneShown, setSceneShown] = useState(false);
   const scene = choice?.scene;
   const mode = choice?.mode;
   const palette = look?.palette ?? SCENE_PALETTES[scene ?? "stars"];
@@ -93,17 +101,21 @@ export function CinematicLoader({ look, leaving, onGone }: { look?: LoaderLook; 
   useEffect(() => {
     if (effects === "static" || !scene || !mode) return;
     let cancelled = false;
-    void import("./runtime").then(({ startLoader }) => {
+    const start = ({ startLoader }: typeof import("./runtime")) => {
       if (cancelled || !canvasRef.current) return;
-      const handle = startLoader(canvasRef.current, {
+      handleRef.current = startLoader(canvasRef.current, {
         scene,
         mode,
         palette: paletteRef.current,
         quality: effects === "low" ? 0.6 : 1,
+        onReady: () => !cancelled && setSceneShown(true),
+        onLost: () => !cancelled && setSceneShown(false),
       });
-      if (!handle) setFallback(true);
-      handleRef.current = handle;
-    });
+    };
+    // An engine that cannot be fetched (offline, a deploy replaced its file) leaves the backdrop on its own.
+    void import("./runtime")
+      .then(start)
+      .catch(() => undefined);
     return () => {
       cancelled = true;
       handleRef.current?.dispose();
@@ -119,7 +131,7 @@ export function CinematicLoader({ look, leaving, onGone }: { look?: LoaderLook; 
     if (!leaving) return;
     const handle = handleRef.current;
     if (!handle) {
-      const timer = setTimeout(() => onGoneRef.current(), 600);
+      const timer = setTimeout(() => onGoneRef.current(), SCENE_FADE_MS);
       return () => clearTimeout(timer);
     }
     let cancelled = false;
@@ -134,16 +146,14 @@ export function CinematicLoader({ look, leaving, onGone }: { look?: LoaderLook; 
   }, [leaving]);
 
   return (
-    <div className="absolute inset-0 overflow-hidden" style={{ background: palette.background }} aria-hidden>
-      {fallback ? (
-        <div
-          className={cn("absolute inset-0 transition-opacity duration-700", leaving && "opacity-0")}
-          style={{
-            background: `radial-gradient(60% 55% at 70% 40%, ${palette.main}55, transparent 70%), radial-gradient(45% 40% at 25% 70%, ${palette.accent}33, transparent 70%), ${palette.background}`,
-          }}
+    <div className="absolute inset-0 overflow-hidden" aria-hidden>
+      <LoaderBackdrop palette={palette} paused={sceneShown} />
+      {effects !== "static" && (
+        <canvas
+          ref={canvasRef}
+          className={cn("absolute inset-0 h-full w-full transition-opacity ease-out", sceneShown ? "opacity-100" : "opacity-0")}
+          style={{ transitionDuration: `${SCENE_FADE_MS}ms` }}
         />
-      ) : (
-        <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
       )}
     </div>
   );
