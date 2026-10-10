@@ -41,10 +41,11 @@ starts in seconds, seeks instantly, even in 4K, and plays the same way in every 
 **Watching**
 - **Press Play and it starts.** Real-Debrid cached releases and free web sources are searched in parallel, and the player starts on the best one this device can actually decode.
 - **Real 4K that seeks instantly.** MKV releases, where nearly all 4K lives, are rewrapped on the fly into a standard HLS stream: the video is never re-encoded, the whole timeline is available from the first second, and jumping to any point starts playing in about three seconds.
+- **The original audio.** Dubs are recognised by their release names and by the audio tracks actually in the file, and are passed over while a release in the language the title was made in exists. Each profile chooses Original, English or its own language.
 - **Never switches mid-film.** Once a server is playing it stays. A dropped connection is retried on the same server at the same position; only a server that genuinely cannot keep up is swapped for the next one, seamlessly.
 - **Remembers what worked.** Each title keeps a record of which server delivered it, at what resolution and how smoothly, so repeat plays and the next episode skip the search.
 - **Smooth on slow servers too.** The server reads ahead the next segments while you watch, so providers that are slow to answer no longer cause play-pause-play; a server that still cannot keep up is swapped for another at the same spot.
-- **A clean glass player.** One settings menu for subtitles, audio, quality, picture fit (fit, fill, stretch), speed, server, episodes, picture-in-picture, AirPlay and download; HDR on or off per device, timeline previews, resume where you left off, a loading screen that moves on every device, and full keyboard, touch and TV-remote control (tap to show controls, double-tap the sides to skip 10 seconds).
+- **A clean glass player.** One settings menu for subtitles, audio, quality, picture fit (fit, fill, stretch), speed, server, episodes, picture-in-picture, AirPlay and download; HDR titles shown in HDR or in the standard range (with a brightness you choose) per device, timeline previews, resume where you left off, a loading screen that moves on every device, and full keyboard, touch and TV-remote control (tap to show controls, double-tap the sides to skip 10 seconds).
 - **Made for binge-watching.** Skip Intro and Skip Credits for anime (or skip them automatically), a next-episode countdown, "Still watching?" when you choose, Continue Watching that moves on to the next episode, and your audio and subtitle choice remembered per show.
 - **A sleep timer.** Pause after 15 minutes to 2 hours of playing, or at the end of the episode, the film or a few episodes; the sound fades out, and a dark sleep screen picks up exactly where it stopped.
 
@@ -55,7 +56,7 @@ starts in seconds, seeks instantly, even in 4K, and plays the same way in every 
 
 **Browsing**
 - Home with Top 10 Today, trending movies and series, new movies and new series, top rated and what is on Netflix, Prime Video, Disney+, Apple TV+, Max and Hulu, plus "Because you watched…" and a Play Something shuffle. Anime keeps to its own section: it reaches Home only through what you are watching.
-- Movie and show pages with cast, trailers, the rest of a film's collection, full season lists, person pages, genre hubs and instant search.
+- Movie and show pages with cast, trailers, the rest of a film's collection, full season lists, person pages, genre hubs and instant search that forgives a misspelling.
 - My List, Continue Watching and "already watched" tracking per profile.
 
 **Household**

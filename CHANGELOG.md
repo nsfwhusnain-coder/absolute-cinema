@@ -2,6 +2,39 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.5.2] - 2026-10-10
+
+### Fixed
+- **HDR titles were too dark on laptop screens, and worse with the brightness
+  up.** An HDR picture is graded for a screen with headroom above white; a
+  laptop LCD has little, and loses the last of it as its brightness rises, so
+  everything but the faces sank into black. On screens the browser does not
+  report as showing HDR video, HDR titles are now kept to the standard range,
+  so they follow the brightness setting like everything else, and their
+  shadows and mid-tones are raised with a curve that leaves black at black.
+  Picture in the player has **Standard / HDR** for HDR titles and, in
+  Standard, **Brightness: Low, Medium, High**; both are remembered per device.
+  Checked in Chrome and Opera (and the filter in Safari's engine).
+- **Dubbed releases played as if they were the original.** Release names were
+  searched for language names, which missed every tag a dub really carries
+  (TRUEFRENCH, VFF, iTA, LATINO, "rus", "CZ dab", EN/FR/ES, a Russian
+  tracker's name) and took "The French Dispatch" for a French release; and
+  anything unrecognised was stamped English.
+  - Release names are now read by their tags, against the language the title
+    was made in.
+  - A dub, or a release with another language's subtitles over the picture,
+    no longer takes a quality slot while the original exists.
+  - A file with several languages comes after one in the original alone.
+  - When a file opens, its real audio tracks are checked: one with no track
+    in the wanted language is passed over while another source can play.
+  Profiles already default to Original audio; this makes the sources follow it.
+- **Search found nothing for a misspelling.** A search that comes back empty
+  (or nearly) now offers the closest titles: "intersteller", "inseption",
+  "the drak knight" and "braking bad" find what was meant. A search for
+  nonsense still finds nothing.
+- HDR is recognised from the picture itself, so a file played directly (which
+  arrives with no description) gets the same treatment as a remuxed one.
+
 ## [2.5.1] - 2026-10-10
 
 ### Fixed
