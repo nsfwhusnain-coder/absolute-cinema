@@ -80,6 +80,7 @@ export class MediaEngine {
   private generation = 0;
   private networkRecoveries = 0;
   private mediaRecoveries = 0;
+  private abandoned = false;
   kind: EngineKind = "native_file";
 
   constructor(
@@ -96,6 +97,7 @@ export class MediaEngine {
     const startHeight = options.startHeight ?? DEFAULT_START_HEIGHT;
     this.teardown();
     const generation = ++this.generation;
+    this.abandoned = false;
     this.networkRecoveries = 0;
     this.mediaRecoveries = 0;
     const video = this.video;
@@ -191,8 +193,24 @@ export class MediaEngine {
     hls.loadSource(playable.url);
   }
 
+  /**
+   * Stops listening to whatever is attached, without stopping it: another
+   * source is about to take its place. Opening that one takes a moment
+   * (seconds, for a remux), and a failing source goes on raising errors for
+   * as long as it is attached. They used to be taken for the next source's,
+   * which was failed before it had loaded, and playback fell two servers down
+   * for one bad file.
+   */
+  abandon(): void {
+    this.generation++;
+    this.abandoned = true;
+  }
+
   /** Error on the element itself (all engines). */
   mediaElementFailed(): void {
+    // Loading a source clears the element's error: an event that finds none
+    // is a late one about the source before.
+    if (this.abandoned || !this.video.error) return;
     if (this.kind === "hlsjs" && this.hls && this.mediaRecoveries < 1) {
       this.mediaRecoveries++;
       this.hls.recoverMediaError();

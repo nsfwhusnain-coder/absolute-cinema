@@ -256,6 +256,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
       if (command.notice) s.showNotice(command.notice, "warning");
       reportSustained();
       clearTimers();
+      // From here on, errors from the source being replaced are nobody's.
+      engine.abandon();
       attachAbort.current?.abort();
       const abort = new AbortController();
       attachAbort.current = abort;
