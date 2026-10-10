@@ -21,6 +21,8 @@ import { getPreferredProvider, getPreferredQualityHeight, getSavedPlaybackSpeed,
 import type { PlaybackQualityPreference } from "@/lib/profile-preferences";
 import { lacksWantedAudio, normalizeTrackLanguage, selectAudioTrack } from "@/lib/playback/track-selection";
 import { isHdrLikeRange, videoFrameRange } from "@/lib/playback/dynamic-range";
+import { reportDecodeFailure } from "@/lib/playback/decode-capability";
+import { isViewerSideFailure } from "@/lib/playback/failure-kind";
 import { MediaEngine, type EngineAudioTrack } from "./engine";
 import { createRanker, resolvePlayable, startAudio, type AudioChoice, type TitleContext } from "./playable";
 import { usePlayerState } from "./store";
@@ -149,6 +151,9 @@ export function usePlayerController(options: PlayerControllerOptions) {
       if (state.phase !== "starting") return;
       const source = sourceById(state.activeId);
       if (source) {
+        const failure = { event: "handoff_failed" as const, reason, engine: engineRef.current?.kind };
+        // The decoder refusing a file may be the device lacking the codec: see reportDecodeFailure.
+        if (isViewerSideFailure(failure)) reportDecodeFailure(source.codec);
         emitPlayerFeedback({ event: "handoff_failed", sourceId: source.id, provider: source.provider, reason, engine: engineRef.current?.kind });
         const name = source.label.split("•")[0]?.trim() || source.provider;
         store.getState().set({ startNote: `${name} ${why}, trying the next server` });

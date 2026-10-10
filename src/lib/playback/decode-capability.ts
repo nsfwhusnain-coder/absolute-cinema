@@ -174,45 +174,122 @@ interface CapabilityNavigator {
   };
 }
 
-async function probeUhd(contentType: string): Promise<DecodingInfo | null> {
+/** One size of one codec, as asked of the browser's decoder. */
+interface DecodeTier {
+  contentType: string;
+  width: number;
+  height: number;
+  bitrate: number;
+}
+
+const HD_WIDTH = 1920;
+const HD_HEIGHT = 1080;
+const HD_BITRATE = 8_000_000;
+
+/** Largest first: the first tier is the 4K one. */
+const HEVC_TIERS: readonly DecodeTier[] = [
+  { contentType: 'video/mp4; codecs="hvc1.2.4.L150.B0"', width: UHD_WIDTH, height: UHD_HEIGHT, bitrate: UHD_BITRATE },
+  { contentType: 'video/mp4; codecs="hvc1.1.6.L123.B0"', width: HD_WIDTH, height: HD_HEIGHT, bitrate: HD_BITRATE },
+];
+const AV1_TIERS: readonly DecodeTier[] = [
+  { contentType: 'video/mp4; codecs="av01.0.13M.10"', width: UHD_WIDTH, height: UHD_HEIGHT, bitrate: UHD_BITRATE },
+  { contentType: 'video/mp4; codecs="av01.0.08M.08"', width: HD_WIDTH, height: HD_HEIGHT, bitrate: HD_BITRATE },
+];
+/** Both ways a stream reaches the decoder here: appended through Media Source, or opened as a file. */
+const DECODE_ROUTES = ["media-source", "file"] as const;
+
+async function probeTier(tier: DecodeTier, type: (typeof DECODE_ROUTES)[number]): Promise<DecodingInfo | null> {
   if (typeof navigator === "undefined") return null;
   const api = (navigator as unknown as CapabilityNavigator).mediaCapabilities;
   if (!api?.decodingInfo) return null;
   try {
     return await api.decodingInfo({
-      type: "media-source",
-      video: {
-        contentType,
-        width: UHD_WIDTH,
-        height: UHD_HEIGHT,
-        bitrate: UHD_BITRATE,
-        framerate: UHD_FRAMERATE,
-      },
+      type,
+      video: { contentType: tier.contentType, width: tier.width, height: tier.height, bitrate: tier.bitrate, framerate: UHD_FRAMERATE },
     });
   } catch {
     return null;
   }
 }
 
+/** What the browser's decoder says of a codec, or null when it cannot be asked. */
+async function measureDecode(tiers: readonly DecodeTier[]): Promise<DecodeSupport | null> {
+  const answers = await Promise.all(
+    tiers.map(async (tier) => (await Promise.all(DECODE_ROUTES.map((route) => probeTier(tier, route)))).filter((a) => a !== null))
+  );
+  if (answers.every((tier) => tier.length === 0)) return null;
+  const top = answers[0] ?? [];
+  return {
+    supported: answers.some((tier) => tier.some((a) => a.supported)),
+    uhd: top.some((a) => a.supported),
+    hardware: top.some((a) => a.supported && a.powerEfficient === true),
+  };
+}
+
+type MeasuredCodec = "hevc" | "av1";
+
+/** What the decoder said of each codec when asked (null until it has been, or when it cannot be). */
+const measured: Record<MeasuredCodec, DecodeSupport | null> = { hevc: null, av1: null };
+
+const REFUSED_STORAGE_KEY = "absolute-cinema.decode-refused";
+/** A refusal is forgotten after this long, so a new driver or browser version gets another try. */
+const REFUSAL_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+function readRefusals(): Partial<Record<MeasuredCodec, number>> {
+  try {
+    const raw = typeof localStorage === "undefined" ? null : localStorage.getItem(REFUSED_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as Partial<Record<MeasuredCodec, number>>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function rememberRefusal(codec: MeasuredCodec): void {
+  try {
+    localStorage.setItem(REFUSED_STORAGE_KEY, JSON.stringify({ ...readRefusals(), [codec]: Date.now() }));
+  } catch {
+    /* private mode: the refusal holds for this visit only */
+  }
+}
+
+function cacheOf(codec: MeasuredCodec): { value: DecodeSupport | null } {
+  return codec === "hevc" ? hevcCache : av1Cache;
+}
+
+/**
+ * Asks the decoder itself what it plays. A yes turns a codec on that the type
+ * strings were too modest about (one narrow HEVC string answered "no" for a
+ * browser that decodes 4K). A no is only kept, for `reportDecodeFailure`: the
+ * strings and a working picture outrank a second opinion on its own.
+ */
 export async function warmDecodeCapabilities(): Promise<void> {
-  const [hevc, av1] = await Promise.all([
-    probeUhd('video/mp4; codecs="hvc1.2.4.L150.B0"'),
-    probeUhd('video/mp4; codecs="av01.0.13M.10"'),
-  ]);
-  if (hevc) {
-    hevcCache.value = {
-      supported: hevcSupport().supported || hevc.supported,
-      uhd: hevc.supported,
-      hardware: hevc.powerEfficient,
-    };
+  const [hevc, av1] = await Promise.all([measureDecode(HEVC_TIERS), measureDecode(AV1_TIERS)]);
+  measured.hevc = hevc;
+  measured.av1 = av1;
+  const refused = readRefusals();
+  for (const codec of ["hevc", "av1"] as const) {
+    const answer = measured[codec];
+    if (!answer) continue;
+    const before = codec === "hevc" ? hevcSupport() : av1Support();
+    const stillRefused = !answer.supported && Date.now() - (refused[codec] ?? 0) < REFUSAL_MAX_AGE_MS;
+    cacheOf(codec).value = { ...answer, supported: stillRefused ? false : before.supported || answer.supported };
   }
-  if (av1) {
-    av1Cache.value = {
-      supported: av1Support().supported || av1.supported,
-      uhd: av1.supported,
-      hardware: av1.powerEfficient,
-    };
-  }
+}
+
+/**
+ * A file of this codec failed to decode here. One file can be at fault, so
+ * the codec is only given up when the decoder had also said it does not play
+ * it: a Chromium with no hardware HEVC decoder (a remote session, a virtual
+ * machine, some GPUs) accepts every HEVC type string, and each HEVC file then
+ * failed on its first frame, one after another, before playback reached one
+ * it could show. Remembered for this device, so it costs one failed start.
+ */
+export function reportDecodeFailure(codec: string | undefined): void {
+  if (codec !== "hevc" && codec !== "av1") return;
+  const answer = measured[codec];
+  if (!answer || answer.supported) return;
+  cacheOf(codec).value = { ...answer, supported: false };
+  rememberRefusal(codec);
 }
 
 export function hevcNeedsNativePath(): boolean {
@@ -225,4 +302,6 @@ export function resetDecodeCapabilityCache(): void {
   hevcCache.value = null;
   av1Cache.value = null;
   hev1FileCache = null;
+  measured.hevc = null;
+  measured.av1 = null;
 }

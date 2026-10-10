@@ -1,8 +1,14 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import {
   AV1_PROBE_TYPES,
   HEVC_PROBE_TYPES,
+  hevcSupport,
   probeDecodeSync,
+  reportDecodeFailure,
+  resetDecodeCapabilityCache,
+  supportsAv1,
+  supportsHevc,
+  warmDecodeCapabilities,
 } from "./decode-capability";
 
 /** Extract the codec string from a full content-type. */
@@ -67,5 +73,76 @@ describe("probeDecodeSync", () => {
 
   it("treats an empty matrix as unsupported", () => {
     expect(probeDecodeSync([]).supported).toBe(false);
+  });
+});
+
+describe("warmDecodeCapabilities", () => {
+  const scope = globalThis as { window?: unknown; document?: unknown };
+  const realNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+
+  /** A browser whose type strings accept everything and whose decoder answers `decodes(contentType, height)`. */
+  function browser(decodes: ((contentType: string, height: number) => boolean) | null): void {
+    scope.window = {};
+    scope.document = {
+      documentElement: { getAttribute: () => null },
+      createElement: () => ({ canPlayType: () => "probably" }),
+    };
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        userAgent: "test",
+        ...(decodes
+          ? {
+              mediaCapabilities: {
+                decodingInfo: async (config: { video: { contentType: string; height: number } }) => ({
+                  supported: decodes(config.video.contentType, config.video.height),
+                  powerEfficient: true,
+                }),
+              },
+            }
+          : {}),
+      },
+    });
+    resetDecodeCapabilityCache();
+  }
+
+  afterEach(() => {
+    delete scope.window;
+    delete scope.document;
+    if (realNavigator) Object.defineProperty(globalThis, "navigator", realNavigator);
+    resetDecodeCapabilityCache();
+  });
+
+  it("gives a codec up only when the decoder said no and a file of it then failed", async () => {
+    browser((type) => !type.includes("hvc1"));
+    await warmDecodeCapabilities();
+    // The decoder's word alone changes nothing.
+    expect(supportsHevc()).toBe(true);
+    reportDecodeFailure("hevc");
+    expect(supportsHevc()).toBe(false);
+    expect(supportsAv1()).toBe(true);
+  });
+
+  it("does not give up a codec the decoder plays because one file failed", async () => {
+    browser(() => true);
+    await warmDecodeCapabilities();
+    reportDecodeFailure("hevc");
+    reportDecodeFailure("av1");
+    reportDecodeFailure("h264");
+    expect(supportsHevc()).toBe(true);
+    expect(supportsAv1()).toBe(true);
+  });
+
+  it("keeps a codec the decoder plays at 1080p only", async () => {
+    browser((_type, height) => height <= 1080);
+    await warmDecodeCapabilities();
+    expect(supportsHevc()).toBe(true);
+    expect(hevcSupport().uhd).toBe(false);
+  });
+
+  it("leaves the type strings' answer alone when the decoder cannot be asked", async () => {
+    browser(null);
+    await warmDecodeCapabilities();
+    expect(supportsHevc()).toBe(true);
   });
 });

@@ -4,7 +4,7 @@ import { SessionProvider } from "next-auth/react";
 import type { Session } from "next-auth";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MotionConfig } from "framer-motion";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useUIStore } from "@/stores/ui-store";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
@@ -25,6 +25,7 @@ const KeyboardShortcutsHelp = dynamic(
 );
 import { ErrorBoundary } from "@/components/error-boundary";
 import { ProfileSync } from "@/components/profile-sync";
+import { warmDecodeCapabilities } from "@/lib/playback/decode-capability";
 
 function GlobalShortcuts() {
   const setShortcutsHelpOpen = useUIStore((s) => s.setShortcutsHelpOpen);
@@ -50,6 +51,14 @@ function GlobalShortcuts() {
   return <KeyboardShortcutsHelp />;
 }
 
+/** Asks the browser what it decodes once, before any list of sources is ranked by it. */
+function DecodeCapabilities() {
+  useEffect(() => {
+    void warmDecodeCapabilities();
+  }, []);
+  return null;
+}
+
 export function Providers({ children, session }: { children: React.ReactNode; session?: Session | null }) {
   const [client] = useState(
     () =>
@@ -73,6 +82,7 @@ export function Providers({ children, session }: { children: React.ReactNode; se
           <ErrorBoundary>{children}</ErrorBoundary>
           <GlobalShortcuts />
           <ProfileSync />
+          <DecodeCapabilities />
         </MotionConfig>
       </QueryClientProvider>
     </SessionProvider>
