@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { decidePlayback } from "./decide-playback";
 import { resetDecodeCapabilityCache } from "./decode-capability";
+import { isSourcePlayableHere } from "./source-quality";
 import type { PlaybackSource } from "./types";
 
 function src(overrides: Partial<PlaybackSource> & { id: string }): PlaybackSource {
@@ -274,6 +275,16 @@ describe("HEVC in a plain MP4", () => {
       titleMatch: "exact",
       maxHeight: 1080,
     });
+
+  it("is not offered at all once the file is known to be hev1 and the browser refuses those", () => {
+    const known = { ...hevc("phoenix", "mp4"), codecTag: "hev1" as const };
+    browser(false);
+    expect(isSourcePlayableHere(known)).toBe(false);
+    // Remuxed, the same stream would be renamed on the way, so only plain files are held back.
+    expect(isSourcePlayableHere({ ...hevc("mkv", "mkv"), codecTag: "hev1" as const })).toBe(true);
+    browser(true);
+    expect(isSourcePlayableHere(known)).toBe(true);
+  });
 
   it("comes after a remuxed file where the browser refuses hev1 files", () => {
     browser(false);

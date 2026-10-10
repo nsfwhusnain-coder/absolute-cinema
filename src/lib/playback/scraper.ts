@@ -46,6 +46,8 @@ export interface ScraperSourceEntry {
   bitrateBps?: number;
   /** Video codec measured from the stream by the mini-service's quality probe. */
   videoCodec?: "h264" | "hevc" | "av1";
+  /** The MP4 sample-entry name it was read from, when it was. */
+  videoCodecTag?: string;
   qualityRungs?: { height: number; url: string; bitrateBps?: number }[];
   audioLanguage?: string;
   probe?: {
@@ -199,6 +201,7 @@ export function toPlaybackSource(entry: ScraperSourceEntry, proxyUrl: string): P
       : {}),
     ...(entry.qualityRungs?.length ? { qualityRungs: entry.qualityRungs } : {}),
     ...(codec !== "unknown" ? { codec } : {}),
+    ...(entry.videoCodecTag === "hev1" ? { codecTag: "hev1" as const } : {}),
     ...(entry.verified === false ? { verified: false } : entry.verified === true ? { verified: true } : {}),
     ...(entry.probe
       ? {

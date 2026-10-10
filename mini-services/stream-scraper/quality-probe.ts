@@ -465,17 +465,46 @@ function matchesFourcc(bytes: Uint8Array, offset: number, fourcc: string): boole
  * mistaken for a codec declaration.
  */
 export function parseMp4VideoCodec(bytes: Uint8Array): VideoCodec | undefined {
+  return parseMp4SampleEntry(bytes)?.codec;
+}
+
+/** The video codec of an MP4 and the sample-entry name it is stored under. */
+export interface Mp4SampleEntry {
+  codec: VideoCodec;
+  /** `hev1` and `hvc1` are both HEVC, and Apple's player opens only the second. */
+  tag: string;
+}
+
+export function parseMp4SampleEntry(bytes: Uint8Array): Mp4SampleEntry | undefined {
   for (let offset = 4; offset + 4 <= bytes.byteLength; offset++) {
     for (const [fourcc, codec] of MP4_CODEC_FOURCCS) {
       if (!matchesFourcc(bytes, offset, fourcc)) continue;
       const span = isoBoxSpan(bytes, offset - 4);
       // A sample entry is at least its header plus the 78-byte visual entry.
       if (span && span.size >= 16 && span.size <= bytes.byteLength * 4) {
-        return codec;
+        return { codec, tag: fourcc };
       }
     }
   }
   return undefined;
+}
+
+/**
+ * Reads the sample entry of a progressive MP4 from the start of the file,
+ * where a file made for streaming keeps it. Undefined when it is not there or
+ * the request fails: unknown, never a guess.
+ */
+export async function probeMp4SampleEntry(url: string, session: QualitySession): Promise<Mp4SampleEntry | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MP4_PROBE_TIMEOUT_MS);
+  try {
+    const head = await fetchMp4Range(url, buildHeaders(session, url), `bytes=0-${MP4_RANGE_BYTE_CAP - 1}`, controller.signal);
+    return head ? parseMp4SampleEntry(head.bytes) : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const TS_PACKET_BYTES = 188;

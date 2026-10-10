@@ -14,6 +14,7 @@ import {
   type QualityInfo,
   type QualitySession,
   type QualitySource,
+  parseMp4SampleEntry,
   parseMp4VideoCodec,
   parseTsVideoCodec,
   parseHlsMasterCodec,} from "./quality-probe";
@@ -670,6 +671,12 @@ describe("video codec detection", () => {
     expect(parseMp4VideoCodec(mp4WithSampleEntry("hvc1"))).toBe("hevc");
     expect(parseMp4VideoCodec(mp4WithSampleEntry("hev1"))).toBe("hevc");
     expect(parseMp4VideoCodec(mp4WithSampleEntry("av01"))).toBe("av1");
+  });
+
+  it("keeps the sample-entry name, which tells hev1 from hvc1", () => {
+    expect(parseMp4SampleEntry(mp4WithSampleEntry("hev1"))).toEqual({ codec: "hevc", tag: "hev1" });
+    expect(parseMp4SampleEntry(mp4WithSampleEntry("hvc1"))).toEqual({ codec: "hevc", tag: "hvc1" });
+    expect(parseMp4SampleEntry(new Uint8Array(64))).toBeUndefined();
   });
 
   it("returns undefined rather than guessing when nothing identifies a codec", () => {

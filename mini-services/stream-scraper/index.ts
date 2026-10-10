@@ -51,6 +51,7 @@ import {
   type ProbeResult,
 } from "./probe";
 import {
+  probeMp4SampleEntry,
   probeSourceQuality,
   isHlsMasterManifest,
   inferHeightFromUrl,
@@ -310,6 +311,8 @@ interface SourceEntry {
   bitrateBps?: number;
   /** Video codec measured from the stream (quality-probe.ts), never guessed from the URL. */
   videoCodec?: VideoCodec;
+  /** The MP4 sample-entry name it was read from (`hev1`, `hvc1`, ...), when it was. */
+  videoCodecTag?: string;
   /** Alternate progressive URLs on this source (one host, many heights). */
   qualityRungs?: { height: number; url: string; bitrateBps?: number }[];
   audioLanguage?: string;
@@ -814,6 +817,7 @@ async function applyLatencyProbes(
         ? { bitrateBps: q.bitrateBps }
         : {}),
       ...(q.videoCodec ? { videoCodec: q.videoCodec } : entry.videoCodec ? { videoCodec: entry.videoCodec } : {}),
+      ...(entry.videoCodecTag ? { videoCodecTag: entry.videoCodecTag } : {}),
     };
   });
 
@@ -2207,7 +2211,15 @@ async function resolveVidlinkEntries(
     `[vidlink-api] mapped ${picked.length} source(s) (from ${vidlink.sources.length} raw)`
   );
 
+  // These files say nothing about their codec in the URL, and most are HEVC
+  // under the `hev1` name, which Safari will not open as a plain file. Read
+  // off the file, the player can skip one it cannot play instead of trying it.
+  const entries = await Promise.all(
+    picked.map((stream) => (stream.type === "mp4" ? probeMp4SampleEntry(stream.url, vidlink.session) : undefined))
+  );
+
   return picked.map((stream, index) => {
+    const sampleEntry = entries[index];
     const rungs = stream.qualityRungs?.filter((rung) => rung.height > 0 && rung.url);
     const ladder = stream.ladder?.length
       ? stream.ladder
@@ -2222,6 +2234,7 @@ async function resolveVidlinkEntries(
       ...(maxHeight ? { maxHeight, qualitySource: "label" as const } : {}),
       ...(ladder?.length ? { ladder } : {}),
       ...(rungs?.length ? { qualityRungs: rungs } : {}),
+      ...(sampleEntry ? { videoCodec: sampleEntry.codec, videoCodecTag: sampleEntry.tag } : {}),
       session: {
         referer: vidlink.session.referer,
         origin: vidlink.session.origin,

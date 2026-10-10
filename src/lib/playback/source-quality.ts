@@ -4,7 +4,7 @@ import {
   isHouseholdStartLanguage,
   sourceAudioLanguageRank,
 } from "./source-facts";
-import { supportsAv1, supportsHevc } from "./decode-capability";
+import { supportsAv1, supportsHev1Files, supportsHevc } from "./decode-capability";
 import { DEFAULT_SOURCE_KEY } from "@/lib/player-preferences";
 import {
   isNeverAutoDefaultUrl,
@@ -254,9 +254,20 @@ function browserSupportsAv1(): boolean {
  */
 export type SourceDelivery = "direct" | "remux" | "unavailable";
 
+/** A progressive file in a container the browser opens itself. */
+function isPlainFile(source: PlaybackSource): boolean {
+  if (source.type !== "mp4") return false;
+  const container = resolvedSourceContainer(source);
+  return !container || isBrowserPlayableContainer(container);
+}
+
 function codecDecodableHere(source: PlaybackSource): boolean {
   if (source.codec === "av1") return browserSupportsAv1();
-  if (source.codec === "hevc") return browserSupportsHevc();
+  if (source.codec === "hevc") {
+    // A plain `hev1` file reaches the browser as it is; an MKV is renamed by the remux on the way.
+    if (source.codecTag === "hev1" && isPlainFile(source) && !supportsHev1Files()) return false;
+    return browserSupportsHevc();
+  }
   if (source.codec === "h264") return true;
   // Unknown codec: fall back to the release-level compat hint. Note MKV forces
   // that hint to "safari", so an unknown-codec MKV stays conservative here

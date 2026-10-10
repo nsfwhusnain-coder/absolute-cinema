@@ -79,6 +79,11 @@ export interface PlaybackSource {
   /** Detected from upstream URL before proxy rewrite (proxy URL hides codec path). */
   codec?: "h264" | "hevc" | "av1" | "unknown";
   /**
+   * Set when the file is known to store its HEVC under the `hev1` name, which
+   * Chromium plays and Apple's player refuses in a plain file (it wants `hvc1`).
+   */
+  codecTag?: "hev1";
+  /**
    * Best available audio evidence for this exact release. Debrid sources get
    * this from the selected-file/release name and the remux worker confirms the
    * actual stream before publishing output. It is intentionally optional fo
