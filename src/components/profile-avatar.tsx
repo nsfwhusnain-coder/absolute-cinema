@@ -6,11 +6,13 @@ import { Check, ImagePlus, Loader2, Pipette, Search, Shuffle, Trash2 } from "luc
 import { AVATAR_COLORS } from "@/lib/avatar-colors";
 import {
   AVATAR_EMOJI,
-  AVATAR_GROUPS,
+  CHARACTER_GROUPS,
   EMOJI_PREFIX,
+  ILLUSTRATION_GROUPS,
   TMDB_PREFIX,
   UPLOAD_PREFIX,
   allBundledAvatars,
+  avatarName,
   isSingleEmoji,
   resolveAvatar,
 } from "@/lib/avatars";
@@ -87,7 +89,15 @@ export function ProfileAvatar({
   );
 }
 
-type PickerTab = "art" | "emoji" | "faces" | "photo";
+type PickerTab = "characters" | "art" | "emoji" | "faces" | "photo";
+
+/** Which tab holds a profile's current picture; characters for anything else, initials included. */
+function tabOf(avatar: string): PickerTab {
+  if (avatar.startsWith(EMOJI_PREFIX)) return "emoji";
+  if (avatar.startsWith(TMDB_PREFIX)) return "faces";
+  if (avatar.startsWith(UPLOAD_PREFIX)) return "photo";
+  return ILLUSTRATION_GROUPS.some((group) => group.ids.includes(avatar)) ? "art" : "characters";
+}
 
 interface PhotoActions {
   /** Uploads a photo and makes it the picture. */
@@ -96,8 +106,8 @@ interface PhotoActions {
 }
 
 /**
- * Picture and colour chooser used when creating or editing a profile:
- * 140-odd illustrations in thirteen styles, any emoji, famous faces from
+ * Picture and colour chooser used when creating or editing a profile: the
+ * house characters first, then illustrations, any emoji, famous faces from
  * TMDB and (once signed in) a photo of your own.
  */
 export function AvatarPicker({
@@ -117,9 +127,10 @@ export function AvatarPicker({
   /** Offered only where the profile exists already (Settings). */
   photo?: PhotoActions;
 }) {
-  const kind = avatar.startsWith(EMOJI_PREFIX) ? "emoji" : avatar.startsWith(TMDB_PREFIX) ? "faces" : avatar.startsWith(UPLOAD_PREFIX) ? "photo" : "art";
-  const [tab, setTab] = useState<PickerTab>(() => (kind === "faces" && !signedIn) || (kind === "photo" && !photo) ? "art" : kind);
+  const kind = tabOf(avatar);
+  const [tab, setTab] = useState<PickerTab>(() => (kind === "faces" && !signedIn) || (kind === "photo" && !photo) ? "characters" : kind);
   const tabs: { id: PickerTab; label: string }[] = [
+    { id: "characters", label: "Characters" },
     { id: "art", label: "Illustrations" },
     { id: "emoji", label: "Emoji" },
     ...(signedIn ? [{ id: "faces" as const, label: "Famous faces" }] : []),
@@ -131,7 +142,7 @@ export function AvatarPicker({
     const pick = all[Math.floor(Math.random() * all.length)]!;
     const hue = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)]!;
     onChange({ avatar: pick, color: hue });
-    setTab("art");
+    setTab("characters");
   };
 
   return (
@@ -165,18 +176,46 @@ export function AvatarPicker({
         </button>
       </div>
 
+      {tab === "characters" && <CharacterGrid avatar={avatar} color={color} onPick={(id) => onChange({ avatar: id })} />}
       {tab === "art" && <IllustrationGrid name={name} avatar={avatar} color={color} onPick={(id) => onChange({ avatar: id })} />}
       {tab === "emoji" && <EmojiGrid avatar={avatar} color={color} onPick={(value) => onChange({ avatar: value })} />}
       {tab === "faces" && signedIn && <FacesGrid avatar={avatar} color={color} onPick={(value) => onChange({ avatar: value })} />}
       {tab === "photo" && photo && <PhotoPanel name={name} avatar={avatar} color={color} actions={photo} />}
 
-      <ColourRow color={color} onPick={(c) => onChange({ color: c })} muted={kind === "faces" || kind === "photo"} />
+      <ColourRow color={color} onPick={(c) => onChange({ color: c })} muted={kind === "characters" || kind === "faces" || kind === "photo"} />
+    </div>
+  );
+}
+
+/** The house characters, set by set, in one scrolling list like a streaming service's profile icons. */
+function CharacterGrid({ avatar, color, onPick }: { avatar: string; color: string; onPick(id: string): void }) {
+  const scroller = useRef<HTMLDivElement>(null);
+  // Open on the current picture without moving the page around it.
+  useEffect(() => {
+    const list = scroller.current;
+    const chosen = list?.querySelector<HTMLElement>('[aria-checked="true"]');
+    if (list && chosen) list.scrollTop = chosen.offsetTop - list.clientHeight / 2 + chosen.clientHeight / 2;
+  }, []);
+  return (
+    <div ref={scroller} className="relative -mr-2 max-h-[24rem] space-y-5 overflow-y-auto overscroll-contain py-1 pl-1 pr-3 scrollbar-thin">
+      {CHARACTER_GROUPS.map((group) => (
+        <section key={group.label}>
+          <h4 className="mb-2.5 text-[0.7rem] font-semibold uppercase tracking-[0.14em] text-white/50">{group.label}</h4>
+          <div className="grid grid-cols-4 gap-3 sm:grid-cols-6" role="radiogroup" aria-label={group.label}>
+            {group.ids.map((id) => (
+              <PickTile key={id} selected={avatar === id} label={avatarName(id)} onClick={() => onPick(id)} vivid>
+                <ProfileAvatar name="" color={color} avatar={id} size="md" className="aspect-square h-auto w-full shadow-none" />
+              </PickTile>
+            ))}
+          </div>
+        </section>
+      ))}
     </div>
   );
 }
 
 function IllustrationGrid({ name, avatar, color, onPick }: { name: string; avatar: string; color: string; onPick(id: string): void }) {
-  const [group, setGroup] = useState(() => Math.max(0, AVATAR_GROUPS.findIndex((g) => g.ids.includes(avatar))));
+  const [group, setGroup] = useState(() => Math.max(0, ILLUSTRATION_GROUPS.findIndex((g) => g.ids.includes(avatar))));
   const chips = useRef<HTMLDivElement>(null);
   // Bring the chosen style's chip into view when the picker opens on it.
   useEffect(() => {
@@ -185,7 +224,7 @@ function IllustrationGrid({ name, avatar, color, onPick }: { name: string; avata
   return (
     <div className="space-y-3">
       <div ref={chips} className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1 scrollbar-hide" role="tablist" aria-label="Illustration style">
-        {AVATAR_GROUPS.map((g, i) => (
+        {ILLUSTRATION_GROUPS.map((g, i) => (
           <button
             key={g.label}
             type="button"
@@ -202,9 +241,9 @@ function IllustrationGrid({ name, avatar, color, onPick }: { name: string; avata
           </button>
         ))}
       </div>
-      <div className="grid grid-cols-4 gap-2.5 sm:grid-cols-6" role="radiogroup" aria-label={`${AVATAR_GROUPS[group]!.label} pictures`}>
-        {AVATAR_GROUPS[group]!.ids.map((id) => (
-          <PickTile key={id} selected={avatar === id} label={`Picture ${id.split("-").slice(1).join(" ")}`} onClick={() => onPick(id)}>
+      <div className="grid grid-cols-4 gap-2.5 sm:grid-cols-6" role="radiogroup" aria-label={`${ILLUSTRATION_GROUPS[group]!.label} pictures`}>
+        {ILLUSTRATION_GROUPS[group]!.ids.map((id) => (
+          <PickTile key={id} selected={avatar === id} label={`${ILLUSTRATION_GROUPS[group]!.label}: ${avatarName(id)}`} onClick={() => onPick(id)}>
             <ProfileAvatar name={name || "?"} color={color} avatar={id} size="md" className="aspect-square h-auto w-full shadow-none" />
           </PickTile>
         ))}
@@ -473,7 +512,20 @@ function ColourRow({ color, onPick, muted }: { color: string; onPick(color: stri
   );
 }
 
-function PickTile({ selected, label, onClick, children }: { selected: boolean; label: string; onClick(): void; children: React.ReactNode }) {
+function PickTile({
+  selected,
+  label,
+  onClick,
+  children,
+  vivid = false,
+}: {
+  selected: boolean;
+  label: string;
+  onClick(): void;
+  children: React.ReactNode;
+  /** Full-colour tiles stay at full strength; the rest sit back a little until hovered. */
+  vivid?: boolean;
+}) {
   return (
     <button
       type="button"
@@ -484,7 +536,7 @@ function PickTile({ selected, label, onClick, children }: { selected: boolean; l
       onClick={onClick}
       className={cn(
         "block w-full rounded-[30%] transition duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70",
-        selected ? "scale-[1.04] ring-2 ring-white ring-offset-2 ring-offset-black/50" : "opacity-85 hover:scale-[1.04] hover:opacity-100"
+        selected ? "scale-[1.04] ring-2 ring-white ring-offset-2 ring-offset-black/50" : cn("hover:scale-[1.04]", !vivid && "opacity-85 hover:opacity-100")
       )}
     >
       {children}

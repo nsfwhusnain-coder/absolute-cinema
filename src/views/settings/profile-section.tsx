@@ -115,7 +115,7 @@ export function ProfileSection() {
           Switch profile
         </PrimaryButton>
       </div>
-      <Row label="Picture" help="An illustration, an emoji, a famous face or your own photo, on your colour.">
+      <Row label="Picture" help="A character, an illustration, an emoji, a famous face or your own photo.">
         <PrimaryButton tone="subtle" onClick={() => setEditing((v) => !v)}>
           {editing ? "Done" : "Change"}
         </PrimaryButton>
