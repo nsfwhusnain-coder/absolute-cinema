@@ -1,5 +1,6 @@
 import { tmdb } from "@/lib/tmdb";
 import gzip from "zlib";
+import { languageName } from "@/lib/language-name";
 
 export interface SubtitleTrackOption {
   id: string;
@@ -13,7 +14,65 @@ export interface SubtitleTrackOption {
 }
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+/** Titles whose subtitle lists are kept; the oldest is dropped beyond this. */
+const CACHE_MAX_ENTRIES = 500;
 const subtitleCache = new Map<string, { timestamp: number; tracks: SubtitleTrackOption[] }>();
+/** A subtitle file is a few hundred KB at most; anything far bigger is not one. */
+const MAX_SUBTITLE_BYTES = 5 * 1024 * 1024;
+const MAX_REDIRECTS = 3;
+
+/**
+ * The only hosts subtitle files are fetched from: the OpenSubtitles service
+ * the list comes from. Anything else (an internal address above all) is
+ * refused, so the download route cannot be used to reach other machines.
+ */
+const SUBTITLE_HOST_SUFFIXES = [".strem.io", ".opensubtitles.org", ".opensubtitles.com"];
+
+export function isAllowedSubtitleUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443")) return false;
+  const host = url.hostname.toLowerCase();
+  return SUBTITLE_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix) || host === suffix.slice(1));
+}
+
+function rememberTracks(key: string, tracks: SubtitleTrackOption[]): void {
+  subtitleCache.delete(key);
+  subtitleCache.set(key, { timestamp: Date.now(), tracks });
+  while (subtitleCache.size > CACHE_MAX_ENTRIES) {
+    const oldest = subtitleCache.keys().next().value;
+    if (oldest === undefined) break;
+    subtitleCache.delete(oldest);
+  }
+}
+
+/** Reads a response body, giving up past `limit` bytes. */
+async function readCapped(res: Response, limit: number): Promise<Buffer | null> {
+  const declared = Number(res.headers.get("content-length") || 0);
+  if (declared > limit) {
+    await res.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  const reader = res.body?.getReader();
+  if (!reader) return null;
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
+}
 
 const LANGUAGE_NAMES: Record<string, string> = {
   eng: "English",
@@ -76,7 +135,9 @@ export function getLanguageDisplayName(code: string, rawName?: string): string {
   const normalized = (code || "").trim().toLowerCase();
   if (LANGUAGE_NAMES[normalized]) return LANGUAGE_NAMES[normalized];
   if (rawName && rawName.trim()) return rawName.trim();
-  return normalized.toUpperCase() || "Unknown";
+  // Anything else (HRV, RON, UKR, ...) through the shared table and Intl, not a raw code.
+  const named = languageName(normalized);
+  return named && named.toLowerCase() !== normalized ? named : normalized.toUpperCase() || "Unknown";
 }
 
 /**
@@ -100,19 +161,15 @@ export function convertSrtToVtt(srtContent: string): string {
   let currentCueText: string[] = [];
   let currentTimestamp = "";
 
+  // Promotional lines subtitle sites insert. Matched on site names and on
+  // credit lines that start that way, never on ordinary words: "That was a
+  // great advertisement." is dialogue.
   const isAdLine = (line: string): boolean => {
-    const lower = line.toLowerCase();
+    const lower = line.toLowerCase().replace(/<[^>]+>/g, "").trim();
     return (
-      lower.includes("opensubtitles") ||
-      lower.includes("osdb.link") ||
-      lower.includes("subtitles by") ||
-      lower.includes("downloaded from") ||
-      lower.includes("watch online") ||
-      lower.includes("sync and corrections") ||
-      lower.includes("advertisement") ||
-      lower.includes("captioned by") ||
-      lower.includes("addic7ed.com") ||
-      lower.includes("yify-subtitles")
+      /opensubtitles|osdb\.link|addic7ed|yify-?subtitles|subscene|podnapisi|www\.[a-z0-9-]+\.(com|org|net)/.test(lower) ||
+      /^(subtitles|subtitle|subs|captions|captioned|synced?|sync and corrections|ripped|corrected|translated|transcript)\b.*\bby\b/.test(lower) ||
+      /^(downloaded from|support us and become vip|advertise your product|watch (it )?online)/.test(lower)
     );
   };
 
@@ -265,7 +322,7 @@ export async function fetchSubtitlesForTitle(options: {
       return a.label.localeCompare(b.label);
     });
 
-    subtitleCache.set(cacheKey, { timestamp: Date.now(), tracks });
+    rememberTracks(cacheKey, tracks);
     return tracks;
   } catch (err) {
     console.error("[subtitles] failed to fetch subtitles:", err);
@@ -275,20 +332,33 @@ export async function fetchSubtitlesForTitle(options: {
 
 export async function downloadAndConvertVtt(downloadUrl: string): Promise<string | null> {
   try {
-    const res = await fetch(downloadUrl, {
-      headers: {
-        "User-Agent": "AbsoluteCinema/1.0",
-      },
-      signal: AbortSignal.timeout(8000),
-    });
+    // Redirects are followed by hand so every hop is held to the same hosts.
+    let target = downloadUrl;
+    let res: Response | null = null;
+    const signal = AbortSignal.timeout(8000);
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      if (!isAllowedSubtitleUrl(target)) return null;
+      res = await fetch(target, {
+        headers: { "User-Agent": "AbsoluteCinema/1.0" },
+        redirect: "manual",
+        signal,
+      });
+      const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+      if (!location) break;
+      await res.body?.cancel().catch(() => undefined);
+      target = new URL(location, target).toString();
+      res = null;
+    }
 
-    if (!res.ok) return null;
+    if (!res?.ok) return null;
 
-    const buffer = Buffer.from(await res.arrayBuffer());
+    const buffer = await readCapped(res, MAX_SUBTITLE_BYTES);
+    if (!buffer) return null;
     let rawText = "";
 
     if (buffer[0] === 0x1f && buffer[1] === 0x8b) {
-      const decompressed = gzip.gunzipSync(buffer);
+      // maxOutputLength: a small compressed file must not inflate into gigabytes.
+      const decompressed = gzip.gunzipSync(buffer, { maxOutputLength: MAX_SUBTITLE_BYTES * 4 });
       rawText = decompressed.toString("utf-8");
     } else {
       rawText = buffer.toString("utf-8");

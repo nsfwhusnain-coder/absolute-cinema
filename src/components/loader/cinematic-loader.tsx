@@ -8,7 +8,10 @@ import { SCENE_PALETTES } from "./scenes/common";
 import type { LoaderHandle } from "./runtime";
 
 /** How long to wait for a title's genres before choosing a scene without them. */
-const LOOK_WAIT_MS = 1500;
+const LOOK_WAIT_MS = 700;
+/** Idle time the browser is given before the scene engine is fetched in the background. */
+const WARM_IDLE_TIMEOUT_MS = 5000;
+const WARM_FALLBACK_DELAY_MS = 2500;
 
 /** What the loader needs about a title: its colours and genres. */
 export interface LoaderLook {
@@ -18,10 +21,30 @@ export interface LoaderLook {
 
 /** Warm the engine and this title's colours before Play, so the loader appears at once. */
 export function preloadLoaderEngine(): void {
+  if (loaderEffects() === "static") return;
   void import("./runtime");
 }
 
-function reducedEffects(): "static" | "low" | "full" {
+/**
+ * Fetches the scene engine in the background once the page is idle, so it is
+ * already in the browser's cache whichever button starts playback (a hero, a
+ * card, Continue Watching, the next episode). A loader whose engine was still
+ * downloading when the video started never got to show, which is why it only
+ * sometimes appeared. Skipped where scenes do not run or data is precious.
+ */
+export function warmLoaderWhenIdle(): () => void {
+  if (typeof window === "undefined" || loaderEffects() === "static") return () => {};
+  const connection = (navigator as Navigator & { connection?: { saveData?: boolean } }).connection;
+  if (connection?.saveData) return () => {};
+  if ("requestIdleCallback" in window) {
+    const id = window.requestIdleCallback(preloadLoaderEngine, { timeout: WARM_IDLE_TIMEOUT_MS });
+    return () => window.cancelIdleCallback(id);
+  }
+  const timer = setTimeout(preloadLoaderEngine, WARM_FALLBACK_DELAY_MS);
+  return () => clearTimeout(timer);
+}
+
+export function loaderEffects(): "static" | "low" | "full" {
   if (typeof window === "undefined") return "static";
   if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return "static";
   if (document.documentElement.getAttribute("data-tv") === "1") return "static";
@@ -43,7 +66,7 @@ export function CinematicLoader({ look, leaving, onGone }: { look?: LoaderLook; 
   const [choice, setChoice] = useState<{ scene: LoaderSceneId; mode: CurrentsMode } | null>(() =>
     look ? { scene: readSceneOverride() ?? pickScene(look.genres), mode: currentsMode(look.genres) } : null
   );
-  const [effects] = useState(reducedEffects);
+  const [effects] = useState(loaderEffects);
   const [fallback, setFallback] = useState(effects === "static");
   const scene = choice?.scene;
   const mode = choice?.mode;

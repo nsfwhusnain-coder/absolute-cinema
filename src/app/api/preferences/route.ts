@@ -11,14 +11,11 @@ import {
   getHideAdultPreference,
   getProfileExtras,
   getUserPlaybackPreferences,
-  parseAccent,
-  parseCaptionBackground,
-  parseCaptionSize,
-  parseMaterial,
   saveHideAdultPreference,
-  saveProfileExtras,
+  saveProfileExtraRows,
   saveUserPlaybackPreferences,
 } from "@/lib/profile-preferences.server";
+import { extrasPatch } from "@/lib/profile-extras";
 
 export async function GET() {
   const userId = await getAuthenticatedUserId();
@@ -49,16 +46,19 @@ export async function PATCH(req: NextRequest) {
     subtitlePreference?: unknown;
     fourKStartup?: unknown;
     hideAdult?: unknown;
-    material?: unknown;
-    accent?: unknown;
-    autoplayNext?: unknown;
-    captionSize?: unknown;
-    captionBackground?: unknown;
-  };
+  } & Record<string, unknown>;
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  // Look and behaviour extras are validated before anything is written.
+  const extraRows = extrasPatch(body);
+  if ("invalid" in extraRows) {
+    return NextResponse.json({ error: `The ${extraRows.invalid} preference is invalid.` }, { status: 400 });
   }
 
   // Partial update: any field left out keeps its saved value.
@@ -91,20 +91,7 @@ export async function PATCH(req: NextRequest) {
   if (typeof body.hideAdult === "boolean") {
     await saveHideAdultPreference(userId, body.hideAdult);
   }
-  const material = body.material === undefined ? undefined : parseMaterial(body.material);
-  const accent = body.accent === undefined ? undefined : parseAccent(body.accent);
-  const captionSize = body.captionSize === undefined ? undefined : parseCaptionSize(body.captionSize);
-  const captionBackground = body.captionBackground === undefined ? undefined : parseCaptionBackground(body.captionBackground);
-  if (material === null || accent === null || captionSize === null || captionBackground === null) {
-    return NextResponse.json({ error: "One of the preferences is invalid." }, { status: 400 });
-  }
-  await saveProfileExtras(userId, {
-    ...(material ? { material } : {}),
-    ...(accent ? { accent } : {}),
-    ...(typeof body.autoplayNext === "boolean" ? { autoplayNext: body.autoplayNext } : {}),
-    ...(captionSize ? { captionSize } : {}),
-    ...(captionBackground ? { captionBackground } : {}),
-  });
+  await saveProfileExtraRows(userId, extraRows.rows);
   const [hideAdult, extras] = await Promise.all([
     typeof body.hideAdult === "boolean" ? body.hideAdult : getHideAdultPreference(userId),
     getProfileExtras(userId),

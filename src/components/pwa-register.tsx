@@ -64,16 +64,15 @@ export function PWARegister() {
 
   // Keep-alive every 5 minutes so idle hosts don't cold-sleep the app process.
   //
-  // Gated on an authenticated session: /api/system-status requires auth, so
-  // firing it while signed out produced a 403 on every page load and every
-  // interval tick. It was the only failing request on the sign-in screen, and
-  // a console error on the first thing a new user sees makes real errors
-  // harder to spot. A signed-out visitor also has nothing to keep alive.
+  // Gated on an authenticated session (a signed-out visitor has nothing to keep
+  // alive). It pings the public health endpoint: this used to call
+  // /api/system-status, which is admin-only, so every non-admin profile got a
+  // 403 in the console on each page load and each interval tick.
   const sessionStatus = useSession()?.status;
   useEffect(() => {
     if (sessionStatus !== "authenticated") return;
     const ping = () => {
-      void fetch("/api/system-status", { method: "GET", cache: "no-store" }).catch(() => {});
+      void fetch("/api/health", { method: "GET", cache: "no-store" }).catch(() => {});
     };
     ping();
     const id = window.setInterval(ping, 5 * 60 * 1000);

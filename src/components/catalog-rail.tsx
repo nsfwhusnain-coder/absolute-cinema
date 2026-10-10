@@ -6,7 +6,7 @@ import { MovieCard } from "@/components/movie-card";
 import { MovieRowSkeleton } from "@/components/skeletons";
 import { useHideAdult } from "@/hooks/use-hide-adult";
 import { showcase, withoutAdultTitles } from "@/lib/tmdb";
-import { fetchTmdbPages, type MediaKind, type TmdbListItem } from "@/lib/tmdb-client";
+import { fetchTmdbPages, mediaKey, type MediaKind, type TmdbListItem } from "@/lib/tmdb-client";
 import { providerPath, type StreamingService } from "@/lib/browse-categories";
 
 const RAIL_CARD_LIMIT = 16;
@@ -37,12 +37,15 @@ export function CatalogRail({
   viewAllHref,
   sources,
   showcaseOnly = false,
+  exclude,
 }: {
   title: string;
   viewAllHref?: string;
   sources: Source[];
   /** Home rails: only popular, well-rated titles with artwork. */
   showcaseOnly?: boolean;
+  /** `mediaKey`s already on screen elsewhere; left out so a title is not repeated. */
+  exclude?: ReadonlySet<string>;
 }) {
   const hideAdult = useHideAdult();
   const { data, isLoading } = useQuery({
@@ -59,7 +62,9 @@ export function CatalogRail({
   });
 
   if (isLoading) return <MovieRowSkeleton />;
-  const all = withoutAdultTitles(data ?? [], hideAdult).filter((m) => m.poster_path);
+  const all = withoutAdultTitles(data ?? [], hideAdult).filter(
+    (m) => m.poster_path && !exclude?.has(mediaKey(m.media_type ?? "movie", m.id))
+  );
   const items = showcaseOnly ? showcase(all) : all;
   if (items.length === 0) return null;
 

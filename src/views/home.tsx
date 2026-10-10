@@ -11,14 +11,12 @@ import { Shuffle } from "lucide-react";
 import { useNavigate } from "@/hooks/use-navigate";
 import { MovieCard } from "@/components/movie-card";
 import { CardOverflowMenu } from "@/components/card-overflow-menu";
-import { NETFLIX_PROVIDER_ID, heroPicks, showcase, tmdbImageUrl, withoutAdultTitles } from "@/lib/tmdb";
+import { heroPicks, showcase, tmdbImageUrl, withoutAdultTitles } from "@/lib/tmdb";
 import { useHideAdult } from "@/hooks/use-hide-adult";
 import {
-  fetchTmdbPages,
-  fetchTrendingMerged,
+  mediaKey,
   seedSeenFromContinue,
   takeUnique,
-  tmdbFetch,
   type MediaKind,
   type TmdbListItem,
 } from "@/lib/tmdb-client";
@@ -37,8 +35,8 @@ import {
   warmPreresolvedPlayback,
 } from "@/lib/playback-preresolve";
 import { collapseContinueItems } from "@/lib/continue-watching";
+import { PREFERENCES_QUERY_KEY, fetchPreferences } from "@/lib/preferences-client";
 
-const LIST_PAGES = 3;
 const RAIL_CARD_LIMIT = 16;
 /** Banner slides: the week's biggest well-reviewed titles. */
 const HERO_COUNT = 6;
@@ -60,6 +58,8 @@ interface ProgressItem {
   duration?: number;
   season?: number | null;
   episode?: number | null;
+  /** The next episode of a show whose latest episode was finished. */
+  upNext?: boolean;
 }
 
 function formatTimeLeft(position?: number, duration?: number, progress?: number): string {
@@ -79,6 +79,7 @@ function formatTimeLeft(position?: number, duration?: number, progress?: number)
 }
 
 function formatEpMeta(item: ProgressItem, left: string): string {
+  if (item.upNext && item.season != null && item.episode != null) return `Up next · S${item.season} E${item.episode}`;
   const parts: string[] = [];
   // Resume line: "Continue S2 E4 · 12m left" — one show card, not every episode.
   if (item.mediaType === "tv" && item.season != null && item.episode != null) {
@@ -100,35 +101,23 @@ interface HomeCatalog {
   topRatedSeries: TmdbListItem[];
 }
 
-async function fetchHomeCatalog(): Promise<HomeCatalog> {
-  const [
-    trendingMovies,
-    trendingSeries,
-    netflixMovies,
-    netflixSeries,
-    topRatedMovies,
-    topRatedSeries,
-  ] = await Promise.all([
-    fetchTrendingMerged("movie"),
-    fetchTrendingMerged("tv"),
-    fetchTmdbPages(`discover/movie/provider/${NETFLIX_PROVIDER_ID}`, LIST_PAGES),
-    fetchTmdbPages(`discover/tv/provider/${NETFLIX_PROVIDER_ID}`, LIST_PAGES),
-    fetchTmdbPages("movie/top_rated", LIST_PAGES),
-    fetchTmdbPages("tv/top_rated", LIST_PAGES),
-  ]);
-
-  return {
-    trendingMovies,
-    trendingSeries,
-    netflixMovies,
-    netflixSeries,
-    topRatedMovies,
-    topRatedSeries,
-  };
+interface HomeFeed {
+  catalog: HomeCatalog;
+  hero: TmdbListItem[];
 }
 
 /**
- * `fetchTmdbPages`/`fetchTrendingMerged` already swallow per-page fetch errors
+ * Banner pool and catalog rails in one request (/api/home) instead of about
+ * twenty: from outside the house each wave of six requests cost a round trip.
+ */
+async function fetchHomeFeed(): Promise<HomeFeed> {
+  const res = await fetch("/api/home");
+  if (!res.ok) throw new Error("Could not load the home page");
+  return res.json() as Promise<HomeFeed>;
+}
+
+/**
+ * /api/home already swallows per-list fetch errors
  * into `[]` (so one bad rail never blanks the rest) — but that means a total
  * TMDB outage looks identical to "genuinely zero results" for every rail at
  * once. That's the only case six unrelated lists all come back empty
@@ -142,11 +131,31 @@ function isTotalCatalogFailure(catalog: HomeCatalog | undefined): boolean {
 
 
 
+const TOP_TEN_COUNT = 10;
+
+type TrendingEntry = TmdbListItem & { media_type: "movie" | "tv" };
+
+/** The week's and day's trending movies and shows together, falling back to trending movies. */
+function toTrendingAll(hero: TmdbListItem[] | undefined, fallbackMovies: TmdbListItem[] | undefined): TrendingEntry[] {
+  return (hero?.length ? hero : (fallbackMovies ?? []).map((m) => ({ ...m, media_type: "movie" })))
+    .filter((m) => m.media_type === "movie" || m.media_type === "tv")
+    .map((m) => ({ ...m, media_type: m.media_type as "movie" | "tv" }));
+}
+
+function topTenKeys(hero: TmdbListItem[] | undefined, fallbackMovies: TmdbListItem[] | undefined, hideAdult: boolean): Set<string> {
+  const pool = showcase(withoutAdultTitles(toTrendingAll(hero, fallbackMovies), hideAdult));
+  return new Set(pool.slice(0, TOP_TEN_COUNT).map((m) => mediaKey(m.media_type, m.id)));
+}
+
 export function HomeView() {
   const mounted = useMounted();
   const navigate = useNavigate();
   const { data: session } = useSession();
   const hideAdult = useHideAdult();
+  // Rows this profile hid in Settings → Home.
+  const { data: prefs } = useQuery({ queryKey: PREFERENCES_QUERY_KEY, queryFn: fetchPreferences, enabled: !!session, staleTime: 5 * 60_000 });
+  const hidden = useMemo(() => new Set(prefs?.homeHidden ?? []), [prefs?.homeHidden]);
+  const shows = (id: string) => !hidden.has(id);
 
   const continueQuery = useQuery({
     queryKey: ["progress"],
@@ -180,18 +189,31 @@ export function HomeView() {
     staleTime: 6 * 60 * 60 * 1000,
   });
 
-  const catalog = useQuery({
-    queryKey: ["tmdb", "home-catalog-v3", LIST_PAGES],
-    queryFn: fetchHomeCatalog,
-    staleTime: 6 * 60 * 60 * 1000,
+  const feed = useQuery({
+    queryKey: ["home-feed-v1"],
+    queryFn: fetchHomeFeed,
+    staleTime: 60 * 60 * 1000,
     gcTime: 12 * 60 * 60 * 1000,
   });
+  const catalog = { data: feed.data?.catalog, isError: feed.isError, refetch: feed.refetch };
+
+  // Home's banner and Top 10 are what everyone is watching, movies and shows
+  // alike, held to a quality bar: popular and well liked, never this week's
+  // unreviewed or poorly received releases. The week's trending list is the
+  // pool (today's alone is too thin once filtered).
+  const heroQuery = { data: feed.data?.hero };
+  // What the Top 10 row shows; the rails below skip these so one title is not on screen three times.
+  const topTen = useMemo(
+    () => topTenKeys(heroQuery.data, catalog.data?.trendingMovies, hideAdult),
+    [heroQuery.data, catalog.data?.trendingMovies, hideAdult]
+  );
 
   const rows = useMemo(() => {
     if (!catalog.data) return null;
 
     const seen = new Set<string>();
     seedSeenFromContinue(seen, continueQuery.data);
+    for (const key of topTen) seen.add(key);
 
     // Priority pick for the personalized rail before the general rails claim titles.
     const becauseYouWatched = recSeed
@@ -207,35 +229,9 @@ export function HomeView() {
       topRatedMovies: withoutAdultTitles(takeUnique(catalog.data.topRatedMovies, "movie", seen), hideAdult),
       topRatedSeries: withoutAdultTitles(takeUnique(catalog.data.topRatedSeries, "tv", seen), hideAdult),
     };
-  }, [catalog.data, continueQuery.data, recSeed, recSeedMediaType, becauseYouWatchedQuery.data, hideAdult]);
+  }, [catalog.data, continueQuery.data, recSeed, recSeedMediaType, becauseYouWatchedQuery.data, topTen, hideAdult]);
 
-  // Home's banner and Top 10 are what everyone is watching, movies and shows
-  // alike, held to a quality bar: popular and well liked, never this week's
-  // unreviewed or poorly received releases. The week's trending list is the
-  // pool (today's alone is too thin once filtered).
-  const heroQuery = useQuery({
-    queryKey: ["tmdb", "home-hero", "trending-all-week-day"],
-    queryFn: async () => {
-      const [day, week] = await Promise.all([
-        tmdbFetch("trending/all/day").catch(() => ({ results: [] as TmdbListItem[] })),
-        tmdbFetch("trending/all/week").catch(() => ({ results: [] as TmdbListItem[] })),
-      ]);
-      const seenIds = new Set<string>();
-      return [...(day.results ?? []), ...(week.results ?? [])].filter((m) => {
-        const key = `${m.media_type}:${m.id}`;
-        if (seenIds.has(key)) return false;
-        seenIds.add(key);
-        return true;
-      });
-    },
-    staleTime: 60 * 60 * 1000,
-  });
-  const trendingAll: Array<TmdbListItem & { media_type: "movie" | "tv" }> = (heroQuery.data?.length
-    ? heroQuery.data
-    : (catalog.data?.trendingMovies ?? []).map((m) => ({ ...m, media_type: "movie" }))
-  )
-    .filter((m) => m.media_type === "movie" || m.media_type === "tv")
-    .map((m) => ({ ...m, media_type: m.media_type as "movie" | "tv" }));
+  const trendingAll = toTrendingAll(heroQuery.data, catalog.data?.trendingMovies);
   const heroPool = showcase(withoutAdultTitles(trendingAll, hideAdult));
   const featured = heroPicks(withoutAdultTitles(trendingAll, hideAdult), HERO_COUNT).map((m) => ({ ...m, overview: m.overview ?? "" }));
 
@@ -361,7 +357,7 @@ export function HomeView() {
           ) : null
         ) : (
           <>
-            {rows?.becauseYouWatched.length ? (
+            {shows("because") && rows?.becauseYouWatched.length ? (
               <MovieRow title={`Because you watched ${recSeed?.title ?? ""}`}>
                 {rows.becauseYouWatched.slice(0, RAIL_CARD_LIMIT).map((m) => (
                   <MovieCard
@@ -373,20 +369,21 @@ export function HomeView() {
               </MovieRow>
             ) : null}
 
-            <TopTenRow title="Top 10 Today" items={heroPool.slice(0, 10)} />
+            <TopTenRow title="Top 10 Today" items={heroPool.slice(0, TOP_TEN_COUNT)} />
 
-            <LazyRail minHeight={360}>
+            {shows("acclaimed") && <LazyRail minHeight={360}>
               <CatalogRail
-                title="Acclaimed New Releases"
+                title="Acclaimed Right Now"
                 sources={[
                   { path: "discover/movie/acclaimed", mediaType: "movie" },
                   { path: "discover/tv/acclaimed", mediaType: "tv" },
                 ]}
+                exclude={topTen}
                 showcaseOnly
               />
-            </LazyRail>
+            </LazyRail>}
 
-            {rows?.trendingMovies.length ? (
+            {shows("trending-movies") && rows?.trendingMovies.length ? (
               <MovieRow title="Trending Movies" viewAllHref="/browse/trending-movies">
                 {rows.trendingMovies.slice(0, RAIL_CARD_LIMIT).map((m) => (
                   <MovieCard key={m.id} movie={{ ...m, media_type: "movie" }} />
@@ -394,7 +391,7 @@ export function HomeView() {
               </MovieRow>
             ) : null}
 
-            {rows?.trendingSeries.length ? (
+            {shows("trending-series") && rows?.trendingSeries.length ? (
               <MovieRow title="Trending Series" viewAllHref="/browse/trending-tv">
                 {rows.trendingSeries.slice(0, RAIL_CARD_LIMIT).map((m) => (
                   <MovieCard
@@ -406,25 +403,25 @@ export function HomeView() {
               </MovieRow>
             ) : null}
 
-            <LazyRail minHeight={360}>
+            {shows("anime") && <LazyRail minHeight={360}>
               <CatalogRail
                 title="Popular Anime"
                 viewAllHref="/browse/anime-trending"
                 sources={[{ path: "discover/anime/trending", mediaType: "tv" }]}
                 showcaseOnly
               />
-            </LazyRail>
+            </LazyRail>}
 
-            <LazyRail minHeight={360}>
+            {shows("new-digital") && <LazyRail minHeight={360}>
               <CatalogRail
                 title="New on Digital"
                 viewAllHref="/browse/new-digital"
                 sources={[{ path: "discover/movie/new-digital", mediaType: "movie" }]}
                 showcaseOnly
               />
-            </LazyRail>
+            </LazyRail>}
 
-            {rows?.netflixMovies.length ? (
+            {shows("netflix-movies") && rows?.netflixMovies.length ? (
               <LazyRail minHeight={360}>
                 <MovieRow
                   title="Movies on Netflix"
@@ -437,7 +434,7 @@ export function HomeView() {
               </LazyRail>
             ) : null}
 
-            {rows?.netflixSeries.length ? (
+            {shows("netflix-series") && rows?.netflixSeries.length ? (
               <LazyRail minHeight={360}>
                 <MovieRow
                   title="TV Series on Netflix"
@@ -454,13 +451,13 @@ export function HomeView() {
               </LazyRail>
             ) : null}
 
-            {STREAMING_SERVICES.map((service) => (
+            {STREAMING_SERVICES.filter((service) => shows(`service:${service.slug}`)).map((service) => (
               <LazyRail key={service.slug} minHeight={360}>
                 <ServiceRail service={service} />
               </LazyRail>
             ))}
 
-            {rows?.topRatedMovies.length ? (
+            {shows("top-rated-movies") && rows?.topRatedMovies.length ? (
               <LazyRail minHeight={360}>
                 <MovieRow title="Top Rated Movies" viewAllHref="/browse/top-rated-movies">
                   {rows.topRatedMovies.slice(0, RAIL_CARD_LIMIT).map((m) => (
@@ -470,7 +467,7 @@ export function HomeView() {
               </LazyRail>
             ) : null}
 
-            {rows?.topRatedSeries.length ? (
+            {shows("top-rated-series") && rows?.topRatedSeries.length ? (
               <LazyRail minHeight={360}>
                 <MovieRow title="Top Rated Series" viewAllHref="/browse/top-rated-tv">
                   {rows.topRatedSeries.slice(0, RAIL_CARD_LIMIT).map((m) => (
@@ -492,7 +489,7 @@ export function HomeView() {
 
 function ContinueCard({ item }: { item: ProgressItem }) {
   const pct = Math.min(100, Math.max(0, Math.round((item.progress || 0) * 100)));
-  const img = tmdbImageUrl(item.backdrop || item.poster, "original");
+  const img = tmdbImageUrl(item.backdrop || item.poster, "w780");
   const left = formatTimeLeft(item.position, item.duration, item.progress);
   const line2 = formatEpMeta(item, left);
   const title = item.title ?? "Untitled";
@@ -541,7 +538,7 @@ function ContinueCard({ item }: { item: ProgressItem }) {
         <Link
           href={href}
           className="absolute inset-0 z-0 block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0f]"
-          aria-label={`Continue ${title}`}
+          aria-label={item.upNext ? `Play ${title}, season ${item.season} episode ${item.episode}` : `Continue ${title}`}
         >
           {img ? (
             <img
@@ -556,12 +553,18 @@ function ContinueCard({ item }: { item: ProgressItem }) {
             <div className="h-full w-full bg-[#1a1a22]" />
           )}
 
-          <div
-            className="absolute inset-x-0 bottom-0 z-[5]"
-            style={{ height: 3, background: "rgba(255,255,255,0.25)" }}
-          >
-            <div className="h-full bg-white" style={{ width: `${pct}%` }} />
-          </div>
+          {item.upNext ? (
+            <span className="absolute bottom-2 left-2 z-[5] rounded-full bg-black/65 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-white backdrop-blur">
+              Up next
+            </span>
+          ) : (
+            <div
+              className="absolute inset-x-0 bottom-0 z-[5]"
+              style={{ height: 3, background: "rgba(255,255,255,0.25)" }}
+            >
+              <div className="h-full bg-white" style={{ width: `${pct}%` }} />
+            </div>
+          )}
         </Link>
 
         <CardOverflowMenu

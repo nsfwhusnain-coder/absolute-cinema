@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import { motion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@/hooks/use-navigate";
@@ -10,6 +12,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { SeasonPicker } from "@/components/season-picker";
 import { EpisodeList } from "@/components/episode-list";
 import { BrowseError } from "@/components/empty-states";
+import { tvSeasonQuery } from "@/lib/tv-season-query";
+import { cn } from "@/lib/utils";
 
 interface Props {
   tvId: number;
@@ -38,12 +42,7 @@ export function TvSeasonView({ tvId, season }: Props) {
     isError: seasonFailed,
     refetch: refetchSeason,
   } = useQuery({
-    queryKey: ["tmdb", "tv", "season", tvId, season],
-    queryFn: async () => {
-      const res = await fetch(`/api/tmdb/tv/${tvId}/season/${season}`);
-      if (!res.ok) throw new Error("Failed to load season");
-      return res.json();
-    },
+    ...tvSeasonQuery<any>(tvId, season),
   });
 
   const poster = tmdbImageUrl(seasonData?.poster_path ?? show?.poster_path, "w342");
@@ -82,7 +81,10 @@ export function TvSeasonView({ tvId, season }: Props) {
           </div>
 
           <div className="flex-1 min-w-0">
-            <h1 className="font-display text-2xl font-bold sm:text-4xl">{show?.name}</h1>
+            {/* Sized while loading, so the name arriving doesn't push the page down. */}
+            <h1 className="min-h-[2rem] font-display text-2xl font-bold sm:min-h-[2.5rem] sm:text-4xl">
+              {show?.name ?? <span className="inline-block h-8 w-48 animate-pulse rounded-md bg-white/10 align-middle sm:h-10" />}
+            </h1>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <h2 className="font-display text-sm font-semibold">Episodes</h2>
               {showLoading || !show?.seasons ? (
@@ -95,8 +97,17 @@ export function TvSeasonView({ tvId, season }: Props) {
                 />
               )}
             </div>
-            {seasonData?.overview && (
-              <p className="mt-2 text-sm text-muted-foreground max-w-2xl">{seasonData.overview}</p>
+            {seasonData ? (
+              seasonData.overview ? <SeasonOverview text={seasonData.overview} /> : null
+            ) : (
+              // Room for three lines while the season loads: the overview and
+              // the episodes arrive together, and the list used to jump down
+              // under a long synopsis (a 0.22 layout shift on phones).
+              <div className="mt-2 max-w-2xl space-y-1.5" aria-hidden>
+                <Skeleton className="h-3.5 w-full" />
+                <Skeleton className="h-3.5 w-11/12" />
+                <Skeleton className="h-3.5 w-2/3" />
+              </div>
             )}
 
             <div className="mt-5">
@@ -114,6 +125,26 @@ export function TvSeasonView({ tvId, season }: Props) {
           </div>
         </motion.div>
       </div>
+    </div>
+  );
+}
+
+/** The season synopsis in three lines, with the rest a tap away (some run to a whole screen on a phone). */
+function SeasonOverview({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > 220;
+  return (
+    <div className="mt-2 max-w-2xl">
+      <p className={cn("text-sm text-muted-foreground", !open && long && "line-clamp-3")}>{text}</p>
+      {long && (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="mt-1 text-xs font-semibold text-white/80 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+        >
+          {open ? "Show less" : "More"}
+        </button>
+      )}
     </div>
   );
 }

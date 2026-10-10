@@ -30,6 +30,11 @@ export const DETAIL_CREW_JOBS: ReadonlySet<string> = new Set([
 ]);
 /** Hard cap after job filtering — a big franchise can list many producers. */
 export const DETAIL_CREW_LIMIT = 12;
+/**
+ * Kept-first order. TMDB lists crew in no useful order, so a film with a dozen
+ * producers listed early lost its Director to the cap (Dune: Part Two, Barbie).
+ */
+const CREW_JOB_RANK = ["Director", "Creator", "Screenplay", "Writer", "Story", "Executive Producer", "Producer"];
 
 interface CreditsLike {
   cast?: unknown[];
@@ -57,7 +62,10 @@ export function trimTmdbDetails<T extends object>(data: T): T {
     const crew = Array.isArray(credits.crew)
       ? credits.crew
           .filter((member) => DETAIL_CREW_JOBS.has(member?.job ?? ""))
+          .map((member, index) => ({ member, index, rank: CREW_JOB_RANK.indexOf(member.job ?? "") }))
+          .sort((a, b) => a.rank - b.rank || a.index - b.index)
           .slice(0, DETAIL_CREW_LIMIT)
+          .map(({ member }) => member)
       : credits.crew;
     next.credits = { ...credits, ...(cast ? { cast } : {}), ...(crew ? { crew } : {}) };
   }

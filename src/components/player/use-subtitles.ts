@@ -7,6 +7,7 @@ import { usePlayerState, type StreamSubtitleTrack, type SubtitleOption } from ".
 import { getTitleLanguage, rememberTitleLanguage } from "@/lib/title-language";
 import { betterThanExternal } from "./subtitle-policy";
 import { parseVtt } from "./vtt";
+import { baseLanguage } from "@/lib/language-name";
 
 export interface ExternalSubtitle {
   id: string;
@@ -47,9 +48,9 @@ function streamOption(track: StreamSubtitleTrack): SubtitleOption {
   };
 }
 
+/** "spa" and "es", "ger" and "de", "pt-BR" and "por" are the same language. */
 function sameLanguage(a: string, b: string): boolean {
-  const base = (code: string) => code.toLowerCase().split("-")[0]!.replace(/^eng$/, "en").replace(/^jpn$/, "ja");
-  return base(a) === base(b);
+  return baseLanguage(a) === baseLanguage(b);
 }
 
 /** Full subtitles in `language` first: from inside the file, then the stream, then downloaded. */
@@ -229,11 +230,22 @@ export function useSubtitles(
     if (!video) return;
     refreshOptions();
     const onChange = () => refreshOptions();
+    // The player draws every caption itself. A track the stream marks as
+    // default can be switched to "showing" by the engine after our choice,
+    // and the browser then drew it too, a second copy under the controls.
+    const keepNativeHidden = () => {
+      for (let i = 0; i < video.textTracks.length; i++) {
+        const track = video.textTracks[i]!;
+        if (track.mode === "showing") track.mode = "hidden";
+      }
+    };
     video.textTracks.addEventListener("addtrack", onChange);
     video.textTracks.addEventListener("removetrack", onChange);
+    video.textTracks.addEventListener("change", keepNativeHidden);
     return () => {
       video.textTracks.removeEventListener("addtrack", onChange);
       video.textTracks.removeEventListener("removetrack", onChange);
+      video.textTracks.removeEventListener("change", keepNativeHidden);
     };
   }, [videoRef, refreshOptions]);
 

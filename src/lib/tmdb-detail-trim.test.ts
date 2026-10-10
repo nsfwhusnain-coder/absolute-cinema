@@ -72,3 +72,12 @@ describe("trimTmdbDetails", () => {
     expect("watch/providers" in input).toBe(true);
   });
 });
+
+describe("trimTmdbDetails crew order", () => {
+  it("keeps the Director even when a dozen producers are listed first", () => {
+    const producers = Array.from({ length: 15 }, (_, i) => ({ job: "Producer", name: `P${i}` }));
+    const out = trimTmdbDetails({ credits: { cast: [], crew: [...producers, { job: "Director", name: "Denis Villeneuve" }] } });
+    expect(out.credits.crew[0]).toEqual({ job: "Director", name: "Denis Villeneuve" });
+    expect(out.credits.crew.length).toBe(DETAIL_CREW_LIMIT);
+  });
+});

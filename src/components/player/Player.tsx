@@ -7,6 +7,7 @@ import {
   ListVideo,
   Maximize,
   Minimize,
+  Moon,
   Pause,
   PictureInPicture2,
   Play,
@@ -18,13 +19,14 @@ import {
   Sparkles,
 } from "lucide-react";
 import type { PlaybackSource } from "@/lib/playback/types";
-import type { SubtitlePreference } from "@/lib/profile-preferences";
+import type { PlaybackQualityPreference, SubtitlePreference } from "@/lib/profile-preferences";
 import { sourceDelivery, sourceMaxHeight } from "@/lib/playback/source-quality";
 import { useHoverPreview } from "@/hooks/use-hover-preview";
 import { hdrSdrDisplayMap } from "@/lib/playback/hdr-sdr-map";
 import { buildDownloadOptions, downloadDetailLine, downloadFilename, downloadSizeLabel } from "@/lib/playback/download-options";
 import { cn } from "@/lib/utils";
-import { usePlayerState, PLAYBACK_SPEEDS, VIDEO_FITS } from "./store";
+import { usePlayerState, PLAYBACK_SPEEDS, VIDEO_FITS, type PlayerState } from "./store";
+import { useShallow } from "zustand/react/shallow";
 import { languageName } from "@/lib/language-name";
 import { titleLanguageKey } from "@/lib/title-language";
 import { useQuery } from "@tanstack/react-query";
@@ -51,10 +53,21 @@ import {
   formatTime,
 } from "./ui";
 import { EpisodesMenu, type SeasonOption } from "./episodes-menu";
+import { PLAYER_SHORTCUTS } from "@/lib/shortcuts";
+import { useMediaSession } from "./use-media-session";
+import { useSleepTimer, useSleepTimerClock } from "./use-sleep-timer";
+import { SleepChip, SleepMenu, SleepMenuValue, SleepScreen, SleepWarning } from "./sleep-timer-ui";
 
 const CONTROLS_IDLE_MS = 3200;
 const NOTICE_MS = 5000;
-const SEEK_STEP_S = 10;
+/** Skip step before the profile's own choice (Settings → Playback) has loaded. */
+const DEFAULT_SEEK_STEP_S = 10;
+/** "Resumed at 42:10 · Start over" stays this long after playback picks up where it left off. */
+const START_OVER_MS = 9000;
+/** Resume points closer to the start than this just play on; no offer to start over. */
+const START_OVER_MIN_S = 60;
+/** How long the "Intro skipped · Watch it" chip stays after an automatic skip. */
+const AUTO_SKIP_UNDO_MS = 7000;
 const VOLUME_STEP = 0.1;
 /** Two taps closer together than this are a double tap. */
 const DOUBLE_TAP_MS = 300;
@@ -67,7 +80,21 @@ const SKIP_LENGTH_TOLERANCE_S = 20;
 /** Seconds buffered that the start-up progress bar counts as full. */
 const START_BUFFER_S = 4;
 
-type Panel = "none" | "settings" | "subtitles" | "audio" | "picture" | "quality" | "speed" | "servers" | "download" | "episodes";
+/** "sleep" is the sleep menu opened from its own button; "sleep-settings" the same menu reached through Settings. */
+type Panel =
+  | "none"
+  | "settings"
+  | "subtitles"
+  | "audio"
+  | "picture"
+  | "quality"
+  | "speed"
+  | "servers"
+  | "download"
+  | "episodes"
+  | "sleep"
+  | "sleep-settings"
+  | "shortcuts";
 
 export interface PlayerProps {
   sources: PlaybackSource[];
@@ -87,6 +114,8 @@ export interface PlayerProps {
   initialTime: number;
   fallbackDurationS: number;
   audio: AudioChoice;
+  /** The profile's quality choice (Best, 4K, 1080p…). */
+  quality?: PlaybackQualityPreference;
   subtitlePreference: SubtitlePreference;
   externalSubtitles: ExternalSubtitle[];
   onProgress(current: number, duration: number): void;
@@ -122,7 +151,11 @@ export function Player(props: PlayerProps) {
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastPointer = useRef<string>("mouse");
   const lastTapAt = useRef(0);
-  const state = usePlayerState();
+  // Everything but the 4-per-second fields (playhead, buffer, caption text):
+  // those are read by the small components that draw them, so the whole
+  // player no longer re-renders on every time update.
+  const state = usePlayerState(useShallow(coarseState));
+  const hasPlayhead = usePlayerState((s) => s.currentTime > 0);
 
   const actions = usePlayerController({
     videoRef,
@@ -132,12 +165,16 @@ export function Player(props: PlayerProps) {
     title: props.title,
     initialTime: props.initialTime,
     audio: props.audio,
+    quality: props.quality,
     fallbackDurationS: props.fallbackDurationS,
     onProgress: props.onProgress,
     onEnded: props.onEnded,
     onRefreshSources: props.onRefreshSources,
   });
   const { data: profilePrefs } = useQuery({ queryKey: PREFERENCES_QUERY_KEY, queryFn: fetchPreferences, staleTime: 5 * 60_000 });
+  const seekStep = profilePrefs?.seekStep ?? DEFAULT_SEEK_STEP_S;
+  /** Runs whatever the skip button would do right now (the S key). Set during render below. */
+  const skipNowRef = useRef<(() => void) | null>(null);
   const audioLanguage =
     state.remuxAudio?.tracks.find((t) => t.index === state.remuxAudio?.active)?.language ??
     state.audioTracks.find((t) => t.id === state.activeAudio)?.lang ??
@@ -167,6 +204,20 @@ export function Player(props: PlayerProps) {
     sourceType: activeSource?.type ?? null,
   });
   const airplay = useAirPlayAvailable(videoRef);
+  useSleepTimerClock(videoRef);
+  useMediaSession({
+    videoRef,
+    title: props.displayTitle,
+    subtitle: props.episodeLabel,
+    artwork: props.backdrop,
+    seekStep,
+    seek: actions.seek,
+    seekBy: actions.seekBy,
+    onNextEpisode: props.tv?.onNextEpisode,
+  });
+  const sleepActive = useSleepTimer((s) => s.timer.setting.kind !== "off");
+  const mediaType = props.title.mediaType;
+  const hasNextEpisode = Boolean(props.tv?.onNextEpisode);
   // HDR on an SDR display looks crushed and dim; lift shadows unless the screen is HDR.
   const videoFilter = useMemo(() => {
     if (state.dynamicRange === "SDR" || typeof window === "undefined") return undefined;
@@ -235,18 +286,42 @@ export function Player(props: PlayerProps) {
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // Tabbing through the controls shows them: focus must never sit on an invisible button.
+      if (e.key === "Tab") {
+        poke();
+        return;
+      }
+      // Space and Enter on a focused button, link or menu item press it, as everywhere else.
+      if ((e.key === " " || e.key === "Enter") && target?.closest('button, a[href], [role^="menuitem"], [role="tab"], [role="radio"], [role="switch"]')) return;
       const s = usePlayerState.getState();
       const key = e.key.toLowerCase();
+      // On the sleep screen, play carries on: resume, or the next episode when the timer stopped at an end.
+      const asleep = useSleepTimer.getState().asleep;
+      if (asleep && (key === " " || key === "k")) {
+        e.preventDefault();
+        if (asleep === "timer") actions.togglePlay();
+        else props.tv?.onNextEpisode?.();
+        return;
+      }
       let handled = true;
       if (key === " " || key === "k") actions.togglePlay();
-      else if (key === "arrowleft" || key === "j") actions.seekBy(-SEEK_STEP_S);
-      else if (key === "arrowright" || key === "l") actions.seekBy(SEEK_STEP_S);
+      else if (key === "arrowleft" || key === "j") actions.seekBy(-seekStep);
+      else if (key === "arrowright" || key === "l") actions.seekBy(seekStep);
       else if (key === "arrowup") actions.setVolume(s.volume + VOLUME_STEP);
       else if (key === "arrowdown") actions.setVolume(s.volume - VOLUME_STEP);
       else if (key === "m") actions.toggleMute();
       else if (key === "f") toggleFullscreen();
       else if (key === "c") selectSubtitle(s.activeSubtitle ? null : (s.subtitles[0]?.id ?? null));
       else if (key === "n" && props.tv?.onNextEpisode) props.tv.onNextEpisode();
+      else if (key === "z") setPanel(panel === "sleep" || panel === "sleep-settings" ? "none" : "sleep");
+      else if (key === "s" && skipNowRef.current) skipNowRef.current();
+      else if (key === "p") togglePip();
+      else if (e.key === ">" || e.key === "<") {
+        const at = PLAYBACK_SPEEDS.indexOf(s.rate as (typeof PLAYBACK_SPEEDS)[number]);
+        const next = PLAYBACK_SPEEDS[Math.min(PLAYBACK_SPEEDS.length - 1, Math.max(0, (at < 0 ? 2 : at) + (e.key === ">" ? 1 : -1)))]!;
+        actions.setRate(next);
+        usePlayerState.getState().showNotice(next === 1 ? "Normal speed" : `Speed ${next}×`);
+      } else if (e.key === "?") setPanel(panel === "shortcuts" ? "none" : "shortcuts");
       else if (/^[0-9]$/.test(key) && s.duration > 0) actions.seek((Number(key) / 10) * s.duration);
       else if (key === "escape") {
         if (panel !== "none") setPanel("none");
@@ -260,7 +335,7 @@ export function Player(props: PlayerProps) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [actions, toggleFullscreen, selectSubtitle, panel, props.tv, props.onBack, poke]);
+  }, [actions, toggleFullscreen, togglePip, selectSubtitle, panel, props.tv, props.onBack, poke, seekStep]);
 
   const playable = useMemo(() => playableHere(props.sources, props.remuxAvailable), [props.sources, props.remuxAvailable]);
   const heights = useMemo(() => qualityChoices(props.sources, props.remuxAvailable), [props.sources, props.remuxAvailable]);
@@ -286,7 +361,7 @@ export function Player(props: PlayerProps) {
     if (ticket) params.set("ticket", ticket);
     return `/api/download?${params}`;
   };
-  const started = state.phase === "playing" || state.phase === "recovering" || (state.phase === "starting" && state.currentTime > 0);
+  const started = state.phase === "playing" || state.phase === "recovering" || (state.phase === "starting" && hasPlayhead);
 
   // A click or tap shows or hides the controls (only the play button pauses);
   // on touch, a double tap on either side seeks, like every phone video app.
@@ -298,7 +373,7 @@ export function Player(props: PlayerProps) {
       const rect = containerRef.current?.getBoundingClientRect();
       const zone = rect && rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5;
       if (doubleTap && started && (zone < SEEK_ZONE || zone > 1 - SEEK_ZONE)) {
-        actions.seekBy(zone < SEEK_ZONE ? -SEEK_STEP_S : SEEK_STEP_S);
+        actions.seekBy(zone < SEEK_ZONE ? -seekStep : seekStep);
         poke();
         return;
       }
@@ -310,28 +385,77 @@ export function Player(props: PlayerProps) {
         poke();
       }
     },
-    [actions, poke, started]
+    [actions, poke, started, seekStep]
   );
   const showLoading = !started && !state.failureMessage;
+  // Picked up where the viewer left off: offer the beginning for a few seconds.
+  const [startOverAt, setStartOverAt] = useState<number | null>(null);
+  const startOverChecked = useRef(false);
+  useEffect(() => {
+    if (!started || startOverChecked.current) return;
+    startOverChecked.current = true;
+    const at = usePlayerState.getState().currentTime;
+    if (at >= START_OVER_MIN_S && props.initialTime >= START_OVER_MIN_S) setStartOverAt(at);
+  }, [started, props.initialTime]);
+  useEffect(() => {
+    if (startOverAt === null) return;
+    const timer = setTimeout(() => setStartOverAt(null), START_OVER_MS);
+    return () => clearTimeout(timer);
+  }, [startOverAt]);
   // The loading scene stays mounted through its exit, then unmounts for good.
   const [loaderGone, setLoaderGone] = useState(false);
   const controlsShown = state.controlsVisible || panel !== "none" || !state.playing;
 
-  const bufferedAhead = Math.max(0, state.bufferedEnd - state.currentTime);
   const connecting = Boolean(activeSource) && state.phase !== "resolving";
-  const bufferingStart = connecting && bufferedAhead > 0;
+  // Start-up buffer as a share of START_BUFFER_S, in 5% steps (re-renders only when a step changes).
+  const startBuffer = usePlayerState((s) => Math.round(Math.min(1, Math.max(0, s.bufferedEnd - s.currentTime) / START_BUFFER_S) * 20) / 20);
+  const bufferingStart = connecting && startBuffer > 0;
   // Times only apply to the cut they were measured on: ignore them when this
-  // file's length differs by more than a few seconds.
-  const skip = started
-    ? props.skipSegments?.find(
-        (seg) =>
-          state.currentTime >= seg.start &&
-          state.currentTime < seg.end - SKIP_TAIL_S &&
-          (!seg.episodeLength || !state.duration || Math.abs(seg.episodeLength - state.duration) <= SKIP_LENGTH_TOLERANCE_S)
-      )
-    : undefined;
+  // file's length differs by more than a few seconds. Selected as an index so
+  // the player re-renders when the playhead enters or leaves a segment, not
+  // on every time update.
+  const skipIndex = usePlayerState((s) =>
+    started && props.skipSegments
+      ? props.skipSegments.findIndex(
+          (seg) =>
+            s.currentTime >= seg.start &&
+            s.currentTime < seg.end - SKIP_TAIL_S &&
+            (!seg.episodeLength || !s.duration || Math.abs(seg.episodeLength - s.duration) <= SKIP_LENGTH_TOLERANCE_S)
+        )
+      : -1
+  );
+  const skip = skipIndex >= 0 ? props.skipSegments?.[skipIndex] : undefined;
   const skipToNext = skip?.kind === "credits" && Boolean(props.tv?.onNextEpisode);
   const showSkip = Boolean(skip) && !(skipToNext && state.upNextVisible);
+  skipNowRef.current =
+    skip && showSkip
+      ? () => {
+          if (skipToNext) props.tv!.onNextEpisode!();
+          else actions.seek(skip.end);
+        }
+      : null;
+
+  // "Skip intros automatically": an intro or recap is skipped once as it
+  // starts, with a chip to go back and watch it (which also stops it being
+  // skipped again this episode).
+  const autoSkipped = useRef(new Set<number>());
+  const [undoSkip, setUndoSkip] = useState<SkipSegment | null>(null);
+  const autoSkip = profilePrefs?.autoSkipIntro === true;
+  const skipStart = skip?.start;
+  const skipKind = skip?.kind;
+  const skipEnd = skip?.end;
+  useEffect(() => {
+    if (!autoSkip || skipStart === undefined || skipEnd === undefined || (skipKind !== "intro" && skipKind !== "recap")) return;
+    if (autoSkipped.current.has(skipStart)) return;
+    autoSkipped.current.add(skipStart);
+    actions.seek(skipEnd);
+    setUndoSkip({ kind: skipKind, start: skipStart, end: skipEnd } as SkipSegment);
+  }, [autoSkip, skipStart, skipEnd, skipKind, actions]);
+  useEffect(() => {
+    if (!undoSkip) return;
+    const timer = setTimeout(() => setUndoSkip(null), AUTO_SKIP_UNDO_MS);
+    return () => clearTimeout(timer);
+  }, [undoSkip]);
 
   const subtitleLabel = state.subtitles.find((o) => o.id === state.activeSubtitle)?.label ?? "Off";
   const remuxAudio = state.remuxAudio;
@@ -359,7 +483,7 @@ export function Player(props: PlayerProps) {
   return (
     <div
       ref={containerRef}
-      className={cn("relative h-full w-full select-none overflow-hidden bg-black text-white", !controlsShown && "cursor-none")}
+      className={cn("player-shell relative h-full w-full select-none overflow-hidden bg-black text-white", !controlsShown && "cursor-none")}
       onPointerMove={(e) => {
         if (e.pointerType === "mouse") poke();
       }}
@@ -389,11 +513,12 @@ export function Player(props: PlayerProps) {
       />
       <video ref={scoutRef} className="hidden" muted playsInline aria-hidden />
 
-      <Captions
-        text={state.cueText}
+      <LiveCaptions
         raised={controlsShown && started}
         size={profilePrefs?.captionSize}
         background={profilePrefs?.captionBackground}
+        color={profilePrefs?.captionColor}
+        font={profilePrefs?.captionFont}
       />
 
       {!loaderGone && (
@@ -402,7 +527,7 @@ export function Player(props: PlayerProps) {
           scene={<CinematicLoader look={props.loaderLook} leaving={!showLoading} onGone={() => setLoaderGone(true)} />}
           title={props.displayTitle}
           subtitle={props.episodeLabel}
-          progress={bufferingStart ? Math.min(1, bufferedAhead / START_BUFFER_S) : undefined}
+          progress={bufferingStart ? startBuffer : undefined}
         />
       )}
       {started && state.buffering && !state.failureMessage && <BufferingSpinner />}
@@ -417,7 +542,7 @@ export function Player(props: PlayerProps) {
       )}
 
       {state.notice && (
-        <div className="pointer-events-none absolute inset-x-0 top-5 z-40 flex justify-center px-4">
+        <div className="pointer-events-none absolute inset-x-0 top-20 z-40 flex justify-center px-4 sm:top-5">
           <div role="status" className="glass-clear glass-dense max-w-md rounded-full px-4 py-2 text-center text-sm text-white">
             {state.notice.text}
           </div>
@@ -442,11 +567,14 @@ export function Player(props: PlayerProps) {
             {props.episodeLabel && <div className="truncate text-xs text-white/70 sm:text-sm">{props.episodeLabel}</div>}
           </div>
         </div>
-        {nowHeight > 0 && (
-          <div className={cn("glass-clear hidden items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold sm:flex", fade(controlsShown))}>
-            <Sparkles className="h-3.5 w-3.5" /> {qualityLabel(nowHeight)}
-          </div>
-        )}
+        <div className="flex shrink-0 items-center gap-2">
+          <SleepChip mediaType={mediaType} className={fade(controlsShown)} onOpen={() => setPanel(panel === "sleep" ? "none" : "sleep")} />
+          {nowHeight > 0 && (
+            <div className={cn("glass-clear hidden items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold sm:flex", fade(controlsShown))}>
+              <Sparkles className="h-3.5 w-3.5" /> {qualityLabel(nowHeight)}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Centre transport (touch-friendly) */}
@@ -457,18 +585,34 @@ export function Player(props: PlayerProps) {
             !(controlsShown && !state.buffering) && "pointer-events-none"
           )}
         >
-          <IconButton label="Back 10 seconds" onClick={() => actions.seekBy(-SEEK_STEP_S)} className={cn("glass-clear hidden sm:inline-flex", fade(controlsShown && !state.buffering))} size="lg">
+          <IconButton label={`Back ${seekStep} seconds`} onClick={() => actions.seekBy(-seekStep)} className={cn("glass-clear hidden sm:inline-flex", fade(controlsShown && !state.buffering))} size="lg">
             <RotateCcw className="h-5 w-5" />
           </IconButton>
           <IconButton label={state.playing ? "Pause" : "Play"} onClick={actions.togglePlay} className={cn("glass-clear", fade(controlsShown && !state.buffering))} size="xl">
             {state.playing ? <Pause className="h-7 w-7 fill-current" /> : <Play className="h-7 w-7 translate-x-0.5 fill-current" />}
           </IconButton>
-          <IconButton label="Forward 10 seconds" onClick={() => actions.seekBy(SEEK_STEP_S)} className={cn("glass-clear hidden sm:inline-flex", fade(controlsShown && !state.buffering))} size="lg">
+          <IconButton label={`Forward ${seekStep} seconds`} onClick={() => actions.seekBy(seekStep)} className={cn("glass-clear hidden sm:inline-flex", fade(controlsShown && !state.buffering))} size="lg">
             <RotateCw className="h-5 w-5" />
           </IconButton>
         </div>
       )}
 
+      {undoSkip && !(skip && showSkip) && (
+        <div className={cn("absolute right-4 z-30 transition-[bottom] duration-300 sm:right-8", controlsShown ? "bottom-32" : "bottom-10")}>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              actions.seek(undoSkip.start);
+              setUndoSkip(null);
+            }}
+            className="glass-clear flex h-11 items-center gap-2 rounded-full px-5 text-sm font-semibold text-white transition hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+          >
+            <RotateCcw className="h-4 w-4" />
+            {undoSkip.kind === "recap" ? "Recap skipped" : "Intro skipped"} · Watch it
+          </button>
+        </div>
+      )}
       {skip && showSkip && (
         <div className={cn("absolute right-4 z-30 transition-[bottom] duration-300 sm:right-8", controlsShown ? "bottom-32" : "bottom-10")}>
           <button
@@ -495,24 +639,16 @@ export function Player(props: PlayerProps) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className={cn("glass-clear rounded-[1.75rem] px-4 pb-2 pt-1.5 sm:px-5", fade(controlsShown && started))}>
-          <div className="flex items-center gap-3">
-            <span className="w-14 text-right text-xs font-medium tabular-nums text-white/90">{formatTime(state.currentTime)}</span>
-            <SeekBar
-              duration={state.duration}
-              currentTime={state.currentTime}
-              bufferedEnd={state.bufferedEnd}
-              onSeek={actions.seek}
-              onHover={setHoverTime}
-              previewSrc={previewSrc}
-            />
-            <span className="w-14 text-xs font-medium tabular-nums text-white/70">-{formatTime(Math.max(0, state.duration - state.currentTime))}</span>
-          </div>
+          <SeekRow onSeek={actions.seek} onHover={setHoverTime} previewSrc={previewSrc} />
           <div className="flex items-center justify-between gap-1">
             <div className="flex items-center gap-0.5">
               <IconButton label={state.playing ? "Pause" : "Play"} onClick={actions.togglePlay}>
                 {state.playing ? <Pause className="h-5 w-5 fill-current" /> : <Play className="h-5 w-5 fill-current" />}
               </IconButton>
-              <VolumeControl volume={state.volume} muted={state.muted} onVolume={actions.setVolume} onToggleMute={actions.toggleMute} />
+              {/* Phones set volume with their own buttons (iOS ignores the page's), and the space is needed. */}
+              <div className="hidden sm:block">
+                <VolumeControl volume={state.volume} muted={state.muted} onVolume={actions.setVolume} onToggleMute={actions.toggleMute} />
+              </div>
               {props.tv?.onNextEpisode && (
                 <IconButton label="Next episode" onClick={props.tv.onNextEpisode}>
                   <SkipForward className="h-5 w-5 fill-current" />
@@ -526,9 +662,16 @@ export function Player(props: PlayerProps) {
                 </IconButton>
               )}
               <IconButton
+                label={sleepActive ? "Sleep timer (on)" : "Sleep timer"}
+                active={sleepActive || panel === "sleep"}
+                onClick={() => setPanel(panel === "sleep" ? "none" : "sleep")}
+              >
+                <Moon className={cn("h-5 w-5", sleepActive && "fill-current")} />
+              </IconButton>
+              <IconButton
                 label="Settings"
-                active={panel !== "none" && panel !== "episodes"}
-                onClick={() => setPanel(panel === "none" || panel === "episodes" ? "settings" : "none")}
+                active={panel !== "none" && panel !== "episodes" && panel !== "sleep"}
+                onClick={() => setPanel(panel === "none" || panel === "episodes" || panel === "sleep" ? "settings" : "none")}
               >
                 <Settings className="h-5 w-5" />
               </IconButton>
@@ -540,9 +683,34 @@ export function Player(props: PlayerProps) {
         </div>
       </div>
 
+      {startOverAt !== null && !state.failureMessage && (
+        <div className={cn("absolute left-3 z-30 transition-[bottom] duration-300 sm:left-8", controlsShown ? "bottom-32" : "bottom-10")}>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              actions.seek(0);
+              setStartOverAt(null);
+            }}
+            className="glass-clear flex h-11 items-center gap-2 rounded-full px-5 text-sm font-medium text-white transition hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+          >
+            <RotateCcw className="h-4 w-4" />
+            <span className="text-white/70">Resumed at {formatTime(startOverAt)} ·</span> Start over
+          </button>
+        </div>
+      )}
+      <SleepWarning mediaType={mediaType} hasNextEpisode={hasNextEpisode} raised={controlsShown && started} />
+      <SleepScreen
+        title={props.displayTitle}
+        episodeLabel={props.episodeLabel}
+        onResume={actions.togglePlay}
+        onNextEpisode={props.tv?.onNextEpisode}
+        onBack={props.onBack}
+      />
+
       {/* Menus */}
       {panel !== "none" && (
-        <div className="absolute bottom-28 right-3 z-30 sm:bottom-32 sm:right-6">
+        <div className="player-menus absolute bottom-28 right-3 z-30 sm:bottom-32 sm:right-6">
           {panel === "settings" && (
             <PlayerMenu title="Settings">
               <MenuItem label="Subtitles" trailing={<MenuValue>{subtitleLabel}</MenuValue>} onClick={() => setPanel("subtitles")} />
@@ -557,6 +725,7 @@ export function Player(props: PlayerProps) {
               <MenuItem label="Picture" trailing={<MenuValue>{VIDEO_FITS.find((f) => f.value === state.videoFit)?.label}</MenuValue>} onClick={() => setPanel("picture")} />
               <MenuItem label="Playback speed" trailing={<MenuValue>{state.rate === 1 ? "Normal" : `${state.rate}×`}</MenuValue>} onClick={() => setPanel("speed")} />
               <MenuItem label="Server" trailing={<MenuValue>{serverName(activeSource)}</MenuValue>} onClick={() => setPanel("servers")} />
+              <MenuItem label="Sleep timer" trailing={<SleepMenuValue mediaType={mediaType} />} onClick={() => setPanel("sleep-settings")} />
               {typeof document !== "undefined" && document.pictureInPictureEnabled && (
                 <MenuItem
                   label="Picture in picture"
@@ -579,6 +748,9 @@ export function Player(props: PlayerProps) {
               )}
               {downloads.length > 0 && (
                 <MenuItem label="Download" trailing={<MenuValue>{`${downloads.length} option${downloads.length > 1 ? "s" : ""}`}</MenuValue>} onClick={() => setPanel("download")} />
+              )}
+              {lastPointer.current === "mouse" && (
+                <MenuItem label="Keyboard shortcuts" trailing={<MenuValue>?</MenuValue>} onClick={() => setPanel("shortcuts")} />
               )}
             </PlayerMenu>
           )}
@@ -666,6 +838,29 @@ export function Player(props: PlayerProps) {
               )}
             </PlayerMenu>
           )}
+          {(panel === "sleep" || panel === "sleep-settings") && (
+            <SleepMenu
+              mediaType={mediaType}
+              hasNextEpisode={hasNextEpisode}
+              onBack={panel === "sleep-settings" ? () => setPanel("settings") : undefined}
+              onChosen={(confirmation) => {
+                setPanel("none");
+                usePlayerState.getState().showNotice(confirmation);
+              }}
+            />
+          )}
+          {panel === "shortcuts" && (
+            <PlayerMenu title="Keyboard shortcuts" onBack={() => setPanel("settings")}>
+              <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 px-3 pb-3 text-sm">
+                {PLAYER_SHORTCUTS.map(({ key, desc }) => (
+                  <div key={key} className="contents">
+                    <kbd className="justify-self-start whitespace-nowrap rounded-md bg-white/10 px-2 py-0.5 font-mono text-xs text-white/90">{key}</kbd>
+                    <span className="text-white/75">{desc}</span>
+                  </div>
+                ))}
+              </div>
+            </PlayerMenu>
+          )}
           {panel === "episodes" && props.tv && (
             <EpisodesMenu
               tvId={props.title.tmdbId}
@@ -712,10 +907,52 @@ function serverName(source: PlaybackSource | null): string {
   return source.label.split("•")[0]!.replace(/·.*$/, "").trim() || source.provider;
 }
 
+/** Which debrid account a premium row came from (Real-Debrid rows are labelled "Debrid"). */
+function debridServiceName(source: PlaybackSource): string {
+  const provider = source.provider.toLowerCase();
+  if (provider.includes("alldebrid")) return "AllDebrid";
+  if (provider.includes("torbox")) return "TorBox";
+  return "Real-Debrid";
+}
+
 function serverDetail(source: PlaybackSource): string {
   const height = sourceMaxHeight(source);
   const parts = [height ? qualityLabel(normalizeHeight(height)) : "Auto"];
-  if (source.origin === "debrid") parts.push("Real-Debrid");
+  if (source.origin === "debrid") parts.push(debridServiceName(source));
   if (sourceDelivery(source) === "remux") parts.push("Remux");
   return parts.join(" · ");
+}
+
+/** Every player field except the ones that change several times a second. */
+function coarseState(s: PlayerState): Omit<PlayerState, "currentTime" | "bufferedEnd" | "cueText"> {
+  const { currentTime, bufferedEnd, cueText, ...rest } = s;
+  return rest;
+}
+
+/** Elapsed and remaining time around the seek bar: the only part of the controls that follows the playhead. */
+function SeekRow({
+  onSeek,
+  onHover,
+  previewSrc,
+}: {
+  onSeek(time: number): void;
+  onHover(time: number | null): void;
+  previewSrc: string | null;
+}) {
+  const currentTime = usePlayerState((s) => s.currentTime);
+  const duration = usePlayerState((s) => s.duration);
+  const bufferedEnd = usePlayerState((s) => s.bufferedEnd);
+  return (
+    <div className="flex items-center gap-3">
+      <span className="w-14 text-right text-xs font-medium tabular-nums text-white/90">{formatTime(currentTime)}</span>
+      <SeekBar duration={duration} currentTime={currentTime} bufferedEnd={bufferedEnd} onSeek={onSeek} onHover={onHover} previewSrc={previewSrc} />
+      <span className="w-14 text-xs font-medium tabular-nums text-white/70">-{formatTime(Math.max(0, duration - currentTime))}</span>
+    </div>
+  );
+}
+
+/** Captions that follow the cue text on their own. */
+function LiveCaptions(props: Omit<React.ComponentProps<typeof Captions>, "text">) {
+  const text = usePlayerState((s) => s.cueText);
+  return <Captions text={text} {...props} />;
 }

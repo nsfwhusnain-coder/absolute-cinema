@@ -39,8 +39,35 @@ void main() {
 }
 `;
 
-/** Measures each frame's average brightness and keeps an adapted average. */
+/** Light beyond this is a numeric accident, not a highlight. */
+const MAX_SCENE_LIGHT = 48;
+
+/**
+ * Cleans the scene's output before bloom sees it, then measures each frame's
+ * average brightness and keeps an adapted average.
+ *
+ * Cleaning matters more than it looks: one NaN or infinite pixel (a pow() of
+ * a slightly negative number at a ribbon's edge was enough) is smeared by the
+ * bloom's blur chain across the whole frame, which showed up as a full-screen
+ * grey flash every few seconds. Comparisons with NaN are false, so anything
+ * that is not a sane finite number becomes black.
+ */
 class FlashGuardPass extends Pass {
+  private readonly sanitize = new THREE.ShaderMaterial({
+    uniforms: { tDiffuse: { value: null as THREE.Texture | null } },
+    vertexShader: QUAD_VERTEX,
+    fragmentShader: /* glsl */ `
+uniform sampler2D tDiffuse;
+varying vec2 vUv;
+float safe(float v) {
+  return (v >= 0.0 && v < ${MAX_SCENE_LIGHT.toFixed(1)}) ? v : 0.0;
+}
+void main() {
+  vec3 c = texture2D(tDiffuse, vUv).rgb;
+  gl_FragColor = vec4(safe(c.r), safe(c.g), safe(c.b), 1.0);
+}
+`,
+  });
   private readonly small = new THREE.WebGLRenderTarget(LUM_W, LUM_H, { type: THREE.HalfFloatType });
   private readonly current = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType });
   private adapted = [0, 1].map(() => new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType }));
@@ -102,7 +129,7 @@ void main() {
 
   constructor() {
     super();
-    this.needsSwap = false;
+    this.needsSwap = true;
   }
 
   get currentTexture(): THREE.Texture {
@@ -113,13 +140,15 @@ void main() {
     return this.adapted[0]!.texture;
   }
 
-  render(renderer: THREE.WebGLRenderer, _write: THREE.WebGLRenderTarget, read: THREE.WebGLRenderTarget, deltaTime: number): void {
+  render(renderer: THREE.WebGLRenderer, write: THREE.WebGLRenderTarget, read: THREE.WebGLRenderTarget, deltaTime: number): void {
     const draw = (material: THREE.ShaderMaterial, target: THREE.WebGLRenderTarget) => {
       this.quad.material = material;
       renderer.setRenderTarget(target);
       this.quad.render(renderer);
     };
-    this.measure.uniforms.tDiffuse.value = read.texture;
+    this.sanitize.uniforms.tDiffuse.value = read.texture;
+    draw(this.sanitize, write);
+    this.measure.uniforms.tDiffuse.value = write.texture;
     draw(this.measure, this.small);
     draw(this.average, this.current);
     this.adapted = [this.adapted[1]!, this.adapted[0]!];
@@ -130,7 +159,7 @@ void main() {
 
   dispose(): void {
     [this.small, this.current, ...this.adapted].forEach((t) => t.dispose());
-    [this.measure, this.average, this.adapt].forEach((m) => m.dispose());
+    [this.sanitize, this.measure, this.average, this.adapt].forEach((m) => m.dispose());
     this.quad.dispose();
   }
 }

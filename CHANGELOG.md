@@ -2,6 +2,86 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.3.0] - 2026-10-07
+
+### Added
+- **Sleep timer:** a moon button in the player (and a row in its Settings
+  menu, or press Z). Pause after 15 minutes to 2 hours of playing time, or at
+  the end of this episode, the film, or after 2 or 3 episodes. A chip shows the
+  time left, the last minute brings a card to add 15 minutes or watch one more
+  episode, the sound fades out over the last 30 seconds, and a dark sleep
+  screen that dims itself offers to pick up exactly where it stopped.
+- **Profile pictures:** 140-odd illustrations in thirteen styles (adventurers,
+  toons, robots, pixel art, sketches and more), any emoji, famous faces from
+  TMDB, or your own photo (cropped to a square around the face). Sixteen
+  colours plus any colour you like.
+- **Make it yours:** twelve accent colours or any custom one; interface size
+  (Default, Large, Larger); subtitle colour, font and an extra-large size with
+  a live preview; skip step (5, 10, 15 or 30 seconds); skip intros
+  automatically (with a button to watch them after all); when to ask "Still
+  watching?"; turn off the rotating home banner; choose which rows Home shows.
+- **Continue Watching moves on:** finishing an episode puts the show's next
+  episode in Continue Watching ("Up next · S2 E5") instead of an older
+  half-watched one. Season pages and the player's episode list tick off
+  watched episodes and show progress bars for the rest.
+- Player comforts: "Resumed at 42:10 · Start over", lock-screen and
+  media-key controls with artwork (Control Centre, headphones, keyboards),
+  keys S (skip intro), P (picture in picture), < and > (speed) and ? (all
+  shortcuts), and the episode list opens on the episode playing.
+- Search shows every result ("Show more results" and loading as you scroll)
+  instead of the first twenty; press / anywhere to search. My List remembers
+  its sort and filter.
+
+### Changed
+- Home loads its banner and rails in one request instead of about twenty,
+  and the server keeps those lists fresh in the background.
+- The home and browse banners no longer jump as slides change (layout shift
+  went from 0.44 to 0.004), and tall title logos fit their space.
+- The player no longer redraws itself on every time update, captures each
+  seek-bar preview frame once instead of five times over, and compiles the
+  loading scene's shaders without freezing the page as the video starts.
+- Back from the player leaves the player, even after several episodes in a row.
+- Season pages show the synopsis in three lines (with More) and no longer jump
+  as they load.
+
+### Fixed
+- Downloads stopped after 30 seconds, and failed for titles with accents or
+  non-Latin characters.
+- The subtitle routes worked without signing in and could be pointed at any
+  address; a trailing dot in a page address skipped the sign-in check; IPv6
+  forms of private addresses passed the proxy's address check.
+- Pausing while the video was buffering switched to another server and
+  started playing again; choosing a server, quality or audio track while
+  paused started playback.
+- Switching the audio track of a 4K file dropped that server 25 seconds later.
+- 4K files would not play on older iPads, iPhones and TV browsers.
+- Subtitles could show twice on some streams; remembered subtitle languages
+  did not match between three- and two-letter codes; real dialogue containing
+  words like "advertisement" was removed from downloaded subtitles.
+- The up-next countdown could fire after replaying or going back an episode,
+  offered episodes that have not aired, and jumped from Specials to Season 1.
+- Later episodes stopped looking for extra servers 30 seconds after the page
+  opened.
+- Resume could start from the beginning when the player opened before the
+  saved position had arrived.
+- Only a show's most recent episode resumed; any half-watched episode now
+  picks up where it was left.
+- Saved titles carried " · S1E3", which showed up in "Because you watched…".
+- Missing titles showed "check the TMDB API key" instead of saying the title
+  isn't in the catalog; bad ids looped between redirects; dates were a day (or year) early
+  west of UTC; the Director was missing from some films.
+- Seek-bar previews showed frames from elsewhere in the film; the mute button
+  was wrong after the next episode; Space on a focused button paused instead
+  of pressing it; arrows on a TV remote both seeked and moved focus; player
+  menus overflowed on a phone held sideways.
+- Search lost characters typed while results loaded; sign-in links lost their
+  "&"; the setup screen could stick on "Checking…".
+- One profile's recent searches and watched list showed in another's on a
+  shared device.
+- Server caches, read-ahead buffers and remux work for players that had hung
+  up kept growing; sign-ups were not throttled and a burst of junk sign-ins
+  could reset a locked profile's lockout.
+
 ## [2.2.0] - 2026-09-25
 
 ### Added

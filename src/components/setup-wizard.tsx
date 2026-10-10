@@ -50,6 +50,8 @@ export function SetupWizard() {
     },
     enabled: sessionStatus === "authenticated",
     staleTime: Infinity,
+    // A profile waiting on the admin notices the server became ready without a reload.
+    refetchInterval: (query) => (query.state.data && !query.state.data.tmdb && !query.state.data.isAdmin ? 15_000 : false),
   });
 
   const needsSetup = data != null && !data.tmdb;
@@ -72,10 +74,15 @@ export function SetupWizard() {
         </div>
 
         {!data?.isAdmin ? (
-          <p className="text-sm leading-relaxed text-white/80">
-            This server has not been set up yet. Ask whoever runs it to sign in with the admin
-            account and add a TMDB key in Settings.
-          </p>
+          <div className="space-y-4">
+            <p className="text-sm leading-relaxed text-white/80">
+              This server has not been set up yet. Ask whoever runs it to sign in with the admin
+              profile and add a TMDB key in Settings. This page carries on by itself once they have.
+            </p>
+            <Button variant="secondary" className="w-full rounded-full" onClick={() => (window.location.href = "/login")}>
+              Switch profile
+            </Button>
+          </div>
         ) : (
           <>
             <StepIndicator step={step ?? "tmdb"} />
@@ -154,9 +161,15 @@ function KeyForm({
     if (!value.trim() || busy) return;
     setBusy(true);
     setError(null);
-    const failure = await onSubmit(value.trim());
-    setBusy(false);
-    if (failure) setError(failure);
+    try {
+      const failure = await onSubmit(value.trim());
+      if (failure) setError(failure);
+    } catch {
+      setError("Couldn't reach the server. Check the connection and try again.");
+    } finally {
+      // Always: a network error used to leave the button on "Checking…" for good.
+      setBusy(false);
+    }
   };
 
   return (

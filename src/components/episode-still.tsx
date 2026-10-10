@@ -33,13 +33,13 @@ export function EpisodeStill({
 }: EpisodeStillProps) {
   const candidates = useMemo(() => {
     const urls: string[] = [];
-    const still = tmdbImageUrl(stillPath, "original");
+    const still = tmdbImageUrl(stillPath, "w780");
     if (still) urls.push(still);
-    const season = tmdbImageUrl(seasonPosterPath, "original");
+    const season = tmdbImageUrl(seasonPosterPath, "w500");
     if (season) urls.push(season);
-    const backdrop = tmdbImageUrl(seriesBackdropPath, "original");
+    const backdrop = tmdbImageUrl(seriesBackdropPath, "w780");
     if (backdrop) urls.push(backdrop);
-    const poster = tmdbImageUrl(seriesPosterPath, "original");
+    const poster = tmdbImageUrl(seriesPosterPath, "w500");
     if (poster) urls.push(poster);
     return urls;
   }, [stillPath, seasonPosterPath, seriesBackdropPath, seriesPosterPath]);

@@ -18,6 +18,8 @@ export interface ProgressItem {
   season?: number | null;
   episode?: number | null;
   providerId?: string | null;
+  /** The next episode of a show whose latest episode was finished (Continue Watching only). */
+  upNext?: boolean;
 }
 
 const SAVE_DEBOUNCE_MS = 5000;
@@ -89,7 +91,10 @@ export function useProgress() {
         method: "DELETE",
       });
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["progress"] }),
+    onSuccess: (_data, vars) => {
+      void qc.invalidateQueries({ queryKey: ["progress"] });
+      void qc.invalidateQueries({ queryKey: ["show-progress", vars.tmdbId] });
+    },
   });
 
   // Debounced save — at most once every 5s, always flushes immediately for progress >= 1 (ended).
@@ -108,4 +113,38 @@ export function useProgress() {
   );
 
   return { items: collapsed, isLoading, save, remove };
+}
+export interface ShowProgressRow {
+  season: number;
+  episode: number;
+  progress: number;
+  position: number;
+  duration: number;
+}
+
+/**
+ * Every saved episode of one show (finished ones included), keyed
+ * "season:episode": what the episode lists use for progress bars and ticks.
+ * Continue Watching only carries the latest episode per show.
+ */
+export function useShowProgress(tvId: number) {
+  return useShowProgressQuery(tvId).map;
+}
+
+/** The same, with whether it has loaded (the watch page waits for it before resuming). */
+export function useShowProgressQuery(tvId: number) {
+  const { data: session } = useSession();
+  const query = useQuery({
+    queryKey: ["show-progress", tvId],
+    queryFn: () => progressRequest<ShowProgressRow[]>(`/api/progress?tmdbId=${tvId}&mediaType=tv`),
+    enabled: !!session && tvId > 0,
+    staleTime: 30_000,
+  });
+  const { data } = query;
+  const map = useMemo(() => {
+    const out = new Map<string, ShowProgressRow>();
+    for (const row of data ?? []) out.set(`${row.season}:${row.episode}`, row);
+    return out;
+  }, [data]);
+  return { map, isFetched: query.isFetched };
 }

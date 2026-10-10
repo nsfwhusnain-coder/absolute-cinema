@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { useQuery, keepPreviousData } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, keepPreviousData } from "@tanstack/react-query";
 import { AlertCircle, Clock, TrendingUp, X } from "lucide-react";
 import { transitionFast, transitionView } from "@/lib/motion";
 import { MovieCard } from "@/components/movie-card";
@@ -33,6 +33,20 @@ const fadeUp = {
 
 type Filter = "all" | "movie" | "tv" | "person";
 
+interface SearchPage {
+  page: number;
+  total_pages: number;
+  total_results: number;
+  results: Array<Record<string, unknown> & { id: number; media_type?: string }>;
+}
+
+/** TMDB serves at most 500 pages of any list. */
+const LAST_PAGE = 500;
+
+function nextPage(last: SearchPage): number | undefined {
+  return last.page < Math.min(last.total_pages ?? 1, LAST_PAGE) ? last.page + 1 : undefined;
+}
+
 interface Props {
   initialQuery: string;
   initialGenre?: string;
@@ -52,40 +66,65 @@ export function SearchView({ initialQuery, initialGenre, initialType }: Props) {
     setRecents(loadSearchRecents());
   }, [mounted, isEmpty]);
 
-  const {
-    data,
-    isLoading,
-    isFetching,
-    isError,
-    error,
-    refetch,
-  } = useQuery({
+  // Every page of results, not just the first twenty: "batman" alone has 231.
+  const search = useInfiniteQuery({
     queryKey: ["tmdb", "search", "multi", initialQuery],
-    queryFn: async () => {
-      const res = await fetch(`/api/tmdb/search/multi?query=${encodeURIComponent(initialQuery)}`);
+    queryFn: async ({ pageParam }): Promise<SearchPage> => {
+      const res = await fetch(`/api/tmdb/search/multi?query=${encodeURIComponent(initialQuery)}&page=${pageParam}`);
       if (!res.ok) throw new Error("Search failed. Try again.");
       return res.json();
     },
+    initialPageParam: 1,
+    getNextPageParam: nextPage,
     enabled: mounted && !!initialQuery && !initialGenre,
     placeholderData: keepPreviousData,
   });
+  const { isLoading, isFetching, isError, error, refetch } = search;
 
-  const {
-    data: genreData,
-    isLoading: genreLoading,
-    isFetching: genreFetching,
-    isError: genreError,
-    refetch: refetchGenre,
-  } = useQuery({
+  const genre = useInfiniteQuery({
     queryKey: ["tmdb", "discover", "movie", initialGenre],
-    queryFn: async () => {
-      const res = await fetch(`/api/tmdb/discover/movie/${initialGenre}/1`);
+    queryFn: async ({ pageParam }): Promise<SearchPage> => {
+      const res = await fetch(`/api/tmdb/discover/movie/${initialGenre}?page=${pageParam}`);
       if (!res.ok) throw new Error("Could not load this genre.");
       return res.json();
     },
+    initialPageParam: 1,
+    getNextPageParam: nextPage,
     enabled: mounted && !!initialGenre,
     placeholderData: keepPreviousData,
   });
+  const { isLoading: genreLoading, isFetching: genreFetching, isError: genreError, refetch: refetchGenre } = genre;
+  const active = initialGenre ? genre : search;
+  const totalResults = active.data?.pages[0]?.total_results ?? 0;
+  const pagedResults = useMemo(() => {
+    const seen = new Set<string>();
+    const rows: SearchPage["results"] = [];
+    for (const page of active.data?.pages ?? []) {
+      for (const row of page.results ?? []) {
+        const key = `${row.media_type ?? "movie"}-${row.id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rows.push(row);
+      }
+    }
+    return rows;
+  }, [active.data]);
+
+  // Loads the next page as the end of the grid comes into view.
+  const moreRef = useRef<HTMLDivElement>(null);
+  const { hasNextPage, isFetchingNextPage, fetchNextPage } = active;
+  useEffect(() => {
+    const el = moreRef.current;
+    if (!el || !hasNextPage) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting) && !isFetchingNextPage) void fetchNextPage();
+      },
+      { rootMargin: "600px 0px" }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   const trending = useQuery({
     queryKey: ["tmdb", "trending", "day", "search-suggest"],
@@ -103,11 +142,11 @@ export function SearchView({ initialQuery, initialGenre, initialType }: Props) {
   const failed = initialGenre ? genreError : isError;
   const allResults = (
     initialGenre
-      ? (genreData?.results || []).map((r: Record<string, unknown>) => ({
+      ? pagedResults.map((r) => ({
           ...r,
           media_type: "movie",
         }))
-      : (data?.results || []).filter(
+      : pagedResults.filter(
           (r: { media_type?: string }) =>
             r.media_type === "movie" || r.media_type === "tv" || r.media_type === "person"
         )
@@ -144,7 +183,9 @@ export function SearchView({ initialQuery, initialGenre, initialType }: Props) {
 
   const heading = initialGenre ? "Browse by genre" : initialQuery;
   const showSkeletons = loading && results.length === 0;
-  const showStale = fetching && results.length > 0;
+  const showStale = fetching && !isFetchingNextPage && results.length > 0;
+  // Tab counts only once every page is in; before that they would undercount.
+  const showCounts = !loading && !hasNextPage;
 
   if (isEmpty) {
     const trendingItems = (trending.data?.results || [])
@@ -253,26 +294,26 @@ export function SearchView({ initialQuery, initialGenre, initialType }: Props) {
           <TabsList>
             <TabsTrigger value="all" className="min-h-11">
               All
-              {!loading && allResults.length > 0 ? (
+              {showCounts && allResults.length > 0 ? (
                 <span className="ml-1.5 text-muted-foreground">({allResults.length})</span>
               ) : null}
             </TabsTrigger>
             <TabsTrigger value="movie" className="min-h-11">
               Movies
-              {!loading && counts.movie > 0 ? (
+              {showCounts && counts.movie > 0 ? (
                 <span className="ml-1.5 text-muted-foreground">({counts.movie})</span>
               ) : null}
             </TabsTrigger>
             <TabsTrigger value="tv" className="min-h-11">
               TV Shows
-              {!loading && counts.tv > 0 ? (
+              {showCounts && counts.tv > 0 ? (
                 <span className="ml-1.5 text-muted-foreground">({counts.tv})</span>
               ) : null}
             </TabsTrigger>
             {!initialGenre && (
               <TabsTrigger value="person" className="min-h-11">
                 People
-                {!loading && counts.person > 0 ? (
+                {showCounts && counts.person > 0 ? (
                   <span className="ml-1.5 text-muted-foreground">({counts.person})</span>
                 ) : null}
               </TabsTrigger>
@@ -318,7 +359,9 @@ export function SearchView({ initialQuery, initialGenre, initialType }: Props) {
         {!showSkeletons && results.length > 0 && (
           <>
             <p className="mb-4 text-sm text-muted-foreground" aria-live="polite">
-              {results.length} result{results.length === 1 ? "" : "s"}
+              {hasNextPage && initialType === "all" && totalResults > results.length
+                ? `${results.length} of ${totalResults.toLocaleString("en-US")} results`
+                : `${results.length}${hasNextPage ? "+" : ""} result${results.length === 1 ? "" : "s"}`}
               {heading ? ` for “${heading}”` : ""}
               {initialType !== "all" ? ` · ${initialType === "tv" ? "TV" : initialType}` : ""}
             </p>
@@ -328,7 +371,7 @@ export function SearchView({ initialQuery, initialGenre, initialType }: Props) {
                 Motion keeps the grid stuck at the "hidden" variant (opacity 0)
                 until any interaction triggers a re-render. */}
             <motion.div
-              key={`results-${initialQuery}-${initialGenre ?? ""}-${results.length}`}
+              key={`results-${initialQuery}-${initialGenre ?? ""}-${initialType}`}
               className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6"
               variants={staggerContainer}
               initial="hidden"
@@ -354,6 +397,19 @@ export function SearchView({ initialQuery, initialGenre, initialType }: Props) {
                 </motion.div>
               ))}
             </motion.div>
+            {hasNextPage ? (
+              <div ref={moreRef} className="mt-8 flex justify-center">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="min-h-11 rounded-full px-6"
+                  disabled={isFetchingNextPage}
+                  onClick={() => void fetchNextPage()}
+                >
+                  {isFetchingNextPage ? "Loading more…" : "Show more results"}
+                </Button>
+              </div>
+            ) : null}
           </>
         )}
 

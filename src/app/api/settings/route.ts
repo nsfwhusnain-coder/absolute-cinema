@@ -75,12 +75,19 @@ export async function POST(req: NextRequest) {
   const user = await getAuthenticatedUser();
   if (!user?.isAdmin) return NextResponse.json({ error: "Admin only" }, { status: 403 });
 
-  const body = (await req.json()) as Record<string, string | undefined>;
+  let body: Record<string, string | undefined>;
+  try {
+    body = (await req.json()) as Record<string, string | undefined>;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  if (!body || typeof body !== "object") return NextResponse.json({ error: "Invalid body" }, { status: 400 });
   const allowed = ["tmdb_api_key", "playback_provider", SIGNUPS_OPEN_SETTING, PROFILE_PICKER_SETTING, ...FLAG_KEYS];
 
   for (const key of allowed) {
     const val = body[key];
     if (val === undefined) continue; // not provided — don't touch
+    if (typeof val !== "string") return NextResponse.json({ error: `${key} must be text` }, { status: 400 });
     if (val === "") {
       // clear
       await db.appSetting.deleteMany({ where: { key } });

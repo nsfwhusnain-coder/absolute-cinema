@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
   const userId = await getAuthenticatedUserId();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json() as {
+  let body: {
     tmdbId: number;
     mediaType: string;
     title: string;
@@ -35,9 +35,17 @@ export async function POST(req: NextRequest) {
     voteAverage?: number | null;
     releaseDate?: string | null;
   };
+  try {
+    body = (await req.json()) as typeof body;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
 
-  if (!body.tmdbId || !body.mediaType || !body.title) {
+  if (!body?.tmdbId || !body.mediaType || !body.title) {
     return NextResponse.json({ error: "Missing fields" }, { status: 400 });
+  }
+  if (!Number.isInteger(Number(body.tmdbId)) || Number(body.tmdbId) <= 0 || (body.mediaType !== "movie" && body.mediaType !== "tv") || typeof body.title !== "string") {
+    return NextResponse.json({ error: "Invalid fields" }, { status: 400 });
   }
 
   try {
@@ -86,6 +94,9 @@ export async function DELETE(req: NextRequest) {
   const mediaType = url.searchParams.get("mediaType");
   if (!tmdbId || !mediaType) {
     return NextResponse.json({ error: "Missing tmdbId or mediaType" }, { status: 400 });
+  }
+  if (!/^\d{1,9}$/.test(tmdbId)) {
+    return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });
   }
 
   await db.watchlistItem.deleteMany({

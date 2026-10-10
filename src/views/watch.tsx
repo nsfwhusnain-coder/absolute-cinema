@@ -1,15 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { shouldShowUpNext } from "@/components/player/up-next-window";
+import { creditsStartFor, upNextPhase } from "@/components/player/up-next-window";
 import { usePlayerState } from "@/components/player/store";
+import { useSleepTimer } from "@/components/player/use-sleep-timer";
+import { stopsAtThisEnd } from "@/components/player/sleep-timer";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useNavigate } from "@/hooks/use-navigate";
 import { tmdbImageUrl, pickTitleLogoUrl, type TmdbImages } from "@/lib/tmdb";
 import { useMounted } from "@/hooks/use-mounted";
 import { Player } from "@/components/player/Player";
-import { AlertCircle, Loader2, ExternalLink, User } from "lucide-react";
+import { AlertCircle, ExternalLink, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { usePrefetchPlayback, useStreams } from "@/hooks/use-playback";
 import { NoProvider } from "@/components/empty-states";
@@ -17,11 +19,17 @@ import { toast } from "sonner";
 import { useSession } from "next-auth/react";
 import { tvQueryIndex } from "@/lib/playback/tv-index";
 import { getAutoplayNext } from "@/lib/player-preferences";
+import { PREFERENCES_QUERY_KEY, fetchPreferences } from "@/lib/preferences-client";
 import type { SkipSegment } from "@/lib/playback/skip-times";
 import { fetchLoaderLook, loaderLookQueryKey } from "@/lib/loader/look-client";
+import { preloadLoaderEngine } from "@/components/loader/cinematic-loader";
+import { resolveNextEpisode, type AiredEpisode, type SeasonMeta } from "@/lib/playback/next-episode";
+import { tvSeasonQuery } from "@/lib/tv-season-query";
+import { resumeTvEpisode } from "@/lib/continue-watching";
+import { useShowProgressQuery } from "@/hooks/use-progress";
 
-/** Cancelable end-of-episode autoplay countdown (task 9). */
-const NEXT_EPISODE_COUNTDOWN_S = 10;
+/** Cancelable countdown once an episode has really ended, before the next one starts. */
+const NEXT_EPISODE_COUNTDOWN_S = 6;
 /** After this many episodes start on their own with no interaction, ask "Still watching?". */
 const STILL_WATCHING_AFTER = 3;
 
@@ -43,66 +51,6 @@ interface ProgressItem {
   updatedAt?: string;
 }
 
-/** Best in-progress TV episode; season 0 (Specials) is a valid resume point. */
-function resumeTvEpisode(
-  progressList: ProgressItem[] | undefined,
-  tmdbId: number
-): { season: number; episode: number } | null {
-  if (!progressList?.length) return null;
-  const rows = progressList
-    .filter(
-      (p) =>
-        Number(p.tmdbId) === Number(tmdbId) &&
-        p.mediaType === "tv" &&
-        p.season != null &&
-        Number(p.season) >= 0 &&
-        p.episode != null &&
-        Number(p.episode) > 0 &&
-        p.progress > 0.02 &&
-        p.progress < 0.95
-    )
-    .sort((a, b) => {
-      const ta = a.updatedAt ? Date.parse(a.updatedAt) : 0;
-      const tb = b.updatedAt ? Date.parse(b.updatedAt) : 0;
-      return tb - ta;
-    });
-  const best = rows[0];
-  if (!best) return null;
-  return { season: Number(best.season), episode: Number(best.episode) };
-}
-
-interface SeasonMeta {
-  season_number: number;
-  episode_count: number;
-  name?: string;
-}
-
-function resolveNextEpisode(
-  seasons: SeasonMeta[] | undefined,
-  season: number,
-  episode: number
-): { season: number; episode: number } | null {
-  // Soft fallback when seasons meta not loaded yet — prefer advancing in-season.
-  if (!seasons?.length) {
-    return { season, episode: episode + 1 };
-  }
-  // Regular seasons only for rollover (skip specials / S0).
-  const regular = seasons.filter((s) => s.season_number > 0 && s.episode_count > 0);
-  const current = regular.find((s) => s.season_number === season);
-  const count = current?.episode_count ?? 0;
-  if (count > 0 && episode < count) {
-    return { season, episode: episode + 1 };
-  }
-  // Last ep of season → first ep of next regular season with content.
-  const nextSeason = regular
-    .filter((s) => s.season_number > season)
-    .sort((a, b) => a.season_number - b.season_number)[0];
-  if (nextSeason) {
-    return { season: nextSeason.season_number, episode: 1 };
-  }
-  // End of series (or only specials remaining).
-  return null;
-}
 
 /** Full-viewport watch page: the player and nothing else. */
 export function WatchView({ mediaType, id, season, episode }: Props) {
@@ -119,25 +67,44 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
       window.removeEventListener("keydown", reset);
     };
   }, []);
-  const shouldAskStillWatching = useCallback(() => autoAdvances.current >= STILL_WATCHING_AFTER, []);
+  // The profile's own threshold (Settings → Playback; 0 = never ask), read when the card mounts.
+  const stillWatchingAfter = useRef(STILL_WATCHING_AFTER);
+  const shouldAskStillWatching = useCallback(
+    () => stillWatchingAfter.current > 0 && autoAdvances.current >= stillWatchingAfter.current,
+    []
+  );
   const countAutoAdvance = useCallback(() => {
     autoAdvances.current += 1;
   }, []);
 
   // The player puts the whole page into full screen, so changing episode keeps
-  // it; leaving the watch page is what ends it.
+  // it; leaving the watch page is what ends it. The sleep timer likewise runs
+  // across episodes and ends with the watch page.
   useEffect(
     () => () => {
       if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+      useSleepTimer.getState().cancel();
     },
     []
   );
   const navigate = useNavigate();
   const router = useRouter();
   const mounted = useMounted();
+  // Whichever button started playback, the loading scene's engine is ready by now.
+  useEffect(() => {
+    preloadLoaderEngine();
+  }, []);
   const { data: session } = useSession();
   const qc = useQueryClient();
-  const [savedTime, setSavedTime] = useState(0);
+  const { data: profilePrefs } = useQuery({
+    queryKey: PREFERENCES_QUERY_KEY,
+    queryFn: fetchPreferences,
+    enabled: !!session,
+    staleTime: 5 * 60_000,
+  });
+  useEffect(() => {
+    if (profilePrefs) stillWatchingAfter.current = profilePrefs.stillWatchingAfter;
+  }, [profilePrefs]);
   const [ended, setEnded] = useState(false);
   /** Always tagged with title/S/E so a flush never writes episode N's playhead onto episode N+1. */
   const lastProgressRef = useRef<{
@@ -149,6 +116,20 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
     episode: number;
   } | null>(null);
   const saveGenerationRef = useRef(0);
+
+  // "Ended" belongs to the episode on screen. Another episode (browser Back
+  // included), or playing again after the end (replay, scrubbing back), means
+  // it is over no longer, so the up-next countdown must not fire.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setEnded(false);
+  }, [id, mediaType, season, episode]);
+  useEffect(() => {
+    if (!ended) return;
+    return usePlayerState.subscribe((state, previous) => {
+      if (state.playing && !previous.playing) setEnded(false);
+    });
+  }, [ended]);
 
   // TV scrapers require season+episode. Default S1E1 when URL omits them.
   // Season/episode 0 is TMDB specials — do not coerce 0 → 1.
@@ -218,16 +199,10 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
   const images = meta?.images as TmdbImages | undefined;
 
   const { data: seasonMeta } = useQuery({
-    queryKey: ["tmdb", "tv", "season", id, tvSeason],
-    queryFn: async () => {
-      const res = await fetch(`/api/tmdb/tv/${id}/season/${tvSeason}`);
-      if (!res.ok) return null;
-      return res.json() as Promise<{
-        episodes?: Array<{ episode_number: number; runtime?: number | null; name?: string; overview?: string }>;
-      }>;
-    },
+    ...tvSeasonQuery<{
+      episodes?: Array<{ episode_number: number; runtime?: number | null; name?: string; overview?: string }>;
+    }>(id, tvSeason),
     enabled: mounted && mediaType === "tv" && tvSeason != null,
-    staleTime: 10 * 60 * 1000,
   });
 
   // Always fresh here: a cached list from before the last episode was left
@@ -271,25 +246,36 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
     saveGenerationRef.current += 1;
   }, [id, mediaType, tvSeason, tvEpisode]);
 
-  useEffect(() => {
-    // Always reset first so episode/title changes don't inherit prior resume time.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setSavedTime(0);
+  // Where to resume, worked out during render so the player mounts with it.
+  // (Set from an effect it arrived a render late: the player had mounted with
+  // 0 and could already have started the stream from the beginning.)
+  //
+  // Where each episode was left, in order of trust: this visit's own reports
+  // (switching back to an episode watched a minute ago), then every saved
+  // episode of the show (Continue Watching only lists a show's latest one, so
+  // older half-watched episodes used to start from 0:00), then that list.
+  const showProgress = useShowProgressQuery(mediaType === "tv" ? id : 0);
+  const sessionPositions = useRef(new Map<string, { position: number; duration: number }>());
+  const savedTime = useMemo(() => {
+    const key = mediaType === "tv" ? `${tvSeason}:${tvEpisode}` : "0:0";
+    const fromRow = (row: { progress: number; position: number; duration: number } | undefined) => {
+      if (!row || !(row.progress > 0.02 && row.progress < 0.95 && row.duration > 0)) return 0;
+      const fromPos = Number(row.position) || 0;
+      const t = fromPos > 5 ? fromPos : (Number(row.progress) || 0) * (Number(row.duration) || 0);
+      return t > 5 ? t : 0;
+    };
+    const local = sessionPositions.current.get(`${id}:${key}`);
+    if (local) return fromRow({ ...local, progress: local.position / local.duration });
+    const saved = mediaType === "tv" ? showProgress.map.get(key) : undefined;
+    if (saved) return fromRow(saved);
     const found = progressList?.find((p) => {
       if (Number(p.tmdbId) !== Number(id) || p.mediaType !== mediaType) return false;
       if (mediaType !== "tv") return true;
       // Movies use season/episode 0 in DB; TV must match the open episode.
       return Number(p.season) === Number(tvSeason) && Number(p.episode) === Number(tvEpisode);
     });
-    if (found && found.progress > 0.02 && found.progress < 0.95 && found.duration > 0) {
-      const fromPos = Number(found.position) || 0;
-      const fromPct = (Number(found.progress) || 0) * (Number(found.duration) || 0);
-      const t = fromPos > 5 ? fromPos : fromPct;
-      if (t > 5) {
-        setSavedTime(t);
-      }
-    }
-  }, [progressList, id, mediaType, tvSeason, tvEpisode]);
+    return fromRow(found);
+  }, [progressList, showProgress.map, id, mediaType, tvSeason, tvEpisode]);
 
   const streams = useStreams({
     tmdbId: id,
@@ -302,7 +288,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
 
   // Wait for the saved position (a fraction of a second) so the player starts
   // where the viewer left off rather than at 0 and jumping.
-  const showPlayerShell = mounted && !!session && progressLoaded;
+  const showPlayerShell = mounted && !!session && progressLoaded && (mediaType !== "tv" || showProgress.isFetched);
   const baseTitle = meta?.title || meta?.name || playback?.title || "Untitled";
   const { data: loaderLook } = useQuery({
     queryKey: loaderLookQueryKey(mediaType, id),
@@ -326,10 +312,6 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
     mediaType === "tv" && tvSeason != null && tvEpisode != null
       ? `S${tvSeason} · E${tvEpisode}${episodeName ? ` · ${episodeName}` : ""}`
       : undefined;
-  const title =
-    mediaType === "tv" && tvSeason != null && tvEpisode != null
-      ? `${baseTitle} · S${tvSeason}E${tvEpisode}`
-      : baseTitle;
   const blockedStatus =
     playback?.status === "not_configured" ||
     playback?.status === "external" ||
@@ -374,7 +356,9 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
         body: JSON.stringify({
           tmdbId: e.tmdbId,
           mediaType: e.mediaType,
-          title,
+          // The show's own name: the episode is stored in season/episode, and a
+          // "· S1E3" suffix here leaked into "Because you watched…" and My List.
+          title: baseTitle,
           poster: meta?.poster_path ?? null,
           backdrop: meta?.backdrop_path ?? null,
           progress: e.progress ?? e.position / e.duration,
@@ -384,14 +368,16 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
           episode: e.mediaType === "tv" ? e.episode : 0,
           providerId: playback?.providerId ?? null,
         }),
-      });
+      }).catch(() => null); // offline for a moment: the next report (every 10 s) catches up
 
       if (generation !== saveGenerationRef.current) return;
-      if (res.ok) {
-        qc.invalidateQueries({ queryKey: ["progress"] });
+      if (res?.ok) {
+        // Marked stale, not refetched: this page re-reads progress every 10 s
+        // otherwise, for a list only the pages behind it show.
+        void qc.invalidateQueries({ queryKey: ["progress"], refetchType: "none" });
       }
     },
-    [session, id, mediaType, title, meta, tvSeason, tvEpisode, playback?.providerId, qc]
+    [session, id, mediaType, baseTitle, meta, tvSeason, tvEpisode, playback?.providerId, qc]
   );
 
   const flushProgress = useCallback(() => {
@@ -434,7 +420,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
     const body = JSON.stringify({
       tmdbId: last.tmdbId,
       mediaType: last.mediaType,
-      title,
+      title: baseTitle,
       poster: meta?.poster_path ?? null,
       backdrop: meta?.backdrop_path ?? null,
       progress: last.position / last.duration,
@@ -460,7 +446,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
         /* page is closing — nothing left to surface this to */
       });
     }
-  }, [session, id, mediaType, title, meta, tvSeason, tvEpisode, playback?.providerId]);
+  }, [session, id, mediaType, baseTitle, meta, tvSeason, tvEpisode, playback?.providerId]);
 
   useEffect(() => {
     const onVisibility = () => {
@@ -489,6 +475,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
       if (duration <= 0) return;
       const seasonKey = mediaType === "tv" ? (tvSeason ?? 0) : 0;
       const episodeKey = mediaType === "tv" ? (tvEpisode ?? 0) : 0;
+      if (duration > 0) sessionPositions.current.set(`${id}:${seasonKey}:${episodeKey}`, { position: current, duration });
       lastProgressRef.current = {
         position: current,
         duration,
@@ -511,22 +498,39 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
 
   const onEnded = useCallback(async () => {
     if (!session) return;
-    const generation = ++saveGenerationRef.current;
-    const params = new URLSearchParams({
-      tmdbId: String(id),
-      mediaType,
-    });
-    if (mediaType === "tv" && tvSeason != null && tvEpisode != null) {
-      params.set("season", String(tvSeason));
-      params.set("episode", String(tvEpisode));
-    }
-    const res = await fetch(`/api/progress?${params}`, { method: "DELETE" });
-    if (generation !== saveGenerationRef.current) return;
-    lastProgressRef.current = null;
-    if (res.ok) qc.invalidateQueries({ queryKey: ["progress"] });
+    // The up-next card must not wait on the network.
     setEnded(true);
-    toast.success("Finished! Marking as watched.");
-  }, [session, id, mediaType, tvSeason, tvEpisode, qc]);
+    const generation = ++saveGenerationRef.current;
+    // Saved as finished (not deleted): Continue Watching then offers the next
+    // episode, and the episode list can tick this one off.
+    const duration = usePlayerState.getState().duration || lastProgressRef.current?.duration || 1;
+    lastProgressRef.current = null;
+    // Finished: opening it again starts from the beginning.
+    sessionPositions.current.set(`${id}:${mediaType === "tv" ? `${tvSeason}:${tvEpisode}` : "0:0"}`, { position: duration, duration });
+    const res = await fetch("/api/progress", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tmdbId: id,
+        mediaType,
+        title: baseTitle,
+        poster: meta?.poster_path ?? null,
+        backdrop: meta?.backdrop_path ?? null,
+        progress: 1,
+        position: duration,
+        duration,
+        season: mediaType === "tv" ? tvSeason : 0,
+        episode: mediaType === "tv" ? tvEpisode : 0,
+        providerId: playback?.providerId ?? null,
+      }),
+    }).catch(() => null);
+    if (generation !== saveGenerationRef.current) return;
+    if (res?.ok) {
+      qc.invalidateQueries({ queryKey: ["progress"] });
+      qc.invalidateQueries({ queryKey: ["show-progress", id] });
+    }
+    if (mediaType === "movie") toast.success("Finished! Marked as watched.");
+  }, [session, id, mediaType, tvSeason, tvEpisode, qc, baseTitle, meta, playback?.providerId]);
 
   // useMemo (task 8): resolveNextEpisode returns a fresh object literal every
   // call even when season/episode are unchanged — without memoizing, this
@@ -536,9 +540,14 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
   const nextEpisodeTarget = useMemo(
     () =>
       mediaType === "tv" && tvSeason != null && tvEpisode != null
-        ? resolveNextEpisode(meta?.seasons as SeasonMeta[] | undefined, tvSeason, tvEpisode)
+        ? resolveNextEpisode(
+            meta?.seasons as SeasonMeta[] | undefined,
+            tvSeason,
+            tvEpisode,
+            meta?.last_episode_to_air as AiredEpisode | null | undefined
+          )
         : null,
-    [mediaType, tvSeason, tvEpisode, meta?.seasons]
+    [mediaType, tvSeason, tvEpisode, meta?.seasons, meta?.last_episode_to_air]
   );
   const hasNextEpisode = nextEpisodeTarget != null;
 
@@ -586,11 +595,12 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
     lastProgressRef.current = null;
     saveGenerationRef.current += 1;
     setEnded(false);
-    setSavedTime(0);
-    navigate(
+    // Replace, not push: one history entry for the whole binge, so Back leaves
+    // the player instead of replaying every episode watched on the way.
+    router.replace(
       `/watch/tv/${id}?season=${nextEpisodeTarget.season}&episode=${nextEpisodeTarget.episode}`
     );
-  }, [nextEpisodeTarget, flushProgress, navigate, id]);
+  }, [nextEpisodeTarget, flushProgress, router, id]);
 
   const selectEpisode = useCallback(
     (s: number, e: number) => {
@@ -598,10 +608,9 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
       lastProgressRef.current = null;
       saveGenerationRef.current += 1;
       setEnded(false);
-      setSavedTime(0);
-      navigate(`/watch/tv/${id}?season=${s}&episode=${e}`);
+      router.replace(`/watch/tv/${id}?season=${s}&episode=${e}`);
     },
-    [navigate, id, flushProgress]
+    [router, id, flushProgress]
   );
 
   const handleRequest = async () => {
@@ -628,9 +637,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
       className="relative m-0 h-full w-full max-w-none overflow-hidden bg-black p-0"
     >
       {!mounted ? (
-        <div className="flex h-full items-center justify-center">
-          <Loader2 className="h-10 w-10 animate-spin text-white/70" />
-        </div>
+        <WatchBoot />
       ) : !session ? (
         <div className="flex h-full flex-col items-center justify-center gap-3 text-white/70">
           <User className="h-10 w-10 text-white" />
@@ -716,6 +723,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
               preference: streams.preferences?.audioPreference ?? "original",
               language: streams.preferences?.audioLanguage ?? "en",
             }}
+            quality={streams.preferences?.playbackQuality}
             subtitlePreference={streams.preferences?.subtitlePreference ?? "english"}
             externalSubtitles={externalSubtitles}
             onProgress={onProgress}
@@ -746,6 +754,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
               ended={ended}
               target={nextEpisodeTarget}
               fallbackDurationS={tmdbRuntimeSeconds}
+              skipSegments={skipData?.segments}
               currentSeason={tvSeason}
               onPlayNow={goToNextEpisode}
               askStillWatching={shouldAskStillWatching}
@@ -753,22 +762,38 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
             />
           )}
         </div>
-      ) : null}
+      ) : (
+        <WatchBoot />
+      )}
     </div>
   );
 }
 
 /**
- * Decides WHEN the countdown appears; `NextEpisodeCountdown` below decides what
- * it looks like.
+ * The player's black stage and hairline, shown for the few hundred milliseconds
+ * before the player itself mounts, so a spinner or blank page never stands in
+ * for the loading screen.
+ */
+function WatchBoot() {
+  return (
+    <div className="absolute inset-0 bg-black" aria-busy="true" aria-label="Loading">
+      <div className="absolute inset-x-0 bottom-[9vh] flex justify-center">
+        <div className="h-px w-40 overflow-hidden bg-white/10 sm:w-56" aria-hidden>
+          <div className="loader-hairline h-full w-1/3 bg-white/70" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Decides WHEN the next-episode card appears and whether it may start the next
+ * episode by itself; `NextEpisodeCard` below decides what it looks like.
  *
- * It used to appear on `ended` alone, which meant it arrived only after the
- * credits had finished — too late to be the "skip the credits, start the next
- * one" affordance it looks like, and long after the point where the player has
- * already warmed the next episode's sources. It now also appears inside the
- * end-of-episode tail (see `shouldShowUpNext`, which owns the caveats: a fixed
- * window, because nothing upstream marks where credits begin, and suppressed
- * while a remux's duration is still growing).
+ * The card is an offer while the episode is still playing (inside the credits
+ * when a time for them is known, otherwise a short tail) and only counts down
+ * once the video has really ended — see `upNextPhase`, which owns the rules. A
+ * timer started before the end skips whatever the episode still has to show.
  *
  * Split out as its own component so the 250ms currentTime tick re-renders this
  * alone rather than the whole watch view.
@@ -778,6 +803,7 @@ function UpNextGate({
   target,
   currentSeason,
   fallbackDurationS,
+  skipSegments,
   onPlayNow,
   askStillWatching,
   onAutoAdvance,
@@ -786,14 +812,26 @@ function UpNextGate({
   target: { season: number; episode: number };
   currentSeason?: number;
   fallbackDurationS: number;
+  skipSegments?: SkipSegment[];
   onPlayNow: () => void;
   askStillWatching: () => boolean;
   onAutoAdvance: () => void;
 }) {
   const currentTime = usePlayerState((s) => s.currentTime);
   const duration = usePlayerState((s) => s.duration);
+  // The sleep timer has the last word: no offer when it will stop playback at
+  // this episode's end, and nothing at all once it has (the sleep screen is up).
+  // An "after 2 episodes" timer that just counted this end still counts down.
+  const sleepHides = useSleepTimer((s) => s.asleep !== null || (stopsAtThisEnd(s.timer) && !ended));
 
-  const visible = ended || shouldShowUpNext(currentTime, duration, false, fallbackDurationS);
+  const phase = upNextPhase({
+    currentTime,
+    duration,
+    ended,
+    fallbackDurationS,
+    creditsStartS: creditsStartFor(skipSegments, duration),
+  });
+  const visible = phase !== "hidden" && !sleepHides;
   // The player hides its own "Next Episode" skip button while this card shows.
   useEffect(() => {
     usePlayerState.getState().set({ upNextVisible: visible });
@@ -802,9 +840,10 @@ function UpNextGate({
   if (!visible) return null;
 
   return (
-    <NextEpisodeCountdown
+    <NextEpisodeCard
       target={target}
       currentSeason={currentSeason}
+      autoplay={phase === "countdown"}
       onPlayNow={onPlayNow}
       askStillWatching={askStillWatching}
       onAutoAdvance={onAutoAdvance}
@@ -813,22 +852,23 @@ function UpNextGate({
 }
 
 /**
- * Cancelable end-of-episode autoplay countdown (task 9). Self-contained (own
- * ticking state) so mount/unmount — driven by the parent's `ended` + a
- * per-episode `key` — naturally resets the countdown for every new episode,
- * with no separate reset effect needed. Ticks via setTimeout callbacks
- * (state updated inside the timer callback, not synchronously in the effect
- * body) rather than a parent-owned interval + reset effect.
+ * The next-episode card. It only ever has a countdown once `autoplay` is true
+ * (the episode ended); before that it is a plain "Up next" button. Self-contained
+ * (own ticking state) so mount/unmount, driven by the parent's per-episode `key`,
+ * resets it for every new episode. Ticks via setTimeout callbacks rather than a
+ * parent-owned interval.
  */
-function NextEpisodeCountdown({
+function NextEpisodeCard({
   target,
   currentSeason,
+  autoplay,
   onPlayNow,
   askStillWatching,
   onAutoAdvance,
 }: {
   target: { season: number; episode: number };
   currentSeason?: number;
+  autoplay: boolean;
   onPlayNow: () => void;
   askStillWatching: () => boolean;
   onAutoAdvance: () => void;
@@ -838,10 +878,12 @@ function NextEpisodeCountdown({
   const [stillWatching] = useState(askStillWatching);
   const [cancelled, setCancelled] = useState(() => !getAutoplayNext() || stillWatching);
   const firedRef = useRef(false);
+  const counting = autoplay && !cancelled;
 
   useEffect(() => {
-    if (cancelled || remaining <= 0) {
-      if (!cancelled && remaining <= 0 && !firedRef.current) {
+    if (!counting) return;
+    if (remaining <= 0) {
+      if (!firedRef.current) {
         firedRef.current = true;
         onAutoAdvance();
         onPlayNow();
@@ -850,7 +892,7 @@ function NextEpisodeCountdown({
     }
     const timer = setTimeout(() => setRemaining((r) => r - 1), 1000);
     return () => clearTimeout(timer);
-  }, [remaining, cancelled, onPlayNow, onAutoAdvance]);
+  }, [remaining, counting, onPlayNow, onAutoAdvance]);
 
   if (stillWatching) {
     return (
@@ -874,21 +916,16 @@ function NextEpisodeCountdown({
   return (
     <div className="glass-clear absolute bottom-32 right-4 z-40 w-72 rounded-3xl p-4 text-white sm:right-8">
       <div className="mb-2 text-center text-sm font-medium text-white">
-        {cancelled ? "Up next" : `Next episode in ${remaining}…`}
+        {counting ? `Next episode in ${remaining}…` : "Up next"}
       </div>
       <div className="flex items-center justify-center gap-2">
-        {!cancelled && (
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => setCancelled(true)}
-            className="rounded-full"
-          >
+        {counting && (
+          <Button type="button" variant="ghost" onClick={() => setCancelled(true)} className="rounded-full">
             Cancel
           </Button>
         )}
         <Button type="button" onClick={onPlayNow} className="rounded-full">
-          {cancelled ? playLabel : "Play now"}
+          {counting ? "Play now" : playLabel}
         </Button>
       </div>
     </div>

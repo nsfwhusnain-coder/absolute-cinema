@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUser } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { deleteUploadedAvatar } from "@/lib/avatar-store";
 
 /**
  * Admin user management.
@@ -64,5 +65,6 @@ export async function DELETE(req: NextRequest) {
 
   // Cascading delete will wipe watchlist + progress automatically
   await db.user.delete({ where: { id: targetId } });
+  await deleteUploadedAvatar(target.avatar);
   return NextResponse.json({ ok: true });
 }

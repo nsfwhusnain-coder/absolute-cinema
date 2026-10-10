@@ -72,6 +72,9 @@ fi
 if [ "${PRUNE_OLD_IMAGES}" -eq 1 ]; then
   echo
   echo "=== keep last 2 unique absolute-cinema image IDs, remove older ==="
+  # A staging image (absolute-cinema:staging) is neither counted nor removed: it is
+  # usually the newest, and counting it pushed the previous live image (the
+  # rollback) out of the two kept, so a deploy deleted its own rollback.
   # Dedupe by image ID (multi-tag rows for the same ID must not consume two KEEP slots).
   # Sort by docker inspect Created (RFC3339) so ordering is a true timestamp, not string date fields.
   idx=0
@@ -89,6 +92,7 @@ if [ "${PRUNE_OLD_IMAGES}" -eq 1 ]; then
       docker images --format '{{.ID}}\t{{.Repository}}:{{.Tag}}' \
         | grep -E 'absolute-cinema' \
         | grep -v '<none>' \
+        | grep -v ':staging$' \
         | awk -F'\t' '!seen[$1]++ { print $1 "\t" $2 }' || true
     } | while IFS=$'\t' read -r id ref; do
       [ -z "${id}" ] && continue

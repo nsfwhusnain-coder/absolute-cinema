@@ -1,11 +1,11 @@
 import { db } from "@/lib/db";
-import { AVATAR_COLORS } from "@/lib/avatar-colors";
+import { AVATAR_COLORS, isHexColor } from "@/lib/avatar-colors";
 
 export { AVATAR_COLORS };
 
-
-export function isAvatarColor(value: unknown): value is (typeof AVATAR_COLORS)[number] {
-  return typeof value === "string" && (AVATAR_COLORS as readonly string[]).includes(value);
+/** Any #rrggbb: the palette's colours or a custom one from the colour picker. */
+export function isAvatarColor(value: unknown): value is string {
+  return isHexColor(value);
 }
 
 /** Next colour in the palette for a new profile, so a household's avatars differ. */

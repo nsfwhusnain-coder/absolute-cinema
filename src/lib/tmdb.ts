@@ -8,6 +8,7 @@ import { OPERATOR_TMDB_ENV, OPERATOR_TMDB_SETTING_KEY } from "@/lib/operator-key
 import { trimTmdbDetails } from "@/lib/tmdb-detail-trim";
 
 const TMDB_BASE = "https://api.themoviedb.org/3";
+const TMDB_TIMEOUT_MS = 10_000;
 export const TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p";
 
 export type TmdbImageSize =
@@ -34,31 +35,47 @@ export interface ResponsiveTmdbImage {
 }
 
 /**
- * Full-resolution poster. Quality first — never a downsized TMDB rung.
+ * Poster rungs the browser may choose from. A card is 150-190 CSS pixels wide,
+ * so a retina screen needs about 400 pixels, not the 2000-pixel original
+ * (up to 1.6 MB each, twenty-odd of them on the Home page). The original stays
+ * on the ladder for the rare very large display.
  */
-export function posterSrcSet(path: string | null | undefined): ResponsiveTmdbImage | null {
-  if (!path) return null;
-  const original = tmdbImageUrl(path, "original");
-  if (!original) return null;
+const POSTER_RUNGS: ReadonlyArray<readonly [TmdbImageSize, number]> = [
+  ["w342", 342],
+  ["w500", 500],
+  ["w780", 780],
+  ["original", 2000],
+];
+const POSTER_CARD_SIZES = "(min-width: 768px) 190px, (min-width: 640px) 170px, 150px";
+
+const BACKDROP_RUNGS: ReadonlyArray<readonly [TmdbImageSize, number]> = [
+  ["w300", 300],
+  ["w780", 780],
+  ["w1280", 1280],
+  ["original", 3840],
+];
+
+function responsive(
+  path: string,
+  rungs: ReadonlyArray<readonly [TmdbImageSize, number]>,
+  src: TmdbImageSize,
+  sizes: string
+): ResponsiveTmdbImage {
   return {
-    src: original,
-    srcSet: original,
-    sizes: "100vw",
+    src: tmdbImageUrl(path, src)!,
+    srcSet: rungs.map(([size, width]) => `${tmdbImageUrl(path, size)} ${width}w`).join(", "),
+    sizes,
   };
 }
 
-/**
- * Full-resolution backdrop. Quality first — never a downsized TMDB rung.
- */
-export function backdropSrcSet(path: string | null | undefined): ResponsiveTmdbImage | null {
-  if (!path) return null;
-  const original = tmdbImageUrl(path, "original");
-  if (!original) return null;
-  return {
-    src: original,
-    srcSet: original,
-    sizes: "100vw",
-  };
+/** A poster at the width a card needs, with larger rungs for dense screens. */
+export function posterSrcSet(path: string | null | undefined, sizes = POSTER_CARD_SIZES): ResponsiveTmdbImage | null {
+  return path ? responsive(path, POSTER_RUNGS, "w500", sizes) : null;
+}
+
+/** A full-width backdrop: 1280 pixels for ordinary screens, the original for large or retina ones. */
+export function backdropSrcSet(path: string | null | undefined, sizes = "100vw"): ResponsiveTmdbImage | null {
+  return path ? responsive(path, BACKDROP_RUNGS, "w1280", sizes) : null;
 }
 
 /** Pick the best title-logo asset from a TMDB images response: English first, then language-agnostic, then whatever's first. */
@@ -122,11 +139,16 @@ async function tmdbFetch<T>(path: string, params: Record<string, string | number
   const res = await fetch(url, {
     headers: auth.headers,
     next: { revalidate: 3600 }, // cache for an hour
+    // A stalled TMDB connection must not hold a page (or the server) forever.
+    signal: AbortSignal.timeout(TMDB_TIMEOUT_MS),
   });
 
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`TMDB ${res.status}: ${text.slice(0, 200)}`);
+    // The status travels with the error so the API can answer 404 for a title
+    // that does not exist instead of a 500 that reads as a broken API key.
+    // TMDB's body is not passed on: for some errors it is a whole HTML page.
+    await res.body?.cancel().catch(() => undefined);
+    throw Object.assign(new Error(`TMDB ${res.status} for ${path}`), { status: res.status });
   }
 
   return res.json() as Promise<T>;
@@ -516,6 +538,17 @@ export const tmdb = {
     tmdbFetch<{ id: number; name: string; parts?: TmdbMovie[] }>(`/collection/${id}`),
 
   personDetails: (id: number) => tmdbFetch<TmdbPerson>(`/person/${id}`),
+
+  /** Popular people (the profile picture picker's "Famous faces"). */
+  popularPeople: (page = 1) =>
+    tmdbFetch<TmdbPaged<{ id: number; name: string; profile_path: string | null; known_for_department?: string }>>(`/person/popular`, { page }),
+
+  searchPeople: (query: string, page = 1) =>
+    tmdbFetch<TmdbPaged<{ id: number; name: string; profile_path: string | null; known_for_department?: string }>>(`/search/person`, {
+      query,
+      page,
+      include_adult: false,
+    }),
 
   personCredits: (id: number) =>
     tmdbFetch<TmdbPersonCredits>(`/person/${id}/combined_credits`),

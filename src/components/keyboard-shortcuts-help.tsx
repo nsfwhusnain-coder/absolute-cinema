@@ -10,7 +10,10 @@ import {
 } from "@/components/ui/dialog";
 import { PLAYER_SHORTCUTS } from "@/lib/shortcuts";
 
-const GLOBAL_SHORTCUTS = [{ key: "?", desc: "Show this help" }];
+const GLOBAL_SHORTCUTS = [
+  { key: "/", desc: "Search" },
+  { key: "?", desc: "Show this help" },
+];
 
 
 export function KeyboardShortcutsHelp() {

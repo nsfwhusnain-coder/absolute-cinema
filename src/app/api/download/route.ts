@@ -6,11 +6,28 @@ import { lookupPlaybackSourceUrl } from "@/lib/playback/source-url-cache";
 import { redeemSourceUrlTicket } from "@/lib/playback/source-url-ticket";
 
 const HEAD_TIMEOUT_MS = 8_000;
-const DOWNLOAD_TIMEOUT_MS = 30_000;
+/** How long the file's server may take to start answering. The transfer itself has no limit. */
+const DOWNLOAD_RESPONSE_TIMEOUT_MS = 30_000;
 
 function safeFilename(raw: string): string {
   const cleaned = raw.replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "").trim();
   return cleaned.slice(0, 120) || "absolute-cinema-download.mp4";
+}
+
+/**
+ * `attachment; filename=...` for any title. Header values must be Latin-1, so
+ * a title with a curly apostrophe, a macron or CJK characters gets an ASCII
+ * stand-in in `filename` and the real name in RFC 5987 `filename*`.
+ */
+function contentDisposition(filename: string): string {
+  const ascii = filename
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[^\x20-\x7e]/g, "_")
+    .replace(/["\\]/g, "");
+  const encoded = encodeURIComponent(filename).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
 
 function extensionFromUrl(url: string): string {
@@ -150,14 +167,26 @@ export async function GET(req: NextRequest) {
     });
   }
 
+  // The timeout covers only the wait for the response: a whole film takes far
+  // longer than any fixed limit to transfer, and AbortSignal.timeout() would
+  // cut the body off mid-stream. The viewer cancelling the download cancels
+  // the upstream transfer too.
+  const abort = new AbortController();
+  const responseTimer = setTimeout(() => abort.abort(new Error("timed out waiting for the file")), DOWNLOAD_RESPONSE_TIMEOUT_MS);
+  const onClientGone = () => abort.abort(new Error("download cancelled"));
+  req.signal.addEventListener("abort", onClientGone, { once: true });
   const upstream = await fetch(target, {
-    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+    signal: abort.signal,
     headers: req.headers.get("range") ? { Range: req.headers.get("range")! } : undefined,
-  }).catch((error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    return new Response(JSON.stringify({ error: message }), { status: 502 });
-  });
+  })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return new Response(JSON.stringify({ error: message }), { status: 502 });
+    })
+    .finally(() => clearTimeout(responseTimer));
   if (!upstream.ok && upstream.status !== 206) {
+    req.signal.removeEventListener("abort", onClientGone);
+    void upstream.body?.cancel().catch(() => undefined);
     return NextResponse.json(
       { error: `download ${upstream.status}` },
       { status: 502 }
@@ -169,14 +198,13 @@ export async function GET(req: NextRequest) {
     "Content-Type",
     upstream.headers.get("content-type") || "application/octet-stream"
   );
-  headers.set(
-    "Content-Disposition",
-    `attachment; filename="${filename || `absolute-cinema.${extensionFromUrl(resolved)}`}"`
-  );
+  headers.set("Content-Disposition", contentDisposition(filename || `absolute-cinema.${extensionFromUrl(resolved)}`));
   const length = upstream.headers.get("content-length");
   if (length) headers.set("Content-Length", length);
   const range = upstream.headers.get("content-range");
   if (range) headers.set("Content-Range", range);
+  // Lets the browser resume a download that dropped.
+  if (upstream.headers.get("accept-ranges") === "bytes") headers.set("Accept-Ranges", "bytes");
   headers.set("Cache-Control", "private, no-store");
 
   return new Response(upstream.body, {

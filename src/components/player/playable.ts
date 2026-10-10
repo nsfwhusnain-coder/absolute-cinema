@@ -5,6 +5,7 @@ import { preferNativeHls } from "@/lib/playback/player-engine";
 import type { Ranker } from "@/lib/playback/orchestrator";
 import type { Playable } from "./engine";
 import type { RemuxAudioTrack, StreamSubtitleTrack } from "./store";
+import { timeoutSignal } from "@/lib/abort";
 
 export interface TitleContext {
   tmdbId: number;
@@ -83,10 +84,21 @@ export function qualityChoices(sources: readonly PlaybackSource[], remuxAvailabl
   return [...heights].sort((a, b) => b - a);
 }
 
-/** Snap odd heights (e.g. 2.39:1 1080p reported as 802) to standard rungs. */
+const HEIGHT_RUNGS = [360, 480, 720, 1080, 1440, 2160] as const;
+/** A wide (2.39:1) picture is only about three quarters as tall as its nominal rung, never much taller than it. */
+const RUNG_MIN_SHARE = 0.72;
+const RUNG_MAX_SHARE = 1.05;
+
+/**
+ * Snap a picture height to the quality it is sold as: the smallest rung it
+ * does not exceed (give or take rounding), so a 2.39:1 1080p picture reported
+ * as 802 lines is "1080p". The old snap took the largest rung the height was
+ * within 70% of, which called every ordinary 1080-line stream "1440p".
+ */
 export function normalizeHeight(height: number): number {
-  const rungs = [2160, 1440, 1080, 720, 480, 360];
-  return rungs.find((r) => height >= r * 0.7) ?? height;
+  const rung = HEIGHT_RUNGS.find((r) => height <= r * RUNG_MAX_SHARE);
+  if (rung === undefined) return HEIGHT_RUNGS[HEIGHT_RUNGS.length - 1];
+  return height >= rung * RUNG_MIN_SHARE ? rung : height;
 }
 
 export function qualityLabel(height: number): string {
@@ -136,9 +148,8 @@ export async function resolvePlayable(
     if (title.season != null) params.set("season", String(title.season));
     if (title.episode != null) params.set("episode", String(title.episode));
     if (title.originalLanguage) params.set("originalLanguage", title.originalLanguage);
-    const res = await fetch(`/api/vod/open?${params}`, {
-      signal: AbortSignal.any([signal, AbortSignal.timeout(VOD_OPEN_TIMEOUT_MS)]),
-    });
+    const timeout = timeoutSignal(VOD_OPEN_TIMEOUT_MS, signal);
+    const res = await fetch(`/api/vod/open?${params}`, { signal: timeout.signal }).finally(timeout.done);
     const body = (await res.json().catch(() => ({}))) as {
       playlistUrl?: string;
       durationS?: number;

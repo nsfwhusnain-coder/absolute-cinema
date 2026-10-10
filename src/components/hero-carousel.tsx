@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@/hooks/use-navigate";
 import { tmdbImageUrl, pickTitleLogoUrl, backdropSrcSet, type TmdbImages } from "@/lib/tmdb";
-import { Play, Plus, Star, Calendar, Heart } from "lucide-react";
+import { Play, Plus, Star, Calendar, Heart, Pause } from "lucide-react";
+import { PREFERENCES_QUERY_KEY, fetchPreferences } from "@/lib/preferences-client";
 import { MovieCardData } from "@/components/movie-card";
 import { EASE_OUT_EXPO, transitionHero } from "@/lib/motion";
 import { COMMON_GENRES, COMMON_TV_GENRES } from "@/lib/tmdb";
@@ -13,6 +14,8 @@ import { useWatchlist, type WatchlistItem } from "@/hooks/use-watchlist";
 import { useSession } from "next-auth/react";
 import { useAmbientColor } from "@/hooks/use-ambient-color";
 import { useIsTv } from "@/hooks/use-is-tv";
+import { yearOf } from "@/lib/utils";
+import { resumeTvEpisode } from "@/lib/continue-watching";
 
 const CANVAS = "#0a0a0f";
 
@@ -63,33 +66,6 @@ interface ProgressRow {
   updatedAt?: string;
 }
 
-/** Best in-progress TV episode for a show; null → caller uses S1E1. */
-function resumeTvEpisode(
-  progressList: ProgressRow[] | undefined,
-  tmdbId: number
-): { season: number; episode: number } | null {
-  if (!progressList?.length) return null;
-  const rows = progressList
-    .filter(
-      (p) =>
-        Number(p.tmdbId) === Number(tmdbId) &&
-        p.mediaType === "tv" &&
-        p.season != null &&
-        Number(p.season) >= 0 &&
-        p.episode != null &&
-        Number(p.episode) > 0 &&
-        p.progress > 0.02 &&
-        p.progress < 0.95
-    )
-    .sort((a, b) => {
-      const ta = a.updatedAt ? Date.parse(a.updatedAt) : 0;
-      const tb = b.updatedAt ? Date.parse(b.updatedAt) : 0;
-      return tb - ta;
-    });
-  const best = rows[0];
-  if (!best) return null;
-  return { season: Number(best.season), episode: Number(best.episode) };
-}
 
 function HeroTitle({
   item,
@@ -123,16 +99,19 @@ function HeroTitle({
   const showLogo = Boolean(logoUrl) && logoReady && !logoFailed;
 
   return (
+    // A fixed-height slot for the title, text or logo alike: the logo arrives
+    // after the slide does, and growing to fit it pushed the whole block up
+    // (a layout shift on every slide), while tall logos could fill the banner.
     <button
       type="button"
       onClick={onOpenInfo}
-      className={`block max-w-full text-left ${HERO_FOCUS_RING} rounded-md`}
+      className={`flex h-[clamp(5.5rem,17vh,10rem)] max-w-full items-end text-left ${HERO_FOCUS_RING} rounded-md`}
     >
       <h1
         className={
           showLogo
             ? "sr-only"
-            : "font-display text-[40px] font-extrabold leading-[1.05] tracking-tight text-white drop-shadow-lg md:text-[64px]"
+            : "line-clamp-2 font-display text-[40px] font-extrabold leading-[1.05] tracking-tight text-white drop-shadow-lg md:text-[64px]"
         }
         style={showLogo ? undefined : { fontWeight: 800 }}
       >
@@ -145,7 +124,7 @@ function HeroTitle({
           aria-hidden
           className={
             showLogo
-              ? "h-auto w-auto object-contain drop-shadow-lg"
+              ? "h-auto max-h-full w-auto object-contain object-left-bottom drop-shadow-lg"
               : "hidden"
           }
           style={{ maxWidth: "min(560px, 42vw)" }}
@@ -195,12 +174,24 @@ function GlassSegmentedActions({
 export function HeroCarousel({ items }: Props) {
   const [index, setIndex] = useState(0);
   const [paused, setPaused] = useState(false);
+  /** The viewer pressed pause: stays paused until they press play. */
+  const [stopped, setStopped] = useState(false);
+  /** Slide changes are announced only when the viewer made them, never every 8 s. */
+  const [announce, setAnnounce] = useState(false);
+  const hoverSuppressed = useRef(false);
   const navigate = useNavigate();
   const { data: session } = useSession();
   const { isIn, add, remove } = useWatchlist();
   const reduceMotion = useReducedMotion();
   const isTv = useIsTv();
   const staticHero = Boolean(reduceMotion) || isTv;
+  const { data: prefs } = useQuery({ queryKey: PREFERENCES_QUERY_KEY, queryFn: fetchPreferences, enabled: !!session?.user?.id, staleTime: 5 * 60_000 });
+  // Rotation is off for reduced motion, for profiles that turned it off, and once paused by hand.
+  const rotates = items.length > 1 && !reduceMotion && prefs?.heroAutoplay !== false && !stopped;
+  const goTo = (i: number) => {
+    setAnnounce(true);
+    setIndex(i);
+  };
   const { data: progressList } = useQuery({
     queryKey: ["progress"],
     queryFn: async () => {
@@ -235,12 +226,12 @@ export function HeroCarousel({ items }: Props) {
   }, []);
 
   useEffect(() => {
-    if (items.length <= 1 || paused) return;
+    if (!rotates || paused) return;
     const id = window.setTimeout(() => {
       setIndex((i) => (i + 1) % items.length);
     }, SLIDE_INTERVAL_MS);
     return () => window.clearTimeout(id);
-  }, [index, items.length, paused]);
+  }, [index, items.length, paused, rotates]);
 
   if (items.length === 0) return null;
   const current = items[safeIndex];
@@ -251,7 +242,7 @@ export function HeroCarousel({ items }: Props) {
   const bg = bgResponsive?.src ?? null;
   const year =
     current.release_date || current.first_air_date
-      ? new Date((current.release_date || current.first_air_date)!).getFullYear()
+      ? yearOf(current.release_date || current.first_air_date)
       : null;
   const mediaType = current.media_type || "movie";
   const currentTitle = current.title || current.name || "";
@@ -279,12 +270,23 @@ export function HeroCarousel({ items }: Props) {
         height: HERO_LAYOUT_HEIGHT,
         backgroundColor: "transparent",
       }}
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
-      onFocus={() => setPaused(true)}
-      onBlur={() => setPaused(false)}
+      onMouseEnter={() => {
+        if (!hoverSuppressed.current) setPaused(true);
+      }}
+      onMouseLeave={(e) => {
+        hoverSuppressed.current = false;
+        // Keyboard focus inside the banner keeps it paused after the pointer leaves.
+        if (!e.currentTarget.contains(document.activeElement)) setPaused(false);
+      }}
+      onFocus={(e) => {
+        // Focus on the banner's own pause/play button is not a reason to hold the slide.
+        if (!(e.target as HTMLElement).closest("[data-hero-pause]")) setPaused(true);
+      }}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setPaused(false);
+      }}
     >
-      <div aria-live="polite" className="sr-only">
+      <div aria-live={announce ? "polite" : "off"} className="sr-only">
         Now showing: {currentTitle}
       </div>
 
@@ -341,16 +343,20 @@ export function HeroCarousel({ items }: Props) {
         <div className="absolute inset-0" style={{ background: LEFT_SCRIM }} />
       </div>
 
-      {/* Content — layout box only (not masked); pb keeps Play clear of first rail */}
+      {/* Content — layout box only (not masked); pb keeps Play clear of first rail.
+          The box spans the whole banner (content sits at its bottom) so its own
+          rectangle never changes: sized to each slide's content, it grew and
+          shrank with every logo and synopsis, and each rotation registered as
+          a layout shift (up to 0.17 per slide, measured). */}
       <div
         data-tv-safe
-        className="absolute inset-x-0 bottom-0 z-[2] pl-14 pr-6"
+        className="pointer-events-none absolute inset-0 z-[2] flex flex-col justify-end pl-14 pr-6"
         style={{ paddingBottom: CONTENT_PAD_BOTTOM_PX }}
       >
         <AnimatePresence mode="wait">
           <motion.div
             key={current.id}
-            className="max-w-[620px]"
+            className="pointer-events-auto max-w-[620px]"
             initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
@@ -461,14 +467,14 @@ export function HeroCarousel({ items }: Props) {
       {items.length > 1 ? (
         <div
           data-tv-safe
-          className="absolute z-[2] flex items-center gap-1.5"
-          style={{ right: 40, bottom: DOTS_BOTTOM_PX }}
+          className="absolute right-4 z-[2] flex items-center gap-1.5 sm:right-10"
+          style={{ bottom: DOTS_BOTTOM_PX }}
         >
           {items.map((_, i) => (
             <button
               key={i}
               type="button"
-              onClick={() => setIndex(i)}
+              onClick={() => goTo(i)}
               className={`flex h-6 items-center justify-center rounded-full px-0.5 ${HERO_FOCUS_RING}`}
               aria-label={`Go to slide ${i + 1}`}
               aria-current={i === index ? "true" : undefined}
@@ -489,7 +495,7 @@ export function HeroCarousel({ items }: Props) {
                     style={{
                       width: "100%",
                       transformOrigin: "left center",
-                      animation: `hero-slide-fill ${SLIDE_INTERVAL_MS}ms linear forwards`,
+                      animation: rotates ? `hero-slide-fill ${SLIDE_INTERVAL_MS}ms linear forwards` : "none",
                       animationPlayState: paused ? "paused" : "running",
                     }}
                   />
@@ -497,6 +503,26 @@ export function HeroCarousel({ items }: Props) {
               </span>
             </button>
           ))}
+          {(rotates || stopped) && !reduceMotion && prefs?.heroAutoplay !== false ? (
+            <button
+              type="button"
+              data-hero-pause
+              onClick={() => {
+                setStopped((v) => !v);
+                setPaused(false);
+                // Pressing play with the pointer still on the banner must play it:
+                // the icon swap under the pointer re-fires "mouse enter", which
+                // would pause it again at once. Hover pausing resumes after the
+                // pointer leaves.
+                hoverSuppressed.current = true;
+              }}
+              aria-label={stopped ? "Play the banner" : "Pause the banner"}
+              title={stopped ? "Play the banner" : "Pause the banner"}
+              className={`ml-1 flex h-6 w-6 items-center justify-center rounded-full text-white/70 transition hover:text-white ${HERO_FOCUS_RING}`}
+            >
+              {stopped ? <Play className="h-3 w-3 fill-current" /> : <Pause className="h-3 w-3 fill-current" />}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>

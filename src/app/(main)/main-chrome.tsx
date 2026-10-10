@@ -1,7 +1,9 @@
 "use client";
 
+import { useEffect } from "react";
 import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
+import { warmLoaderWhenIdle } from "@/components/loader/cinematic-loader";
 import { Navbar } from "@/components/navbar";
 import { PageTransition } from "@/components/page-transition";
 
@@ -26,6 +28,7 @@ export function MainChrome({ children, bottomNavEnabled, hubsEnabled }: MainChro
   const pathname = usePathname();
   const isLogin = pathname === "/login";
   const showDock = bottomNavEnabled && !isLogin;
+  useEffect(() => (isLogin ? undefined : warmLoaderWhenIdle()), [isLogin]);
 
   return (
     <>

@@ -15,6 +15,7 @@ import {
 import { Play } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { EpisodeStill } from "@/components/episode-still";
+import { tvSeasonQuery } from "@/lib/tv-season-query";
 
 const STILL_WIDTH_SM = "w-40"; // 160px
 const STILL_WIDTH_MD = "md:w-[200px]"; // 200px → 200×112 at 16:9
@@ -57,15 +58,7 @@ export function EpisodeStrip({
   const [sort, setSort] = useState<SortOrder>("oldest");
 
   const { data, isLoading } = useQuery({
-    queryKey: ["tmdb", "tv", "season", tvId, season],
-    queryFn: async () => {
-      const res = await fetch(`/api/tmdb/tv/${tvId}/season/${season}`);
-      if (!res.ok) return null;
-      return res.json() as Promise<{
-        poster_path?: string | null;
-        episodes?: TmdbEpisode[];
-      }>;
-    },
+    ...tvSeasonQuery<{ poster_path?: string | null; episodes?: TmdbEpisode[] }>(tvId, season),
   });
 
   // Fallback series art when parent did not pass it

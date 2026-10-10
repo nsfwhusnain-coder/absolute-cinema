@@ -44,7 +44,8 @@ starts in seconds, seeks instantly, even in 4K, and plays the same way in every 
 - **Remembers what worked.** Each title keeps a record of which server delivered it, at what resolution and how smoothly, so repeat plays and the next episode skip the search.
 - **Smooth on slow servers too.** The server reads ahead the next segments while you watch, so providers that are slow to answer no longer cause play-pause-play; a server that still cannot keep up is swapped for another at the same spot.
 - **A clean glass player.** One settings menu for subtitles, audio, quality, picture fit (fit, fill, stretch), speed, server, episodes, picture-in-picture, AirPlay and download; timeline previews, resume where you left off, a loading screen that says what it is doing, and full keyboard and touch control (tap to show controls, double-tap the sides to skip 10 seconds).
-- **Made for binge-watching.** Skip Intro and Skip Credits for anime, a next-episode countdown, "Still watching?" after three episodes nobody touched, and your audio and subtitle choice remembered per show.
+- **Made for binge-watching.** Skip Intro and Skip Credits for anime (or skip them automatically), a next-episode countdown, "Still watching?" when you choose, Continue Watching that moves on to the next episode, and your audio and subtitle choice remembered per show.
+- **A sleep timer.** Pause after 15 minutes to 2 hours of playing, or at the end of the episode, the film or a few episodes; the sound fades out, and a dark sleep screen picks up exactly where it stopped.
 
 **Anime**
 - An Anime section with trending, this season, top rated, films and genres.
@@ -57,10 +58,10 @@ starts in seconds, seeks instantly, even in 4K, and plays the same way in every 
 - My List, Continue Watching and "already watched" tracking per profile.
 
 **Household**
-- **"Who's watching?"** Tap your profile and you are in. Profiles have a picture (26 illustrated avatars) and colour; anyone can add one, and each can choose to require a PIN. The first profile is the admin, who can close sign-ups or hide the picker.
+- **"Who's watching?"** Tap your profile and you are in. Profiles have a picture (140-odd illustrations in thirteen styles, any emoji, a famous face or your own photo) and any colour; anyone can add one, and each can choose to require a PIN. The first profile is the admin, who can close sign-ups or hide the picker.
 - Everything is saved per profile: quality, audio and subtitle language, subtitle size, autoplay, theme, list and history.
 - Adult-title filter per profile (behind the PIN when the profile has one).
-- **Clear** (frosted glass, the default) and **Solid** themes, with six accent colours.
+- **Clear** (frosted glass, the default) and **Solid** themes, twelve accent colours or any colour, three interface sizes, subtitle size, colour and font, and the rows Home shows.
 - Installable as an app (PWA) on phones, tablets and desktops; a TV mode with D-pad navigation works on smart-TV browsers.
 
 **Self-hosting**

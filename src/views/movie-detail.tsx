@@ -12,7 +12,8 @@ import { transitionContent } from "@/lib/motion";
 import { useNavigate } from "@/hooks/use-navigate";
 import { useAmbientColor } from "@/hooks/use-ambient-color";
 import { usePrefetchPlayback } from "@/hooks/use-playback";
-import { Play, ArrowLeft, Clock, Calendar, PenLine, Wallet, TrendingUp, Globe2 } from "lucide-react";
+import { Play, ArrowLeft, Clock, Calendar, PenLine, Wallet, TrendingUp, Globe2, SearchX } from "lucide-react";
+import { MessageCard } from "@/components/message-card";
 import { Button } from "@/components/ui/button";
 import { DetailPageSkeleton } from "@/components/skeletons";
 import { MovieCard } from "@/components/movie-card";
@@ -24,6 +25,8 @@ import { SeasonPicker } from "@/components/season-picker";
 import { EpisodeStrip } from "@/components/episode-strip";
 import { GenrePills } from "@/components/genre-pills";
 import { BrowseError } from "@/components/empty-states";
+import { yearOf } from "@/lib/utils";
+import { resumeTvEpisode } from "@/lib/continue-watching";
 
 const fadeUp = {
   hidden: { opacity: 0, y: 18 },
@@ -77,6 +80,8 @@ export function DetailView({ mediaType, id, initialData }: Props) {
       return res.json();
     },
     initialData,
+    // A title that doesn't exist won't appear on a second try.
+    retry: (count, err) => (err as { status?: number }).status !== 404 && count < 1,
   });
 
   const { data: images } = useQuery({
@@ -105,6 +110,22 @@ export function DetailView({ mediaType, id, initialData }: Props) {
     const isNotFound =
       (error as { status?: number } | null)?.status === 404 ||
       (error as Error | null)?.message === "This title doesn't exist";
+    if (isNotFound) {
+      return (
+        <div className="flex min-h-screen items-center justify-center px-4 pt-20">
+          <MessageCard
+            icon={<SearchX className="h-6 w-6 text-white/80" />}
+            title="This title isn't in the catalog"
+            actions={[
+              { label: "Search", href: "/search", primary: true },
+              { label: "Home", href: "/" },
+            ]}
+          >
+            The link may be old, or the title was removed from TMDB.
+          </MessageCard>
+        </div>
+      );
+    }
     return (
       <div className="flex min-h-screen items-center justify-center px-4 pt-20">
         <BrowseError
@@ -124,7 +145,7 @@ export function DetailView({ mediaType, id, initialData }: Props) {
 
   const title = data.title || data.name;
   const date = data.release_date || data.first_air_date;
-  const year = date ? new Date(date).getFullYear() : null;
+  const year = yearOf(date);
   const backdropResponsive = backdropSrcSet(data.backdrop_path);
   const backdrop = backdropResponsive?.src ?? null;
   const logoUrl = pickTitleLogoUrl(images);
@@ -214,36 +235,6 @@ interface ProgressRow {
   updatedAt?: string;
 }
 
-/**
- * Best TV episode to resume: most recently updated in-progress row for this show.
- * Finished episodes (progress ≥ 0.95) are skipped. No rows → null (caller uses S1E1).
- */
-function resumeTvEpisode(
-  progressList: ProgressRow[] | undefined,
-  tmdbId: number
-): { season: number; episode: number } | null {
-  if (!progressList?.length) return null;
-  const rows = progressList
-    .filter(
-      (p) =>
-        Number(p.tmdbId) === Number(tmdbId) &&
-        p.mediaType === "tv" &&
-        p.season != null &&
-        Number(p.season) >= 0 &&
-        p.episode != null &&
-        Number(p.episode) > 0 &&
-        p.progress > 0.02 &&
-        p.progress < 0.95
-    )
-    .sort((a, b) => {
-      const ta = a.updatedAt ? Date.parse(a.updatedAt) : 0;
-      const tb = b.updatedAt ? Date.parse(b.updatedAt) : 0;
-      return tb - ta;
-    });
-  const best = rows[0];
-  if (!best) return null;
-  return { season: Number(best.season), episode: Number(best.episode) };
-}
 
 function DetailContent({
   mediaType,
@@ -340,7 +331,7 @@ function DetailContent({
   });
 
   const releaseLabel = date
-    ? new Date(date).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })
+    ? new Date(date).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" })
     : null;
 
   return (

@@ -3,7 +3,8 @@ import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
 import { isAvatarColor } from "@/lib/profiles";
-import { isAvatarId } from "@/lib/avatars";
+import { isAvatarValue } from "@/lib/avatars";
+import { deleteUploadedAvatar } from "@/lib/avatar-store";
 
 const PIN = /^\d{4,10}$/;
 
@@ -34,7 +35,7 @@ export async function PATCH(req: NextRequest) {
     data.avatarColor = body.avatarColor;
   }
   if (body.avatar !== undefined) {
-    if (!isAvatarId(body.avatar)) return NextResponse.json({ error: "Unknown picture" }, { status: 400 });
+    if (!isAvatarValue(body.avatar, record.avatar)) return NextResponse.json({ error: "Unknown picture" }, { status: 400 });
     data.avatar = body.avatar;
   }
 
@@ -73,6 +74,8 @@ export async function PATCH(req: NextRequest) {
     data,
     select: { name: true, avatarColor: true, avatar: true, pinRequired: true },
   });
+  // Moving off an uploaded photo: the file is no longer anyone's picture.
+  if (data.avatar !== undefined && data.avatar !== record.avatar) await deleteUploadedAvatar(record.avatar);
   return NextResponse.json({ ok: true, profile: updated });
 }
 

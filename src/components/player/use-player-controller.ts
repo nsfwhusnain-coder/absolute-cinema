@@ -16,10 +16,13 @@ import {
   type Transition,
 } from "@/lib/playback/orchestrator";
 import { emitPlayerFeedback, setFeedbackTitleContext, clearFeedbackTitleContext } from "@/lib/playback/player-feedback";
-import { getPreferredProvider, getSavedPlaybackSpeed, setSavedPlaybackSpeed } from "@/lib/player-preferences";
-import { MediaEngine } from "./engine";
+import { getPreferredProvider, getPreferredQualityHeight, getSavedPlaybackSpeed, setSavedPlaybackSpeed } from "@/lib/player-preferences";
+import type { PlaybackQualityPreference } from "@/lib/profile-preferences";
+import { normalizeTrackLanguage, selectAudioTrack } from "@/lib/playback/track-selection";
+import { MediaEngine, type EngineAudioTrack } from "./engine";
 import { createRanker, resolvePlayable, type AudioChoice, type TitleContext } from "./playable";
 import { usePlayerState } from "./store";
+import { useSleepTimer } from "./use-sleep-timer";
 import { getTitleLanguage, rememberTitleLanguage, titleLanguageKey } from "@/lib/title-language";
 
 /** No first frame within this long means the source is not going to start. */
@@ -62,6 +65,8 @@ export interface PlayerControllerOptions {
   audio: AudioChoice;
   /** Title length from the catalog, used until the stream reports its own. */
   fallbackDurationS: number;
+  /** The profile's quality choice; the viewer's own pick in the menu overrides it. */
+  quality?: PlaybackQualityPreference;
   onProgress(current: number, duration: number): void;
   onEnded(): void;
   onRefreshSources(): void;
@@ -89,8 +94,15 @@ export function usePlayerController(options: PlayerControllerOptions) {
   const lastTimeUpdate = useRef(0);
   const positionRef = useRef(options.initialTime);
   const remuxDuration = useRef<number | null>(null);
+  /** The preferred audio track is chosen once per attach; after that the viewer's menu choice stands. */
+  const audioApplied = useRef(false);
+  const qualityPickedByViewer = useRef(false);
   /** One automatic roster refresh is tried before an error is shown. */
   const autoRefreshed = useRef(false);
+  /** The viewer paused (not the browser while a source was being swapped). */
+  const userPaused = useRef(false);
+  /** A source is being attached: pause events now come from the swap, not the viewer. */
+  const attaching = useRef(false);
   const store = usePlayerState;
 
   const sourceById = useCallback((id: string | null) => optionsRef.current.sources.find((s) => s.id === id), []);
@@ -164,6 +176,30 @@ export function usePlayerController(options: PlayerControllerOptions) {
       : setTimeout(() => playbackFailed("stall", "stall"), STALL_TIMEOUT_MS);
   }, [playbackFailed]);
 
+  /**
+   * Streams with several audio tracks (Vixsrc marks its Italian dub as the
+   * default) open on whatever the provider flagged, so the viewer's language is
+   * chosen here: a language picked earlier for this show, else the profile's
+   * original-or-English preference.
+   */
+  const chooseAudioTrack = useCallback(
+    (tracks: EngineAudioTrack[], active: number) => {
+      if (audioApplied.current || tracks.length === 0) return;
+      audioApplied.current = true;
+      if (tracks.length < 2) return;
+      const { title, audio } = optionsRef.current;
+      const remembered = getTitleLanguage(titleLanguageKey(title.mediaType, title.tmdbId))?.audio;
+      const base = remembered ? { preference: "preferred" as const, language: remembered } : audio;
+      const pick = selectAudioTrack(tracks, {
+        preference: base.preference,
+        originalLanguage: title.originalLanguage,
+        preferredLanguage: base.language,
+      });
+      if (pick && pick.id !== active) engineRef.current?.setAudioTrack(pick.id);
+    },
+    []
+  );
+
   const execute = useCallback(
     async (command: Command) => {
       const s = store.getState();
@@ -204,9 +240,14 @@ export function usePlayerController(options: PlayerControllerOptions) {
       const abort = new AbortController();
       attachAbort.current = abort;
       const startAt = command.keepPosition ? positionRef.current : optionsRef.current.initialTime;
+      // A viewer who paused and then picked another server, quality or audio
+      // track expects to stay paused at the same spot.
+      const stayPaused = command.keepPosition && userPaused.current && orchestrator.current.everPlayed;
+      attaching.current = true;
       s.set({ buffering: true, failureMessage: null, levels: [], audioTracks: [], currentLevel: -1 });
       attemptStartedAt.current = Date.now();
       sustainedReported.current = false;
+      audioApplied.current = false;
       const { title } = optionsRef.current;
       const override = audioOverride.current?.sourceId === source.id ? audioOverride.current.index : undefined;
       // A language picked earlier for this show beats the profile default.
@@ -229,9 +270,18 @@ export function usePlayerController(options: PlayerControllerOptions) {
           resolved.remux ? REMUX_START_TIMEOUT_MS : recovering ? RECOVERY_TIMEOUT_MS : START_TIMEOUT_MS
         );
         const choice = store.getState().qualityChoice;
-        await engine.load(resolved.playable, startAt, choice === "auto" ? undefined : choice);
+        await engine.load(resolved.playable, startAt, {
+          startHeight: choice === "auto" ? undefined : choice,
+          lockLevel: choice !== "auto",
+        });
         if (abort.signal.aborted) return;
         video.playbackRate = s.rate;
+        attaching.current = false;
+        if (stayPaused) {
+          clearTimers();
+          store.getState().set({ buffering: false, playing: false });
+          return;
+        }
         video.play().catch((err: unknown) => {
           // Autoplay blocked: show the play button rather than failing the source.
           if (err instanceof DOMException && err.name === "NotAllowedError") {
@@ -240,6 +290,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
           }
         });
       } catch (err) {
+        attaching.current = false;
         if (abort.signal.aborted) return;
         const reason = err instanceof Error ? err.message : "load failed";
         if (orchestrator.current.phase === "starting") startFailed(reason);
@@ -260,15 +311,27 @@ export function usePlayerController(options: PlayerControllerOptions) {
         store.getState().set({ levels, ...(hdrLevel ? { dynamicRange: hdrLevel.videoRange! } : {}) });
       },
       onLevelSwitched: (index) => store.getState().set({ currentLevel: index, autoLevel: engine.autoLevel }),
-      onAudioTracks: (audioTracks, activeAudio) => store.getState().set({ audioTracks, activeAudio }),
+      onAudioTracks: (audioTracks, activeAudio) => {
+        store.getState().set({ audioTracks, activeAudio });
+        chooseAudioTrack(audioTracks, activeAudio);
+      },
       onFatal: (reason) => playbackFailed(reason),
     });
     engineRef.current = engine;
     const { title } = optionsRef.current;
     setFeedbackTitleContext({ tmdbId: String(title.tmdbId), mediaType: title.mediaType, season: title.season, episode: title.episode });
+    // Mute and full screen carry over from the previous episode (the page stays
+    // full screen across episodes); the new element starts from them.
+    const carried = { muted: store.getState().muted };
     store.getState().reset();
-    store.getState().set({ rate: getSavedPlaybackSpeed() });
+    store.getState().set({
+      rate: getSavedPlaybackSpeed(),
+      qualityChoice: getPreferredQualityHeight(),
+      fullscreen: Boolean(document.fullscreenElement),
+      muted: carried.muted,
+    });
     video.volume = store.getState().volume;
+    video.muted = carried.muted;
     return () => {
       reportSustained();
       // Leaving the player: record exactly where the viewer stopped, not the
@@ -281,7 +344,14 @@ export function usePlayerController(options: PlayerControllerOptions) {
       engineRef.current = null;
       clearFeedbackTitleContext();
     };
-  }, [videoRef, store, playbackFailed, clearTimers, reportSustained]);
+  }, [videoRef, store, playbackFailed, clearTimers, reportSustained, chooseAudioTrack]);
+
+  // The profile's quality, once the server has confirmed it, unless the viewer already picked one.
+  const profileQuality = options.quality;
+  useEffect(() => {
+    if (profileQuality === undefined || qualityPickedByViewer.current) return;
+    store.getState().set({ qualityChoice: profileQuality });
+  }, [profileQuality, store]);
 
   // Media element events.
   useEffect(() => {
@@ -293,6 +363,13 @@ export function usePlayerController(options: PlayerControllerOptions) {
     const onPlaying = () => {
       s().set({ playing: true, buffering: false });
       if (stallTimer.current) clearTimeout(stallTimer.current);
+      // A first frame always settles the attach's start timer, whatever the
+      // phase: re-attaching the same source (a remux audio switch) keeps the
+      // phase at "playing", and the timer then failed a working server later.
+      if (startTimer.current && video.videoWidth > 0) {
+        clearTimeout(startTimer.current);
+        startTimer.current = null;
+      }
       const phase = orchestrator.current.phase;
       if ((phase === "starting" || phase === "recovering") && video.videoWidth > 0) {
         clearTimers();
@@ -378,6 +455,12 @@ export function usePlayerController(options: PlayerControllerOptions) {
     };
     const onPause = () => {
       s().set({ playing: false });
+      // Paused by the viewer: buffering that was in progress is no longer a stall.
+      if (stallTimer.current) {
+        clearTimeout(stallTimer.current);
+        stallTimer.current = null;
+      }
+      if (!attaching.current && !video.ended) userPaused.current = true;
       const duration = effectiveDuration(video);
       if (orchestrator.current.everPlayed && duration > 0) optionsRef.current.onProgress(video.currentTime, duration);
     };
@@ -386,8 +469,14 @@ export function usePlayerController(options: PlayerControllerOptions) {
       s().set({ playing: false });
       optionsRef.current.onEnded();
     };
+    const onPlay = () => {
+      userPaused.current = false;
+    };
     const onError = () => engineRef.current?.mediaElementFailed();
-    const onVolume = () => s().set({ volume: video.volume, muted: video.muted });
+    // The sleep timer's fade lowers the element's volume; the viewer's own
+    // level (shown on the slider and saved for next time) stays as it was.
+    const onVolume = () =>
+      useSleepTimer.getState().fading ? s().set({ muted: video.muted }) : s().set({ volume: video.volume, muted: video.muted });
     const onRate = () => s().set({ rate: video.playbackRate });
 
     const effectiveDuration = (v: HTMLVideoElement) => {
@@ -402,6 +491,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
     video.addEventListener("seeking", onSeeking);
     video.addEventListener("seeked", onSeeked);
     video.addEventListener("pause", onPause);
+    video.addEventListener("play", onPlay);
     video.addEventListener("loadedmetadata", onMeta);
     video.addEventListener("durationchange", onMeta);
     video.addEventListener("ended", onEnded);
@@ -415,6 +505,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       video.removeEventListener("seeking", onSeeking);
       video.removeEventListener("seeked", onSeeked);
       video.removeEventListener("pause", onPause);
+      video.removeEventListener("play", onPlay);
       video.removeEventListener("loadedmetadata", onMeta);
       video.removeEventListener("durationchange", onMeta);
       video.removeEventListener("ended", onEnded);
@@ -432,6 +523,15 @@ export function usePlayerController(options: PlayerControllerOptions) {
 
   const actions = useMemo(() => {
     const video = () => videoRef.current;
+    const seek = (time: number) => {
+      const v = video();
+      if (!v) return;
+      const duration = store.getState().duration || v.duration;
+      const target = Math.max(0, Math.min(time, (duration || time) - 0.5));
+      v.currentTime = target;
+      positionRef.current = target;
+      store.getState().set({ currentTime: target });
+    };
     return {
       togglePlay() {
         const v = video();
@@ -439,18 +539,11 @@ export function usePlayerController(options: PlayerControllerOptions) {
         if (v.paused) void v.play().catch(() => {});
         else v.pause();
       },
-      seek(time: number) {
-        const v = video();
-        if (!v) return;
-        const duration = store.getState().duration || v.duration;
-        const target = Math.max(0, Math.min(time, (duration || time) - 0.5));
-        v.currentTime = target;
-        positionRef.current = target;
-        store.getState().set({ currentTime: target });
-      },
+      seek,
+      // Not `this.seek`: these are handed around as plain functions (media keys, timers).
       seekBy(delta: number) {
         const v = video();
-        if (v) this.seek(v.currentTime + delta);
+        if (v) seek(v.currentTime + delta);
       },
       setVolume(volume: number) {
         const v = video();
@@ -472,6 +565,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       /** Quality: switch the stream level when this source has it, otherwise the best source at that height. */
       setQuality(choice: "auto" | number) {
         const s = store.getState();
+        qualityPickedByViewer.current = true;
         s.set({ qualityChoice: choice });
         const engine = engineRef.current;
         if (choice === "auto") {
@@ -495,6 +589,12 @@ export function usePlayerController(options: PlayerControllerOptions) {
         apply(onUserSelect(orchestrator.current, id));
       },
       selectAudio(id: number) {
+        const track = store.getState().audioTracks.find((t) => t.id === id);
+        const language = normalizeTrackLanguage(track?.lang);
+        if (language) {
+          const { title } = optionsRef.current;
+          rememberTitleLanguage(titleLanguageKey(title.mediaType, title.tmdbId), { audio: language });
+        }
         engineRef.current?.setAudioTrack(id);
       },
       /** Remuxed files stream one audio track: switching reopens the same source at the same point. */

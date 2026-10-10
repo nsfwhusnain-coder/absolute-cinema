@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
+import { parseRouteId, parseRouteIndex } from "@/lib/route-params";
 import { WatchView } from "@/views/watch";
 import { resolvePlayableTitle } from "@/lib/catalog/title-alias.server";
 import { playableHref } from "@/lib/catalog/title-alias";
@@ -20,13 +21,15 @@ export async function generateMetadata({
   const { type, id } = await params;
   const { season, episode } = await searchParams;
   const mediaType = type === "tv" ? "tv" : "movie";
+  const tmdbId = parseRouteId(id);
+  if (!tmdbId) return { title: "Watch" };
   try {
     if (mediaType === "movie") {
-      const data = await tmdb.movieDetails(Number(id));
+      const data = await tmdb.movieDetails(tmdbId);
       const name = data.title || "Movie";
       return { title: `Watch ${name}` };
     }
-    const data = await tmdb.tvDetails(Number(id));
+    const data = await tmdb.tvDetails(tmdbId);
     const name = data.name || "Series";
     if (season != null && episode != null) {
       return { title: `Watch ${name} S${season}E${episode}` };
@@ -46,8 +49,10 @@ export default async function Page({
 }) {
   const { type, id } = await params;
   const { season, episode } = await searchParams;
-  const mediaType = type === "tv" ? "tv" : "movie";
-  const tmdbId = Number(id);
+  if (type !== "tv" && type !== "movie") notFound();
+  const mediaType = type;
+  const tmdbId = parseRouteId(id);
+  if (!tmdbId) notFound();
   const playable = await resolvePlayableTitle(mediaType, tmdbId);
   if (playable.mediaType !== mediaType || playable.tmdbId !== tmdbId) {
     redirect(playableHref(playable));
@@ -57,8 +62,8 @@ export default async function Page({
     <WatchView
       mediaType={mediaType}
       id={tmdbId}
-      season={season ? Number(season) : undefined}
-      episode={episode ? Number(episode) : undefined}
+      season={parseRouteIndex(season) ?? undefined}
+      episode={parseRouteIndex(episode) ?? undefined}
     />
   );
 }

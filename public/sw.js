@@ -11,10 +11,13 @@
  * honest offline notice.
  */
 
-const VERSION = "v5";
+// v6: clears the static cache that grew by one set of chunks per deploy.
+const VERSION = "v6";
 const STATIC_CACHE = `absolute-cinema-static-${VERSION}`;
 const IMAGE_CACHE = `absolute-cinema-images-${VERSION}`;
 const MAX_IMAGE_ENTRIES = 300;
+/** Hashed chunks from old deploys are never requested again; keep the newest few hundred. */
+const MAX_STATIC_ENTRIES = 250;
 const STATIC_ASSETS = ["/manifest.json", "/icon-192.png", "/icon-512.png", "/icon.svg", "/favicon.svg"];
 
 const OFFLINE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -64,12 +67,15 @@ self.addEventListener("message", (event) => {
   if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting();
 });
 
-async function cacheFirst(request, cacheName) {
+async function cacheFirst(event, cacheName, maxEntries) {
   const cache = await caches.open(cacheName);
-  const hit = await cache.match(request);
+  const hit = await cache.match(event.request);
   if (hit) return hit;
-  const res = await fetch(request);
-  if (res && res.ok) await cache.put(request, res.clone());
+  const res = await fetch(event.request);
+  if (res && res.ok) {
+    await cache.put(event.request, res.clone());
+    event.waitUntil(trimCache(cacheName, maxEntries));
+  }
   return res;
 }
 
@@ -82,15 +88,16 @@ async function trimCache(cacheName, maxEntries) {
 
 async function posterImage(event) {
   const cache = await caches.open(IMAGE_CACHE);
-  const hit = await cache.match(event.request);
+  const hit = await cache.match(event.request.url);
   if (hit) return hit;
-  const res = await fetch(event.request);
-  // Only cache readable (CORS) successes: opaque responses are padded to
-  // megabytes each by the browser's quota accounting.
-  if (res && res.ok && res.type !== "opaque") {
-    await cache.put(event.request, res.clone());
-    event.waitUntil(trimCache(IMAGE_CACHE, MAX_IMAGE_ENTRIES));
-  }
+  // The page loads posters with plain <img> (no-cors), whose responses are
+  // opaque and so were never cached (opaque entries are padded to megabytes
+  // of quota each). TMDB allows CORS, so fetch a readable copy ourselves:
+  // it can be cached, and it answers the page's request just the same.
+  const res = await fetch(event.request.url, { mode: "cors", credentials: "omit" }).catch(() => null);
+  if (!res || !res.ok) return fetch(event.request);
+  await cache.put(event.request.url, res.clone());
+  event.waitUntil(trimCache(IMAGE_CACHE, MAX_IMAGE_ENTRIES));
   return res;
 }
 
@@ -108,7 +115,7 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/")) return;
 
   if (isStaticAsset(url.pathname)) {
-    event.respondWith(cacheFirst(request, STATIC_CACHE));
+    event.respondWith(cacheFirst(event, STATIC_CACHE, MAX_STATIC_ENTRIES));
     return;
   }
 

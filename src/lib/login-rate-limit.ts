@@ -155,7 +155,8 @@ function remainingMs(bucket: AttemptBucket, now: number): number {
 function pruneMap(
   map: Map<string, AttemptBucket>,
   now: number,
-  hardTtlMs: (bucket: AttemptBucket) => number
+  hardTtlMs: (bucket: AttemptBucket) => number,
+  isLocked: (bucket: AttemptBucket) => boolean
 ): void {
   for (const [key, bucket] of map) {
     if (now - bucket.windowStartedAt >= hardTtlMs(bucket) || bucket.failures <= 0) {
@@ -164,9 +165,11 @@ function pruneMap(
   }
   if (map.size <= MAX_MAP_ENTRIES) return;
 
-  // Drop oldest windows first when over cap (probe / abuse safety).
+  // Over the cap: drop the oldest UNLOCKED windows first. Dropping by age
+  // alone let anyone flood the map with junk names and so evict a locked
+  // profile's bucket, resetting its lockout (and its PIN guess budget).
   const entries = Array.from(map.entries()).sort(
-    (a, b) => a[1].windowStartedAt - b[1].windowStartedAt
+    (a, b) => Number(isLocked(a[1])) - Number(isLocked(b[1])) || a[1].windowStartedAt - b[1].windowStartedAt
   );
   const toDrop = map.size - MAX_MAP_ENTRIES;
   for (let i = 0; i < toDrop; i++) {
@@ -178,8 +181,8 @@ function pruneMap(
 function maybePrune(now: number): void {
   if (now - lastPruneAt < PRUNE_INTERVAL_MS) return;
   lastPruneAt = now;
-  pruneMap(byUsername, now, () => LOCKOUT_MEMORY_MS);
-  pruneMap(byIp, now, (bucket) => bucket.windowMs);
+  pruneMap(byUsername, now, () => LOCKOUT_MEMORY_MS, (bucket) => bucket.failures >= MAX_USERNAME_FAILURES || bucket.strikes > 0);
+  pruneMap(byIp, now, (bucket) => bucket.windowMs, (bucket) => bucket.failures >= MAX_IP_FAILURES);
 }
 
 export interface RateLimitResult {

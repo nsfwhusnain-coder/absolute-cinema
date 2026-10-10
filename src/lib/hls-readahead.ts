@@ -41,6 +41,13 @@ const MAX_TOTAL_BYTES = 384 * 1024 * 1024;
 const ENTRY_TTL_MS = 2 * 60 * 1000;
 const ORDER_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_ORDERS = 200;
+/**
+ * Bytes set aside for a segment still downloading. Counting in-flight fetches
+ * as 0 let several seeks queue far more than the cap before any of it landed.
+ */
+const IN_FLIGHT_RESERVE_BYTES = 16 * 1024 * 1024;
+/** Unclaimed bodies are released on this beat even when no new playback request arrives. */
+const SWEEP_INTERVAL_MS = 30 * 1000;
 
 export class SegmentReadAhead<S extends { id: string }> {
   private readonly orders = new Map<string, Order>();
@@ -52,7 +59,12 @@ export class SegmentReadAhead<S extends { id: string }> {
   constructor(
     private readonly fetchSegment: SegmentFetcher<S>,
     private readonly now: () => number = Date.now
-  ) {}
+  ) {
+    // Expiry used to run only when the next segment was scheduled, so an idle
+    // server kept up to the whole cap of unclaimed segments in memory.
+    const sweep = setInterval(() => this.expire(), SWEEP_INTERVAL_MS);
+    (sweep as { unref?: () => void }).unref?.();
+  }
 
   /** Remember a media playlist's segment order. Byte-range and live playlists are ignored. */
   recordPlaylist(sessionId: string, playlistUrl: string, playlist: string, resolve: (uri: string) => string | null): void {
@@ -95,17 +107,18 @@ export class SegmentReadAhead<S extends { id: string }> {
       const key = `${sessionId} ${next}`;
       if (this.entries.has(key)) continue;
       if (this.totalBytes >= MAX_TOTAL_BYTES) return;
-      const entry: Entry = { sessionId, bytes: 0, createdAt: this.now(), done: Promise.resolve(null) };
+      const entry: Entry = { sessionId, bytes: IN_FLIGHT_RESERVE_BYTES, createdAt: this.now(), done: Promise.resolve(null) };
+      this.totalBytes += entry.bytes;
       entry.done = this.fetchSegment(session, next)
         .then((body) => {
           if (!body || body.bytes.byteLength > MAX_SEGMENT_BYTES) {
             this.drop(key, entry);
             return null;
           }
-          // Only count bytes while the entry is still waiting to be taken.
+          // Swap the reservation for the real size while the entry still waits to be taken.
           if (this.entries.get(key) === entry) {
+            this.totalBytes += body.bytes.byteLength - entry.bytes;
             entry.bytes = body.bytes.byteLength;
-            this.totalBytes += entry.bytes;
           }
           return body;
         })

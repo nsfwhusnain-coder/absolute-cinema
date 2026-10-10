@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { transitionFast } from "@/lib/motion";
 import { MovieCard } from "@/components/movie-card";
@@ -36,14 +36,44 @@ const fadeUp = {
 };
 
 type SortKey = "recent" | "az" | "rating" | "year";
+const SORT_KEY = "absolute-cinema:mylist-sort";
+const FILTER_KEY = "absolute-cinema:mylist-filter";
 type Filter = "all" | "movie" | "tv";
 
 export function WatchlistView() {
   const { data: session } = useSession();
   const navigate = useNavigate();
   const { items, isLoading, remove } = useWatchlist();
-  const [sort, setSort] = useState<SortKey>("recent");
-  const [filter, setFilter] = useState<Filter>("all");
+  const [sort, setSortState] = useState<SortKey>("recent");
+  const [filter, setFilterState] = useState<Filter>("all");
+  // Sort and filter are remembered on this device.
+  useEffect(() => {
+    try {
+      const savedSort = window.localStorage.getItem(SORT_KEY);
+      const savedFilter = window.localStorage.getItem(FILTER_KEY);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- read device storage after mount (SSR has none)
+      if (savedSort === "recent" || savedSort === "az" || savedSort === "rating" || savedSort === "year") setSortState(savedSort);
+      if (savedFilter === "all" || savedFilter === "movie" || savedFilter === "tv") setFilterState(savedFilter);
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
+  const setSort = (value: SortKey) => {
+    setSortState(value);
+    try {
+      window.localStorage.setItem(SORT_KEY, value);
+    } catch {
+      /* storage unavailable */
+    }
+  };
+  const setFilter = (value: Filter) => {
+    setFilterState(value);
+    try {
+      window.localStorage.setItem(FILTER_KEY, value);
+    } catch {
+      /* storage unavailable */
+    }
+  };
 
   const filtered = useMemo(() => {
     let list = items.filter((i) => filter === "all" || i.mediaType === filter);

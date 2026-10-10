@@ -112,8 +112,6 @@ export function startLoader(canvas: HTMLCanvasElement, options: LoaderOptions): 
   }
   film = createFilmPipeline(renderer, scene, camera, active.bloom ?? DEFAULT_BLOOM);
   resize();
-  gsap.to(uniforms.uIntensity, { value: 1, duration: INTRO_S, ease: "power2.out" });
-  active.evolve();
 
   const timer = new THREE.Timer();
   let frameMs = 0;
@@ -135,9 +133,29 @@ export function startLoader(canvas: HTMLCanvasElement, options: LoaderOptions): 
       frames = 0;
     }
   };
-  renderer.setAnimationLoop(frame);
+  // Compile the scene's shaders before the first frame, in parallel where the
+  // GPU driver allows (KHR_parallel_shader_compile). Compiled inside the first
+  // render, the shaders block the main thread just as the video is starting
+  // (the watch page's own telemetry shows long tasks of up to 1.6 s), which
+  // also holds up the player itself.
+  let disposed = false;
+  let running = false;
+  const begin = () => {
+    if (disposed || running) return;
+    running = true;
+    timer.update();
+    gsap.to(uniforms.uIntensity, { value: 1, duration: INTRO_S, ease: "power2.out" });
+    active.evolve();
+    if (!document.hidden) renderer.setAnimationLoop(frame);
+  };
+  if (typeof renderer.compileAsync === "function") {
+    renderer.compileAsync(scene, camera).then(begin, begin);
+  } else {
+    begin();
+  }
 
   const onVisibility = () => {
+    if (!running) return;
     if (document.hidden) {
       renderer.setAnimationLoop(null);
     } else {
@@ -147,7 +165,6 @@ export function startLoader(canvas: HTMLCanvasElement, options: LoaderOptions): 
   };
   document.addEventListener("visibilitychange", onVisibility);
 
-  let disposed = false;
   return {
     setPalette(palette) {
       const blend = (target: THREE.Vector3, hex: string) => {

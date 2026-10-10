@@ -1499,12 +1499,40 @@ async function resolveFastBestNativeFromCache(req: ResolveDebridSourcesRequest):
 export async function resolveFastDebridSources(
   req: ResolveDebridSourcesRequest
 ): Promise<PlaybackSource[]> {
-  if (!isRealDebridConfigured()) return [];
-  const core = resolveFastBestNativeFromCache(req).catch(() => [] as PlaybackSource[]);
-  const timeout = new Promise<PlaybackSource[]>((resolve) => {
-    setTimeout(() => resolve([]), RD_FAST_DEADLINE_MS);
-  });
-  return Promise.race([core, timeout]);
+  const realDebrid = isRealDebridConfigured();
+  const allDebrid = isAllDebridConfigured();
+  if (!realDebrid && !allDebrid) return [];
+  // Each tier gets the same deadline on its own, so a slow one never costs the
+  // other its answer.
+  const bounded = (part: Promise<PlaybackSource[]>) =>
+    Promise.race([
+      part.catch(() => [] as PlaybackSource[]),
+      new Promise<PlaybackSource[]>((resolve) => setTimeout(() => resolve([]), RD_FAST_DEADLINE_MS)),
+    ]);
+  const parts: Promise<PlaybackSource[]>[] = [];
+  if (realDebrid) parts.push(bounded(resolveFastBestNativeFromCache(req)));
+  if (allDebrid) parts.push(bounded(resolveFastAllDebridFromCache(req)));
+  return (await Promise.all(parts)).flat();
+}
+
+/**
+ * AllDebrid's share of the fast path: links its full resolve already cached
+ * (one per height), read straight from the database. Without it, a title only
+ * AllDebrid has (a Real-Debrid takedown) would wait for the slower full search
+ * on every Play, and its 4K could lose the race to a 1080p web source.
+ */
+async function resolveFastAllDebridFromCache(req: ResolveDebridSourcesRequest): Promise<PlaybackSource[]> {
+  const imdbId = await resolveImdbId(req.tmdbId, req.mediaType);
+  if (!imdbId) return [];
+  const keyBase: KeyBase = {
+    imdbId,
+    mediaType: req.mediaType,
+    season: req.season ?? 0,
+    episode: req.episode ?? 0,
+  };
+  const apiKey = process.env.ALLDEBRID_API_KEY?.trim() ?? "";
+  const { hits } = await readCachedSources("alldebrid", keyBase, (url) => sanitizeAllDebridStreamUrl(url, apiKey));
+  return hits;
 }
 
 // ---------------------------------------------------------------------------

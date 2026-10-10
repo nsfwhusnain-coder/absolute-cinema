@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { tmdbImageUrl, posterSrcSet } from "@/lib/tmdb";
-import { cn } from "@/lib/utils";
+import { tmdbImageUrl, posterSrcSet, backdropSrcSet } from "@/lib/tmdb";
+import { cn, yearOf } from "@/lib/utils";
 import { Film, Play } from "lucide-react";
 import { CardOverflowMenu } from "@/components/card-overflow-menu";
 import {
@@ -47,7 +47,7 @@ export function MovieCard({
 }: Props) {
   const title = movie.title || movie.name || "Untitled";
   const date = movie.release_date || movie.first_air_date;
-  const year = date ? new Date(date).getFullYear() : null;
+  const year = yearOf(date);
   const mediaType = forceMediaType || movie.media_type || "movie";
   const isPoster = variant === "poster";
   const rating =
@@ -59,10 +59,10 @@ export function MovieCard({
     mediaType === "tv" ? `/watch/tv/${movie.id}` : `/watch/movie/${movie.id}`;
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const posterImg = isPoster ? posterSrcSet(movie.poster_path) : null;
-  const imgUrl = isPoster
-    ? posterImg?.src ?? null
-    : tmdbImageUrl(movie.backdrop_path, "original");
+  const cardImage = isPoster
+    ? posterSrcSet(movie.poster_path)
+    : backdropSrcSet(movie.backdrop_path, "(min-width: 768px) 320px, 240px");
+  const imgUrl = cardImage?.src ?? null;
   const fallbackUrl =
     tmdbImageUrl(movie.poster_path, "original") ||
     tmdbImageUrl(movie.backdrop_path, "original");
@@ -124,8 +124,8 @@ export function MovieCard({
              
             <img
               src={imgUrl}
-              srcSet={isPoster ? posterImg?.srcSet : undefined}
-              sizes={isPoster ? posterImg?.sizes : undefined}
+              srcSet={cardImage?.srcSet}
+              sizes={cardImage?.sizes}
               alt=""
               loading="lazy"
               width={isPoster ? 190 : 320}

@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUserId } from "@/lib/auth";
-import { tmdb } from "@/lib/tmdb";
-import { cachedFetch } from "@/lib/server-cache";
-import { rewriteSearchResults } from "@/lib/catalog/title-alias";
+import { cachedTmdbRoute, pageNumber } from "@/lib/tmdb-route";
 
 /**
  * Generic TMDB proxy. Lets us call TMDB from the client without exposing the API key.
@@ -12,6 +10,18 @@ import { rewriteSearchResults } from "@/lib/catalog/title-alias";
  *   GET /api/tmdb/movie/550?append_to_response=credits,videos
  *   GET /api/tmdb/search/movie?query=inception
  */
+const MAX_QUERY_LENGTH = 200;
+const POSITIVE_ID = /^\d{1,9}$/;
+
+/** Upstream statuses the client can act on; the rest are the server's problem. */
+function statusFor(e: unknown): number {
+  const status = (e as { status?: number })?.status;
+  if (status === 404) return 404;
+  if (status === 400 || status === 414 || status === 422) return 400;
+  if (status === 429) return 503;
+  return 500;
+}
+
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   const userId = await getAuthenticatedUserId();
   if (!userId) {
@@ -21,127 +31,29 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ path: stri
   const { path } = await ctx.params;
   if (!path?.length) return NextResponse.json({ error: "Missing path" }, { status: 400 });
 
-  const route = "/" + path.join("/");
   const url = new URL(_req.url);
   const params: Record<string, string | number | boolean> = {};
   url.searchParams.forEach((v, k) => {
     if (k === "XTransformPort") return;
     params[k] = v;
   });
+  if (params.page !== undefined) params.page = pageNumber(params.page);
+  if (typeof params.query === "string") {
+    params.query = params.query.trim().slice(0, MAX_QUERY_LENGTH);
+    if (!params.query) return NextResponse.json({ page: 1, results: [], total_pages: 0, total_results: 0 });
+  }
+  // Ids and season numbers are digits; anything else is a bad request, not a
+  // TMDB call that fails as a 500 (or quietly becomes season 0).
+  const idSegment = ["movie", "tv", "person", "collection"].includes(path[0]!) ? path[1] : undefined;
+  if (idSegment && !["popular", "top_rated", "upcoming", "now_playing", "airing_today", "on_the_air"].includes(idSegment) && !POSITIVE_ID.test(idSegment)) {
+    return NextResponse.json({ error: "Invalid id" }, { status: 400 });
+  }
+  if (path[0] === "tv" && path[2] === "season" && !/^\d{1,4}$/.test(path[3] ?? "")) {
+    return NextResponse.json({ error: "Invalid season" }, { status: 400 });
+  }
 
   try {
-    const [a, b, c] = path;
-    const cacheKey = `tmdb:${route}:${JSON.stringify(params)}`;
-
-    const data = await cachedFetch(cacheKey, async () => {
-      if (a === "trending" && b === "movie") {
-        return tmdb.trending((c as "day" | "week") || "week");
-      }
-      if (a === "trending" && b === "tv") {
-        return tmdb.trendingTv((c as "day" | "week") || "week");
-      }
-      if (a === "trending" && b === "all") {
-        return tmdb.trendingAll((c as "day" | "week") || "day");
-      }
-      if (a === "movie" && b === "popular") {
-        return tmdb.popularMovies(Number(c) || 1);
-      }
-      if (a === "movie" && b === "top_rated") {
-        return tmdb.topRatedMovies(Number(c) || 1);
-      }
-      if (a === "movie" && b === "upcoming") {
-        return tmdb.upcomingMovies(Number(c) || 1);
-      }
-      if (a === "movie" && b === "now_playing") {
-        return tmdb.nowPlaying(Number(c) || 1);
-      }
-      if (a === "tv" && b === "popular") {
-        return tmdb.popularTv(Number(c) || 1);
-      }
-      if (a === "tv" && b === "top_rated") {
-        return tmdb.topRatedTv(Number(c) || 1);
-      }
-      if (a === "tv" && b === "airing_today") {
-        return tmdb.airingTodayTv(Number(c) || 1);
-      }
-      if (a === "tv" && b === "on_the_air") {
-        return tmdb.onTheAirTv(Number(c) || 1);
-      }
-      if (a === "movie" && b && !isNaN(Number(b)) && c === "images") {
-        return tmdb.movieImages(Number(b));
-      }
-      if (a === "tv" && b && !isNaN(Number(b)) && c === "images") {
-        return tmdb.tvImages(Number(b));
-      }
-      if (a === "tv" && b && !isNaN(Number(b)) && c === "season") {
-        const d = path[3];
-        return tmdb.tvSeason(Number(b), Number(d));
-      }
-      if (a === "movie" && b && !isNaN(Number(b))) {
-        return tmdb.movieDetails(Number(b));
-      }
-      if (a === "tv" && b && !isNaN(Number(b))) {
-        return tmdb.tvDetails(Number(b));
-      }
-      if (a === "search" && b === "movie") {
-        const found = await tmdb.search(
-          params.query as string,
-          Number(params.page) || 1
-        );
-        return {
-          ...found,
-          results: rewriteSearchResults(
-            (found.results ?? []).map((row) => ({
-              ...row,
-              media_type: row.media_type ?? "movie",
-            }))
-          ),
-        };
-      }
-      if (a === "search" && b === "multi") {
-        const found = await tmdb.searchMulti(
-          params.query as string,
-          Number(params.page) || 1
-        );
-        return {
-          ...found,
-          results: rewriteSearchResults(found.results ?? []),
-        };
-      }
-      if (a === "genre" && (b === "movie" || b === "tv")) {
-        return tmdb.genres(b);
-      }
-      if (a === "discover" && b === "anime" && c) {
-        return tmdb.anime(c, Number(params.page) || 1);
-      }
-      if (a === "discover" && (b === "movie" || b === "tv") && c === "acclaimed") {
-        return tmdb.acclaimedRecent(b, Number(params.page) || 1);
-      }
-      if (a === "discover" && b === "movie" && c === "new-digital") {
-        return tmdb.newDigitalReleases(Number(params.page) || 1, (params.region as string) || "US");
-      }
-      if (a === "discover" && (b === "movie" || b === "tv") && c === "provider" && path[3]) {
-        return tmdb.discoverByWatchProvider(
-          b,
-          Number(path[3]),
-          Number(params.page) || 1,
-          (params.region as string) || "US"
-        );
-      }
-      if (a === "discover" && (b === "movie" || b === "tv") && c) {
-        return tmdb.discoverByGenre(b, Number(c), Number(params.page) || 1);
-      }
-      if (a === "collection" && b && !isNaN(Number(b))) {
-        return tmdb.collection(Number(b));
-      }
-      if (a === "person" && b && !isNaN(Number(b)) && c === "combined_credits") {
-        return tmdb.personCredits(Number(b));
-      }
-      if (a === "person" && b && !isNaN(Number(b))) {
-        return tmdb.personDetails(Number(b));
-      }
-      throw Object.assign(new Error(`Unknown TMDB route: ${route}`), { status: 404 });
-    });
+    const data = await cachedTmdbRoute(path, params);
 
     return NextResponse.json(data, {
       headers: {
@@ -150,8 +62,9 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ path: stri
       },
     });
   } catch (e: unknown) {
-    const status = (e as { status?: number })?.status === 404 ? 404 : 500;
-    const message = e instanceof Error ? e.message : "TMDB request failed";
+    const status = statusFor(e);
+    const message =
+      status === 404 ? "Not found" : status === 400 ? "Bad request" : status === 503 ? "TMDB is busy, try again shortly" : "TMDB request failed";
     return NextResponse.json({ error: message }, { status });
   }
 }

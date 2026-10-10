@@ -1,0 +1,17 @@
+# Profile picture credits
+
+The illustrated profile pictures are generated with [DiceBear](https://www.dicebear.com) (MIT). The artwork belongs to its creators under the licences below.
+
+| Set | Artwork | Creator | Licence |
+|---|---|---|---|
+| People, Characters, Blobs | Lorelei, Open Peeps, Thumbs | Lisa Wischofsky, Pablo Stanley, DiceBear | CC0 1.0 |
+| Adventurers | [Adventurer](https://www.figma.com/community/file/1184595184137881796) | Lisa Wischofsky | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
+| Toons | [Avataaars](https://avataaars.com/) | Pablo Stanley | [Free for personal and commercial use](https://avataaars.com/) |
+| Robots | [Bottts](https://bottts.com/) | Pablo Stanley | [Free for personal and commercial use](https://bottts.com/) |
+| Emoji | [Fun Emoji Set](https://www.figma.com/community/file/968125295144990435) | Davis Uche | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
+| Sketches | [Notionists](https://heyzoish.gumroad.com/l/notionists) | Zoish | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) |
+| Pixel | [Pixel Art](https://www.figma.com/community/file/1198754108850888330) | DiceBear | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) |
+| Portraits | [Avatar Illustration System](https://www.figma.com/community/file/829741575478342595) | Micah Lanier | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
+| Big smiles | [Custom Avatar](https://www.figma.com/community/file/881358461963645496) | Ashley Seo | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
+| Toon heads | [ToonHead](https://www.figma.com/community/file/1589627891082866389) | Johan Melin | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
+| Personas | [Personas by Draftbit](https://personas.draftbit.com/) | Draftbit - draftbit.com | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |

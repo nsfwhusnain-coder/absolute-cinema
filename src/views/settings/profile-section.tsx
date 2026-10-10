@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { useSession } from "next-auth/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { UserRound } from "lucide-react";
@@ -55,17 +55,45 @@ export function ProfileSection() {
     await update();
   };
 
-  const saveLook = async (next: { avatar?: string; color?: string }) => {
+  // The colour picker reports every shade while it is dragged: show each one
+  // at once, save only the one it settles on.
+  const pendingLook = useRef<{ avatar?: string; color?: string }>({});
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveLook = (next: { avatar?: string; color?: string }) => {
     qc.setQueryData<OwnProfile>(OWN_PROFILE_QUERY_KEY, (old) =>
-      old ? { ...old, ...(next.avatar ? { avatar: next.avatar } : {}), ...(next.color ? { avatarColor: next.color } : {}) } : old
+      old ? { ...old, ...(next.avatar !== undefined ? { avatar: next.avatar } : {}), ...(next.color ? { avatarColor: next.color } : {}) } : old
     );
-    try {
-      await patchProfile({ ...(next.avatar ? { avatar: next.avatar } : {}), ...(next.color ? { avatarColor: next.color } : {}) });
+    pendingLook.current = { ...pendingLook.current, ...next };
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      const look = pendingLook.current;
+      pendingLook.current = {};
+      try {
+        await patchProfile({ ...(look.avatar !== undefined ? { avatar: look.avatar } : {}), ...(look.color ? { avatarColor: look.color } : {}) });
+        await refresh();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Could not save");
+        await qc.invalidateQueries({ queryKey: OWN_PROFILE_QUERY_KEY });
+      }
+    }, next.color && next.avatar === undefined ? 450 : 0);
+  };
+
+  const photo = {
+    upload: async (file: File) => {
+      const res = await fetch("/api/profile/photo", { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
+      const json = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        toast.error(json.error || "Could not upload that photo");
+        return;
+      }
+      toast.success("Profile photo updated");
       await refresh();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not save");
-      await qc.invalidateQueries({ queryKey: OWN_PROFILE_QUERY_KEY });
-    }
+    },
+    remove: async () => {
+      const res = await fetch("/api/profile/photo", { method: "DELETE" });
+      if (!res.ok) toast.error("Could not remove the photo");
+      await refresh();
+    },
   };
 
   return (
@@ -77,7 +105,7 @@ export function ProfileSection() {
           aria-label="Change picture"
           className="rounded-[30%] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
         >
-          <ProfileAvatar name={name || "?"} color={color} avatar={avatar} size="md" />
+          <ProfileAvatar name={name || "?"} color={color} avatar={avatar} size="lg" />
         </button>
         <div className="min-w-0 flex-1">
           <div className="truncate font-display text-xl font-semibold text-white">{name}</div>
@@ -87,14 +115,14 @@ export function ProfileSection() {
           Switch profile
         </PrimaryButton>
       </div>
-      <Row label="Picture" help="A picture and colour so everyone spots their profile.">
+      <Row label="Picture" help="An illustration, an emoji, a famous face or your own photo, on your colour.">
         <PrimaryButton tone="subtle" onClick={() => setEditing((v) => !v)}>
           {editing ? "Done" : "Change"}
         </PrimaryButton>
       </Row>
       {editing && (
         <div className="pb-4">
-          <AvatarPicker name={name} avatar={avatar} color={color} onChange={(next) => void saveLook(next)} />
+          <AvatarPicker name={name} avatar={avatar} color={color} signedIn photo={photo} onChange={saveLook} />
         </div>
       )}
       <RenameRow currentName={name} locked={Boolean(profile?.pinRequired)} onSaved={() => void refresh()} />

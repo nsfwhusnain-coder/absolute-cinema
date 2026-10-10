@@ -42,7 +42,7 @@ uniform float uPhase;
 varying vec2 vUv;
 varying float vDepth;
 void main() {
-  float acrossBand = 1.0 - abs(vUv.y - 0.5) * 2.0;
+  float acrossBand = max(1.0 - abs(vUv.y - 0.5) * 2.0, 0.0);
   float core = pow(acrossBand, 7.0);
   float glow = pow(acrossBand, 1.8);
   float shimmer = 0.8 + 0.2 * sin(vUv.x * 38.0 - uTime * 0.8 + uPhase * 9.0);

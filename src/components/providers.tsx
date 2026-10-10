@@ -4,7 +4,8 @@ import { SessionProvider } from "next-auth/react";
 import type { Session } from "next-auth";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MotionConfig } from "framer-motion";
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useUIStore } from "@/stores/ui-store";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import dynamic from "next/dynamic";
@@ -27,7 +28,25 @@ import { ProfileSync } from "@/components/profile-sync";
 
 function GlobalShortcuts() {
   const setShortcutsHelpOpen = useUIStore((s) => s.setShortcutsHelpOpen);
-  useKeyboardShortcuts({ "?": () => setShortcutsHelpOpen(true) });
+  const router = useRouter();
+  // The player has its own keys (its "?" opens its own list), so these stand down while it is open.
+  const shortcuts = useMemo(
+    () => ({
+      "?": (e: KeyboardEvent) => {
+        if (e.ctrlKey || e.metaKey || e.altKey || document.querySelector(".player-shell")) return;
+        setShortcutsHelpOpen(true);
+      },
+      "/": (e: KeyboardEvent) => {
+        if (e.ctrlKey || e.metaKey || e.altKey || document.querySelector(".player-shell")) return;
+        e.preventDefault();
+        const field = document.querySelector<HTMLInputElement>('input[type="search"]');
+        if (field) field.focus();
+        else router.push("/search");
+      },
+    }),
+    [router, setShortcutsHelpOpen]
+  );
+  useKeyboardShortcuts(shortcuts);
   return <KeyboardShortcutsHelp />;
 }
 

@@ -31,6 +31,25 @@ function parseBestQuality(content: string): number {
   return best;
 }
 
+/**
+ * The language a viewer gets from this master playlist. Vixsrc lists Italian
+ * as the default audio and English (when it has it) as an option, and the
+ * player switches to the viewer's language on load, so a playlist that offers
+ * English counts as English. One that does not is labelled with what it does
+ * carry, so it never stands in for an English source by being "unlabelled".
+ */
+export function parseAudioLanguage(content: string): string | undefined {
+  const languages: string[] = [];
+  for (const line of content.split("\n")) {
+    if (!line.startsWith("#EXT-X-MEDIA:") || !/TYPE=AUDIO/.test(line)) continue;
+    const language = line.match(/LANGUAGE="([^"]+)"/)?.[1]?.toLowerCase();
+    if (language) languages.push(language);
+  }
+  if (languages.length === 0) return undefined;
+  if (languages.some((l) => l === "eng" || l === "en" || l.startsWith("en-"))) return "en";
+  return languages[0];
+}
+
 export async function resolveVixsrc(
   tmdbId: number,
   mediaType: "movie" | "tv",
@@ -84,6 +103,7 @@ export async function resolveVixsrc(
         referer: apiUrl,
         origin: BASE_URL,
         userAgent: VIXSRC_HEADERS["User-Agent"],
+        audioLanguage: parseAudioLanguage(playlistContent),
       },
     ];
   } catch (err) {

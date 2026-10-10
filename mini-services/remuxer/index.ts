@@ -99,13 +99,26 @@ const server = createServer(async (req, res) => {
     // Streamed: each keyframe group is sent as soon as it exists, so the
     // player can start decoding before the whole segment has been produced.
     let started = false;
-    for await (const path of vodSegment(id!, Number(segment))) {
+    let gone = false;
+    res.once("close", () => {
+      gone = true;
+    });
+    for await (const path of vodSegment(id!, Number(segment), () => gone)) {
+      if (gone) break;
       if (!started) {
         res.writeHead(200, { "Content-Type": "video/mp4", "Cache-Control": "no-store" });
         started = true;
       }
-      if (!res.write(readFragment(path))) await new Promise((resolve) => res.once("drain", resolve));
+      // Wait for the socket to drain, or for the player to hang up (a closed
+      // socket never drains, and the loop would have waited forever).
+      if (!res.write(readFragment(path))) {
+        await new Promise((resolve) => {
+          res.once("drain", resolve);
+          res.once("close", resolve);
+        });
+      }
     }
+    if (gone) return;
     if (!started) res.writeHead(200, { "Content-Type": "video/mp4", "Cache-Control": "no-store" });
     res.end();
   } catch (err) {

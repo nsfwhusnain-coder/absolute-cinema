@@ -32,3 +32,16 @@ describe("safeCallbackPath", () => {
     expect(safeCallbackPath("/login/extra")).toBe("/");
   });
 });
+
+describe("safeCallbackPath keeps encoded queries intact", () => {
+  test("does not decode the already-decoded value a second time", () => {
+    expect(safeCallbackPath("/search?q=Fast%20%26%20Furious")).toBe("/search?q=Fast%20%26%20Furious");
+    expect(safeCallbackPath("/search?q=c%2B%2B")).toBe("/search?q=c%2B%2B");
+  });
+
+  test("still refuses encoded open redirects", () => {
+    expect(safeCallbackPath("%2F%2Fevil.example")).toBe("/");
+    expect(safeCallbackPath("/%2Fevil.example")).toBe("/");
+    expect(safeCallbackPath("/%5Cevil")).toBe("/");
+  });
+});

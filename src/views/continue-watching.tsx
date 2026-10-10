@@ -75,9 +75,10 @@ export function ContinueWatchingView() {
                 rawPct < 1 && (p.position ?? 0) > 1
                   ? 1
                   : rawPct;
-              const img = tmdbImageUrl(p.backdrop || p.poster, "original");
-              const epLine =
-                p.mediaType === "tv" && p.season != null && p.episode != null
+              const img = tmdbImageUrl(p.backdrop || p.poster, "w780");
+              const epLine = p.upNext
+                ? `Up next · S${p.season} E${p.episode}`
+                : p.mediaType === "tv" && p.season != null && p.episode != null
                   ? `Continue S${p.season} E${p.episode} · ${pct}% · ${minutesLeft(p.position ?? 0, p.duration ?? 0)}`
                   : `${pct}% watched · ${minutesLeft(p.position ?? 0, p.duration ?? 0)}`;
               const href = continueHref(p);
@@ -97,21 +98,19 @@ export function ContinueWatchingView() {
                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent" />
                     <div className="absolute bottom-0 inset-x-0 p-3">
                       <div className="text-sm font-semibold text-white line-clamp-1">{p.title}</div>
-                      <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-white/20">
-                        <div className="h-full bg-white" style={{ width: `${pct}%` }} />
-                      </div>
+                      {!p.upNext && (
+                        <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-white/20">
+                          <div className="h-full bg-white" style={{ width: `${pct}%` }} />
+                        </div>
+                      )}
                       <div className="mt-1 text-[10px] text-white/70">{epLine}</div>
                     </div>
                   </Link>
                   <button
                     type="button"
                     onClick={() => {
-                      remove.mutate({
-                        tmdbId: p.tmdbId,
-                        mediaType: p.mediaType,
-                        season: p.season,
-                        episode: p.episode,
-                      });
+                      // The whole show: removing one episode only let an older one take its place.
+                      remove.mutate({ tmdbId: p.tmdbId, mediaType: p.mediaType });
                     }}
                     className="absolute right-2 top-2 z-30 flex h-11 w-11 items-center justify-center rounded-full bg-black/70 text-white backdrop-blur transition-colors hover:bg-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     title="Remove from history"

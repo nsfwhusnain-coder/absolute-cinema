@@ -85,8 +85,14 @@ export function SearchBar({
   const containerRef = useRef<HTMLDivElement>(null);
   const debouncedValue = useDebounce(value, 300);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect -- sync controlled initialQuery from URL
-  useEffect(() => setValue(initialQuery), [initialQuery]);
+  // The query this box put in the URL itself. When the URL catches up with
+  // it, the box is left alone: overwriting it then ate whatever was typed
+  // during the round trip. Any other URL change (Back, a recent search) wins.
+  const pushedQuery = useRef<string | null>(null);
+  useEffect(() => {
+    if (initialQuery === pushedQuery.current) return;
+    setValue(initialQuery);
+  }, [initialQuery]);
   // eslint-disable-next-line react-hooks/set-state-in-effect -- re-read localStorage when focus opens dropdown
   useEffect(() => setRecent(loadSearchRecents()), [focused]);
 
@@ -94,6 +100,7 @@ export function SearchBar({
   useEffect(() => {
     const trimmed = debouncedValue.trim();
     if (trimmed && trimmed !== initialQuery) {
+      pushedQuery.current = trimmed;
       router.replace(`/search?q=${encodeURIComponent(trimmed)}`);
     }
   }, [debouncedValue, initialQuery, router]);

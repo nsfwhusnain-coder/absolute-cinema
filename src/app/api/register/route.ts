@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { defaultAvatarColor, isAvatarColor, signupsOpen } from "@/lib/profiles";
-import { defaultAvatar, isAvatarId } from "@/lib/avatars";
+import { defaultAvatar, isAvatarValue } from "@/lib/avatars";
 import bcrypt from "bcryptjs";
 import { db } from "@/lib/db";
 import { getAuthenticatedUser } from "@/lib/auth";
@@ -11,6 +11,12 @@ import {
   recordIpAuthFailure,
 } from "@/lib/login-rate-limit";
 import { checkRegistrationGate } from "@/lib/registration-gate";
+import { RateLimiter } from "@/lib/rate-limit";
+
+/** New profiles per address per hour (an admin creating them in Settings is exempt). */
+const signupLimiter = new RateLimiter({ limit: 6, windowMs: 60 * 60 * 1000 });
+/** A household server, not a public sign-up page: past this, nobody can add more. */
+const MAX_PROFILES = 60;
 
 /**
  * POST /api/register  { name, pin?, avatar?, avatarColor? }
@@ -23,12 +29,16 @@ import { checkRegistrationGate } from "@/lib/registration-gate";
  */
 export async function POST(req: NextRequest) {
   try {
-    const { name, pin, avatar, avatarColor } = (await req.json()) as {
-      name?: string;
-      pin?: string;
-      avatar?: string;
-      avatarColor?: string;
-    };
+    const body = (await req.json().catch(() => null)) as {
+      name?: unknown;
+      pin?: unknown;
+      avatar?: unknown;
+      avatarColor?: unknown;
+    } | null;
+    if (!body || typeof body !== "object") return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    const name = typeof body.name === "string" ? body.name : undefined;
+    const pin = typeof body.pin === "string" ? body.pin : undefined;
+    const { avatar, avatarColor } = body;
 
     const requester = await getAuthenticatedUser();
     const isAdminCreating = Boolean(requester?.isAdmin);
@@ -55,6 +65,17 @@ export async function POST(req: NextRequest) {
     const trimmedName = name.trim();
     const ip = clientIpFromHeaders(req.headers);
 
+    if (!isAdminCreating) {
+      // Successful sign-ups were never throttled (only failures were), so a
+      // script could fill the public profile picker with names.
+      if (!signupLimiter.consume(ip ?? "unknown").allowed) {
+        return NextResponse.json({ error: "Too many new profiles from here. Try again later." }, { status: 429 });
+      }
+      if ((await db.user.count()) >= MAX_PROFILES) {
+        return NextResponse.json({ error: "This server has as many profiles as it can hold. Ask the admin to remove one." }, { status: 403 });
+      }
+    }
+
     // Admin-initiated creation is already gated by session auth — skip the
     // failed-attempt limiter so a burst of legitimate account creation from
     // the settings/admin UI can never lock itself out.
@@ -76,18 +97,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "That name is already taken" }, { status: 409 });
     }
 
-    const userCount = await db.user.count();
     const pinHash = pin ? await bcrypt.hash(pin, 10) : null;
 
-    const user = await db.user.create({
-      data: {
-        name: trimmedName,
-        pinHash,
-        pinRequired: Boolean(pinHash),
-        isAdmin: userCount === 0, // first user is admin
-        avatarColor: isAvatarColor(avatarColor) ? avatarColor : defaultAvatarColor(userCount),
-        avatar: isAvatarId(avatar) ? avatar : defaultAvatar(userCount),
-      },
+    // Counting and creating in one transaction: two first-run sign-ups at the
+    // same moment could otherwise both see zero profiles and both become admin.
+    const user = await db.$transaction(async (tx) => {
+      const userCount = await tx.user.count();
+      return tx.user.create({
+        data: {
+          name: trimmedName,
+          pinHash,
+          pinRequired: Boolean(pinHash),
+          isAdmin: userCount === 0, // first user is admin
+          avatarColor: isAvatarColor(avatarColor) ? avatarColor : defaultAvatarColor(userCount),
+          avatar: isAvatarValue(avatar) ? avatar : defaultAvatar(userCount),
+        },
+      });
     });
 
     clearAuthFailures(trimmedName, ip);
@@ -97,7 +122,9 @@ export async function POST(req: NextRequest) {
       user: { id: user.id, name: user.name, isAdmin: user.isAdmin },
     });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Registration failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    // A name taken in the moment between the check and the insert.
+    if ((e as { code?: string })?.code === "P2002") return NextResponse.json({ error: "That name is already taken" }, { status: 409 });
+    console.error("[register] failed:", e);
+    return NextResponse.json({ error: "Registration failed" }, { status: 500 });
   }
 }

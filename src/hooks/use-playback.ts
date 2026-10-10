@@ -14,6 +14,7 @@ import { getMemPlaybackSeed, playbackMemKey } from "@/lib/playback-preresolve";
 import { usableCachedPlayback } from "@/lib/playback/cache-age";
 import { PlaybackRequestError, shouldRetryPlaybackRequest } from "@/lib/playback/request-error";
 import { tvQueryIndex } from "@/lib/playback/tv-index";
+import { timeoutSignal } from "@/lib/abort";
 
 export { tvQueryIndex } from "@/lib/playback/tv-index";
 
@@ -59,10 +60,11 @@ async function fetchPlayback(
   if (fast) params.set("fast", "1");
   if (refresh) params.set("refresh", "1");
   params.set("qualityHint", String(getPreferredQualityHeight()));
+  const timeout = timeoutSignal(fast ? FAST_TIMEOUT_MS : FULL_TIMEOUT_MS);
   const res = await fetch(`/api/playback/${mediaType}/${tmdbId}?${params}`, {
     cache: "no-store",
-    signal: AbortSignal.timeout(fast ? FAST_TIMEOUT_MS : FULL_TIMEOUT_MS),
-  });
+    signal: timeout.signal,
+  }).finally(timeout.done);
   const json = (await res.json()) as PlaybackResponse & { error?: string };
   if (!res.ok) throw new PlaybackRequestError(json.error || json.message || "Failed to resolve playback", res.status);
   if (json.preferences) syncProfilePlaybackPreferences(json.preferences);
@@ -105,7 +107,12 @@ export function useStreams({ tmdbId, mediaType, season, episode, enabled = true 
   const qc = useQueryClient();
   const canFetch = enabled && !!session;
   const refreshNext = useRef(false);
-  const pollStarted = useRef<number | null>(null);
+  // When re-polling began, per title. Per title because the watch page (and
+  // this hook) stays mounted from one episode to the next: a single shared
+  // start time ran out 30 s after the page opened, so every later episode
+  // stopped looking for late sources at once.
+  const pollStarts = useRef(new Map<string, number>());
+  const titleKey = `${mediaType}:${tmdbId}:${season ?? ""}:${episode ?? ""}`;
 
   const seed = useMemo(() => {
     if (typeof window === "undefined") return undefined;
@@ -122,8 +129,11 @@ export function useStreams({ tmdbId, mediaType, season, episode, enabled = true 
     staleTime: 0,
     refetchOnMount: "always",
     refetchOnWindowFocus: false,
-    refetchInterval: () =>
-      qc.getQueryState(playbackQueryKey(mediaType, tmdbId, season, episode, false))?.dataUpdatedAt ? false : FAST_REPOLL_MS,
+    refetchInterval: () => {
+      // Stop once the full answer is in, or has failed for good (it used to poll every 2 s forever).
+      const full = qc.getQueryState(playbackQueryKey(mediaType, tmdbId, season, episode, false));
+      return full?.dataUpdatedAt || full?.status === "error" ? false : FAST_REPOLL_MS;
+    },
     ...(seed ? { initialData: seed.data, initialDataUpdatedAt: seed.updatedAt } : {}),
   });
 
@@ -140,8 +150,9 @@ export function useStreams({ tmdbId, mediaType, season, episode, enabled = true 
     refetchOnWindowFocus: false,
     refetchInterval: (query) => {
       if (!query.state.data?.partial) return false;
-      pollStarted.current ??= Date.now();
-      return Date.now() - pollStarted.current < POLL_WINDOW_MS ? POLL_INTERVAL_MS : false;
+      const starts = pollStarts.current;
+      if (!starts.has(titleKey)) starts.set(titleKey, Date.now());
+      return Date.now() - starts.get(titleKey)! < POLL_WINDOW_MS ? POLL_INTERVAL_MS : false;
     },
   });
 
@@ -152,13 +163,14 @@ export function useStreams({ tmdbId, mediaType, season, episode, enabled = true 
   );
 
   const fullOpen = canFetch && (!full.isFetched || full.isFetching);
-  const partial = Boolean(full.data?.partial) && Date.now() - (pollStarted.current ?? Date.now()) < POLL_WINDOW_MS;
+  const pollStart = pollStarts.current.get(titleKey);
+  const partial = Boolean(full.data?.partial) && (pollStart === undefined || Date.now() - pollStart < POLL_WINDOW_MS);
 
   const refresh = useCallback(() => {
     refreshNext.current = true;
-    pollStarted.current = null;
+    pollStarts.current.delete(titleKey);
     void qc.refetchQueries({ queryKey: playbackQueryKey(mediaType, tmdbId, season, episode, false) });
-  }, [qc, mediaType, tmdbId, season, episode]);
+  }, [qc, mediaType, tmdbId, season, episode, titleKey]);
 
   const response = full.data ?? fastData;
   return {

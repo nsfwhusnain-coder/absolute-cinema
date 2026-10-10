@@ -41,6 +41,33 @@ describe("track selection", () => {
     ).toBe(1);
   });
 
+  test("overrides a provider's default dub: Vixsrc flags Italian as DEFAULT and English as optional", () => {
+    const tracks = [
+      { id: 0, lang: "ita", name: "Italian", default: true },
+      { id: 1, lang: "eng", name: "English", default: false },
+    ];
+    expect(selectAudioTrack(tracks, { preference: "original", originalLanguage: "en", preferredLanguage: "en" })?.id).toBe(1);
+    expect(selectAudioTrack(tracks, { preference: "original", originalLanguage: null, preferredLanguage: "en" })?.id).toBe(1);
+    expect(selectAudioTrack(tracks, { preference: "english", originalLanguage: "ja", preferredLanguage: "en" })?.id).toBe(1);
+  });
+
+  test("keeps the original language of a foreign title when the stream carries it", () => {
+    const tracks = [
+      { id: 0, lang: "ita", name: "Italian", default: true },
+      { id: 1, lang: "eng", name: "English" },
+      { id: 2, lang: "kor", name: "Korean" },
+    ];
+    expect(selectAudioTrack(tracks, { preference: "original", originalLanguage: "ko", preferredLanguage: "en" })?.id).toBe(2);
+  });
+
+  test("falls back to the stream default only when neither original nor English exists", () => {
+    const tracks = [
+      { id: 0, lang: "spa", name: "Spanish (Latin American)", default: true },
+      { id: 1, lang: "ita", name: "Italian" },
+    ];
+    expect(selectAudioTrack(tracks, { preference: "original", originalLanguage: "en", preferredLanguage: "en" })?.id).toBe(0);
+  });
+
   test("prefers full English subtitles over SDH and forced", () => {
     const tracks = [
       { id: 0, lang: "en", name: "English Forced", forced: true },

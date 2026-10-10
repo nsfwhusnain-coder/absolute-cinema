@@ -1,21 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getAuthenticatedUserId } from "@/lib/auth";
 import { fetchSubtitlesForTitle } from "@/lib/subtitles/subtitles-service";
 
-export async function GET(req: NextRequest) {
-  const url = new URL(req.url);
-  const tmdbIdParam = url.searchParams.get("tmdbId");
-  const mediaTypeParam = url.searchParams.get("mediaType");
-  const seasonParam = url.searchParams.get("season");
-  const episodeParam = url.searchParams.get("episode");
+function wholeNumber(raw: string | null, min: number, max: number): number | undefined {
+  if (raw == null || raw === "") return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= min && n <= max ? n : Number.NaN;
+}
 
-  if (!tmdbIdParam || !mediaTypeParam) {
+export async function GET(req: NextRequest) {
+  const userId = await getAuthenticatedUserId();
+  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const url = new URL(req.url);
+  const mediaTypeParam = url.searchParams.get("mediaType");
+  const tmdbId = wholeNumber(url.searchParams.get("tmdbId"), 1, 999_999_999);
+  const season = wholeNumber(url.searchParams.get("season"), 0, 9_999);
+  const episode = wholeNumber(url.searchParams.get("episode"), 0, 99_999);
+
+  if (tmdbId === undefined || !mediaTypeParam) {
     return NextResponse.json({ error: "Missing tmdbId or mediaType" }, { status: 400 });
   }
-
-  const tmdbId = Number(tmdbIdParam);
+  if (Number.isNaN(tmdbId) || Number.isNaN(season) || Number.isNaN(episode)) {
+    return NextResponse.json({ error: "Invalid tmdbId, season or episode" }, { status: 400 });
+  }
   const mediaType = mediaTypeParam === "tv" ? "tv" : "movie";
-  const season = seasonParam ? Number(seasonParam) : undefined;
-  const episode = episodeParam ? Number(episodeParam) : undefined;
 
   const tracks = await fetchSubtitlesForTitle({
     tmdbId,
@@ -24,12 +33,8 @@ export async function GET(req: NextRequest) {
     episode,
   });
 
-  return NextResponse.json({
-    subtitles: tracks,
-  }, {
-    headers: {
-      "Cache-Control": "public, max-age=3600, s-maxage=86400",
-      "Access-Control-Allow-Origin": "*",
-    },
-  });
+  return NextResponse.json(
+    { subtitles: tracks },
+    { headers: { "Cache-Control": "private, max-age=3600" } }
+  );
 }

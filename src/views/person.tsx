@@ -14,6 +14,8 @@ import { transitionContent, transitionView } from "@/lib/motion";
 import { tmdbImageUrl, withoutAdultTitles, type TmdbPerson, type TmdbPersonCredit, type TmdbPersonCredits } from "@/lib/tmdb";
 import { useHideAdult } from "@/hooks/use-hide-adult";
 import { Button } from "@/components/ui/button";
+import { yearOf } from "@/lib/utils";
+import { resumeTvEpisode } from "@/lib/continue-watching";
 
 const FILMOGRAPHY_LIMIT = 24;
 const BIO_CLAMP = 420;
@@ -31,8 +33,7 @@ function creditTitle(credit: TmdbPersonCredit): string {
 function creditYear(credit: TmdbPersonCredit): number | null {
   const date = credit.release_date || credit.first_air_date;
   if (!date) return null;
-  const year = new Date(date).getFullYear();
-  return Number.isFinite(year) ? year : null;
+  return yearOf(date);
 }
 
 
@@ -45,32 +46,6 @@ interface ProgressRow {
   updatedAt?: string;
 }
 
-function resumeTvEpisode(
-  progressList: ProgressRow[] | undefined,
-  tmdbId: number
-): { season: number; episode: number } | null {
-  if (!progressList?.length) return null;
-  const rows = progressList
-    .filter(
-      (p) =>
-        Number(p.tmdbId) === Number(tmdbId) &&
-        p.mediaType === "tv" &&
-        p.season != null &&
-        Number(p.season) >= 0 &&
-        p.episode != null &&
-        Number(p.episode) > 0 &&
-        p.progress > 0.02 &&
-        p.progress < 0.95
-    )
-    .sort((a, b) => {
-      const ta = a.updatedAt ? Date.parse(a.updatedAt) : 0;
-      const tb = b.updatedAt ? Date.parse(b.updatedAt) : 0;
-      return tb - ta;
-    });
-  const best = rows[0];
-  if (!best) return null;
-  return { season: Number(best.season), episode: Number(best.episode) };
-}
 
 function watchHref(
   credit: TmdbPersonCredit,
@@ -87,11 +62,11 @@ function watchHref(
 
 function lifespan(person: TmdbPerson): string | null {
   if (!person.birthday) return null;
-  const born = new Date(person.birthday).getFullYear();
-  if (!Number.isFinite(born)) return null;
+  const born = yearOf(person.birthday);
+  if (born === null) return null;
   if (person.deathday) {
-    const died = new Date(person.deathday).getFullYear();
-    return Number.isFinite(died) ? `${born} – ${died}` : String(born);
+    const died = yearOf(person.deathday);
+    return died !== null ? `${born} – ${died}` : String(born);
   }
   return String(born);
 }

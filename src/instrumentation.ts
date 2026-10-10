@@ -19,4 +19,10 @@ export async function register(): Promise<void> {
       err instanceof Error ? err.message : String(err)
     );
   }
+  try {
+    const { startHomeFeedWarmer } = await import("@/lib/home-feed");
+    startHomeFeedWarmer();
+  } catch {
+    /* warming is an optimisation; the page loads the lists itself */
+  }
 }

@@ -52,12 +52,17 @@ export function useHoverPreview(options: {
   const scoutRef = useRef<HTMLVideoElement | null>(null);
   const scoutHlsRef = useRef<HlsType | null>(null);
   const scoutManifestRef = useRef<string | null>(null);
+  const scoutDirectRef = useRef<string | null>(null);
+  /** The time the viewer is hovering, so a late scout frame for an old position is ignored. */
+  const wantedTime = useRef<number | null>(null);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
 
-  const remember = (timeS: number, url: string) => {
+  const remember = (timeS: number, url: string, keepExisting = false) => {
     if (!url) return;
     const key = previewBucket(timeS);
     const frames = framesRef.current;
+    // A frame seen during playback beats a scout capture for the same moment.
+    if (keepExisting && frames.has(key)) return;
     if (!frames.has(key)) {
       orderRef.current.push(key);
       if (orderRef.current.length > PREVIEW_MAX_FRAMES) {
@@ -77,6 +82,10 @@ export function useHoverPreview(options: {
     const sample = () => {
       const now = Date.now();
       if (now - lastSampleTime < 400) return;
+      // One capture per 2 s bucket: drawing and JPEG-encoding a frame (a GPU
+      // readback on 4K) five times per bucket, and again on every rewatch,
+      // was work the main thread did all through playback for nothing.
+      if (framesRef.current.has(previewBucket(video.currentTime)) || document.visibilityState !== "visible") return;
       lastSampleTime = now;
       const url = captureVideoFrame(video);
       if (url) {
@@ -84,14 +93,14 @@ export function useHoverPreview(options: {
       }
     };
 
+    // Not "seeking": at that moment the picture is still the old position's,
+    // and it would be filed under the new time.
     video.addEventListener("timeupdate", sample);
     video.addEventListener("seeked", sample);
-    video.addEventListener("seeking", sample);
     video.addEventListener("playing", sample);
     return () => {
       video.removeEventListener("timeupdate", sample);
       video.removeEventListener("seeked", sample);
-      video.removeEventListener("seeking", sample);
       video.removeEventListener("playing", sample);
     };
   }, [videoRef]);
@@ -109,20 +118,27 @@ export function useHoverPreview(options: {
     // exactly the sources that now auto-play (the 4K HLS rungs) — the scout had
     // no usable src and only cached frames already seen during playback.
     const isAdaptive = sourceType === "hls" || sourceType === "dash";
-    const directSrc =
+    const candidate =
       sourceUrl && !sourceUrl.startsWith("blob:") && !isAdaptive
         ? sourceUrl
         : main?.currentSrc && !main.currentSrc.startsWith("blob:")
           ? main.currentSrc
           : null;
+    // Same-origin files only. A debrid CDN link is cross-origin: frames could
+    // never be read from it (CORS), and pointing a second element at it on
+    // every player open fetched the raw file a second time for nothing.
+    const directSrc = candidate && sameOrigin(candidate) ? candidate : null;
 
     if (directSrc) {
-      if (scout.src !== directSrc) {
-        scout.crossOrigin = "anonymous";
-        scout.preload = "auto";
-        scout.src = directSrc;
-      }
-      return;
+      // Attached on first hover (below), so a session that never scrubs pays nothing.
+      scoutDirectRef.current = directSrc;
+      return () => {
+        scoutDirectRef.current = null;
+        if (scout.getAttribute("src")) {
+          scout.removeAttribute("src");
+          scout.load();
+        }
+      };
     }
 
     // Adaptive source: give the scout its own tiny engine so it can seek
@@ -142,6 +158,12 @@ export function useHoverPreview(options: {
   useEffect(() => {
     if (hoverTime == null) return;
     const scout = scoutRef.current;
+    const direct = scoutDirectRef.current;
+    if (scout && direct && !scout.getAttribute("src")) {
+      scout.preload = "metadata";
+      scout.src = direct;
+      return;
+    }
     const manifest = scoutManifestRef.current;
     if (!scout || !manifest || scoutHlsRef.current || scout.src) return;
     let cancelled = false;
@@ -176,11 +198,10 @@ export function useHoverPreview(options: {
       return;
     }
 
-    // First, check if we have a captured frame near hoverTime
-    const cached = nearestPreviewFrame(framesRef.current, hoverTime);
-    if (cached) {
-      setPreviewSrc(cached);
-    }
+    // A captured frame near hoverTime, or none: leaving the last frame up
+    // showed a picture from somewhere else in the film.
+    setPreviewSrc(nearestPreviewFrame(framesRef.current, hoverTime) ?? null);
+    wantedTime.current = hoverTime;
 
     const scout = scoutRef.current;
     if (!scout || !scout.src) return;
@@ -203,20 +224,30 @@ export function useHoverPreview(options: {
     const scout = scoutRef.current;
     if (!scout) return;
 
+    // Only a finished seek near the hovered time is a real frame; "canplay"
+    // often fired on a blank, not-yet-decoded picture.
     const onSeeked = () => {
+      const wanted = wantedTime.current;
+      if (wanted == null || Math.abs(scout.currentTime - wanted) > 3) return;
       const url = captureVideoFrame(scout);
       if (!url) return;
-      remember(scout.currentTime, url);
+      remember(scout.currentTime, url, true);
       setPreviewSrc(url);
     };
 
     scout.addEventListener("seeked", onSeeked);
-    scout.addEventListener("canplay", onSeeked);
     return () => {
       scout.removeEventListener("seeked", onSeeked);
-      scout.removeEventListener("canplay", onSeeked);
     };
   }, []);
 
   return { previewSrc, scoutRef };
+}
+
+function sameOrigin(url: string): boolean {
+  try {
+    return new URL(url, window.location.href).origin === window.location.origin;
+  } catch {
+    return false;
+  }
 }

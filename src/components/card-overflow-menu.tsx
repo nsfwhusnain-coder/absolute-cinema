@@ -30,6 +30,8 @@ export interface CardMenuTarget {
   episode?: number | null;
   duration?: number | null;
   position?: number | null;
+  /** Catalog runtime, used as the length when marking a title watched that was never played. */
+  runtimeSeconds?: number | null;
   /** Show "Remove from Continue Watching" */
   continueWatching?: boolean;
 }
@@ -128,14 +130,11 @@ export function CardOverflowMenu({ target, className, alwaysVisible }: Props) {
   };
 
   const removeContinue = async () => {
+    // The whole title: removing one episode only let an older one take its place.
     const params = new URLSearchParams({
       tmdbId: String(target.tmdbId),
       mediaType,
     });
-    if (mediaType === "tv" && target.season != null && target.episode != null) {
-      params.set("season", String(target.season));
-      params.set("episode", String(target.episode));
-    }
     const res = await fetch(`/api/progress?${params}`, { method: "DELETE" });
     if (!res.ok) {
       toast.error("Could not remove from Continue Watching");
@@ -168,7 +167,7 @@ export function CardOverflowMenu({ target, className, alwaysVisible }: Props) {
 
   const markWatched = async () => {
     const duration =
-      target.duration && target.duration > 0 ? target.duration : 1;
+      target.duration && target.duration > 0 ? target.duration : target.runtimeSeconds && target.runtimeSeconds > 0 ? target.runtimeSeconds : 1;
     const res = await fetch("/api/progress", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -190,7 +189,8 @@ export function CardOverflowMenu({ target, className, alwaysVisible }: Props) {
       return;
     }
     await qc.invalidateQueries({ queryKey: ["progress"] });
-    toast.success("Marked as watched");
+    void qc.invalidateQueries({ queryKey: ["show-progress", target.tmdbId] });
+    toast.success(mediaType === "tv" ? `Marked S${target.season} E${target.episode} as watched` : "Marked as watched");
     close();
   };
 
@@ -203,7 +203,10 @@ export function CardOverflowMenu({ target, className, alwaysVisible }: Props) {
     action: toggleList,
   });
   items.push({ label: "Go to details", action: goDetails });
-  items.push({ label: "Mark as watched", action: markWatched });
+  // A show card without an episode has nothing specific to mark (it used to mark S1E1).
+  if (mediaType === "movie" || (target.season != null && target.episode != null)) {
+    items.push({ label: mediaType === "tv" ? `Mark S${target.season} E${target.episode} as watched` : "Mark as watched", action: markWatched });
+  }
 
   const onMenuKey = (e: KeyboardEvent, idx: number) => {
     if (e.key === "ArrowDown") {

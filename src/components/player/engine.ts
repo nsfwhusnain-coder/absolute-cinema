@@ -38,6 +38,8 @@ export interface EngineAudioTrack {
   id: number;
   name: string;
   lang: string;
+  /** The stream's own default, which providers often set to a dub. */
+  default: boolean;
 }
 
 export interface EngineHandlers {
@@ -48,8 +50,20 @@ export interface EngineHandlers {
 }
 
 const MANIFEST_TIMEOUT_MS = 20_000;
-/** Opening rendition when the viewer has not chosen a quality. */
-export const DEFAULT_START_HEIGHT = 1080;
+/**
+ * Opening rendition when the viewer has not chosen a quality: the top of the
+ * ladder. Opening on 1080p and waiting for adaptive switching to climb meant a
+ * 4K-capable stream often never left 1080p; it still drops if the connection
+ * cannot sustain the top rung.
+ */
+export const DEFAULT_START_HEIGHT = 2160;
+
+export interface LoadOptions {
+  /** Rendition to open on: the highest at or below it. */
+  startHeight?: number;
+  /** Keep to the opening rendition instead of adapting (the viewer asked for that quality). */
+  lockLevel?: boolean;
+}
 /**
  * Automatic quality never picks renditions below this. Embed CDNs that take
  * seconds to send each segment's first byte drag hls.js's bandwidth estimate
@@ -75,10 +89,11 @@ export class MediaEngine {
 
   /**
    * Tears down whatever was playing and starts `playable` at `startAt` seconds.
-   * `startHeight` is the rendition to open on (the highest at or below it);
-   * adaptive switching takes over from there.
+   * Adaptive switching takes over from the opening rendition unless the
+   * viewer's quality is locked.
    */
-  async load(playable: Playable, startAt: number, startHeight = DEFAULT_START_HEIGHT): Promise<void> {
+  async load(playable: Playable, startAt: number, options: LoadOptions = {}): Promise<void> {
+    const startHeight = options.startHeight ?? DEFAULT_START_HEIGHT;
     this.teardown();
     const generation = ++this.generation;
     this.networkRecoveries = 0;
@@ -100,6 +115,7 @@ export class MediaEngine {
       this.kind = "native_hls";
       video.src = playable.url;
       this.seekWhenReady(startAt, generation);
+      this.reportNativeAudio(generation);
       video.load();
       return;
     }
@@ -134,6 +150,8 @@ export class MediaEngine {
         if (playable.withCredentials) xhr.withCredentials = true;
       },
     });
+    // Captions are drawn by the player; a default track must never be shown natively as well.
+    hls.subtitleDisplay = false;
     this.hls = hls;
 
     hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
@@ -142,6 +160,7 @@ export class MediaEngine {
       // guess; ABR still drops lower if the connection cannot sustain it.
       const start = openingLevel(data.levels, startHeight);
       if (start >= 0) hls.startLevel = start;
+      if (start >= 0 && options.lockLevel) hls.nextLevel = start;
       this.handlers.onLevels(toLevels(data.levels));
     });
     hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => {
@@ -194,7 +213,14 @@ export class MediaEngine {
   }
 
   setAudioTrack(id: number): void {
-    if (this.hls) this.hls.audioTrack = id;
+    if (this.hls) {
+      this.hls.audioTrack = id;
+      return;
+    }
+    const list = nativeAudioTracks(this.video);
+    if (!list) return;
+    for (let i = 0; i < list.length; i++) list[i]!.enabled = i === id;
+    this.handlers.onAudioTracks(toNativeAudio(list), id);
   }
 
   destroy(): void {
@@ -212,6 +238,22 @@ export class MediaEngine {
       video.removeAttribute("src");
       video.load();
     }
+  }
+
+  /** Safari's own HLS player exposes the stream's audio tracks on the element. */
+  private reportNativeAudio(generation: number): void {
+    const video = this.video;
+    video.addEventListener(
+      "loadedmetadata",
+      () => {
+        if (generation !== this.generation) return;
+        const list = nativeAudioTracks(video);
+        if (!list || list.length === 0) return;
+        const tracks = toNativeAudio(list);
+        this.handlers.onAudioTracks(tracks, Math.max(0, tracks.findIndex((t) => t.default)));
+      },
+      { once: true }
+    );
   }
 
   private seekWhenReady(startAt: number, generation: number): void {
@@ -253,5 +295,28 @@ function toLevels(levels: Level[]): QualityLevel[] {
 }
 
 function toAudio(tracks: MediaPlaylist[]): EngineAudioTrack[] {
-  return tracks.map((track) => ({ id: track.id, name: track.name || track.lang || `Track ${track.id + 1}`, lang: track.lang || "" }));
+  return tracks.map((track) => ({
+    id: track.id,
+    name: track.name || track.lang || `Track ${track.id + 1}`,
+    lang: track.lang || "",
+    default: Boolean(track.default),
+  }));
+}
+
+interface NativeAudioTrackList {
+  length: number;
+  [index: number]: { enabled: boolean; label: string; language: string } | undefined;
+}
+
+function nativeAudioTracks(video: HTMLVideoElement): NativeAudioTrackList | null {
+  return (video as HTMLVideoElement & { audioTracks?: NativeAudioTrackList }).audioTracks ?? null;
+}
+
+function toNativeAudio(list: NativeAudioTrackList): EngineAudioTrack[] {
+  const tracks: EngineAudioTrack[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const track = list[i]!;
+    tracks.push({ id: i, name: track.label || track.language || `Track ${i + 1}`, lang: track.language || "", default: track.enabled });
+  }
+  return tracks;
 }

@@ -19,24 +19,35 @@ export const LAST_PROFILE_KEY = "absolute-cinema:last-profile";
 const PIN_MIN = 4;
 const PIN_MAX = 10;
 
-/** Same-origin relative path only. Rejects protocol-relative, login loops, and schemes. */
+function unsafePath(value: string): boolean {
+  if (!value.startsWith("/")) return true;
+  if (value.startsWith("//")) return true;
+  if (value.includes("\\") || value.includes("://")) return true;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return true;
+  const pathOnly = value.split(/[?#]/, 1)[0] ?? value;
+  const lowered = pathOnly.toLowerCase();
+  return lowered === "/login" || lowered.startsWith("/login/");
+}
+
+/**
+ * Same-origin relative path only. Rejects protocol-relative, login loops, and schemes.
+ *
+ * The value arrives already decoded once (from the URL's search params), so it
+ * is returned as it is: decoding it again turned "Fast%20%26%20Furious" into a
+ * query whose "&" split it in two. The checks still run on a decoded copy too,
+ * so an encoded "//" cannot slip past them.
+ */
 export function safeCallbackPath(raw: string | null | undefined): string {
   if (!raw) return "/";
-  let value = raw.trim();
+  const value = raw.trim();
   if (!value) return "/";
+  let decoded: string;
   try {
-    value = decodeURIComponent(value);
+    decoded = decodeURIComponent(value).trim();
   } catch {
     return "/";
   }
-  value = value.trim();
-  if (!value.startsWith("/")) return "/";
-  if (value.startsWith("//")) return "/";
-  if (value.includes("\\") || value.includes("://")) return "/";
-  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return "/";
-  const pathOnly = value.split(/[?#]/, 1)[0] ?? value;
-  const lowered = pathOnly.toLowerCase();
-  if (lowered === "/login" || lowered.startsWith("/login/")) return "/";
+  if (unsafePath(value) || unsafePath(decoded)) return "/";
   return value;
 }
 
@@ -394,7 +405,8 @@ function CreateScreen({
   const [name, setName] = useState("");
   const [avatar, setAvatar] = useState<string>(defaultAvatar(existing));
   const [color, setColor] = useState<string>(AVATAR_COLORS[existing % AVATAR_COLORS.length]!);
-  const [lock, setLock] = useState(false);
+  // On by default for the first profile: it is the admin, and every profile shows on the sign-in screen.
+  const [lock, setLock] = useState(firstRun);
   const [pin, setPin] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
@@ -458,7 +470,9 @@ function CreateScreen({
         <label className="flex cursor-pointer items-center justify-between gap-4">
           <span>
             <span className="block text-sm font-medium text-white">Lock with a PIN</span>
-            <span className="block text-xs text-white/55">Off: anyone here can open this profile with one tap.</span>
+            <span className="block text-xs text-white/55">
+              {firstRun ? "Recommended: this profile manages the server. " : ""}Off: anyone here can open this profile with one tap.
+            </span>
           </span>
           <input type="checkbox" className="peer sr-only" checked={lock} onChange={(e) => setLock(e.target.checked)} />
           <span className="relative inline-flex h-7 w-12 shrink-0 items-center rounded-full bg-white/15 transition-colors peer-checked:bg-[var(--primary)] peer-focus-visible:ring-2 peer-focus-visible:ring-white/60 after:ml-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow after:transition-transform peer-checked:after:translate-x-5" />

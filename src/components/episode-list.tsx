@@ -2,13 +2,14 @@
 
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowDownUp, Play } from "lucide-react";
+import { ArrowDownUp, Check, Play } from "lucide-react";
 import type { TmdbEpisode } from "@/lib/tmdb";
 import { useNavigate } from "@/hooks/use-navigate";
-import { useProgress } from "@/hooks/use-progress";
+import { useShowProgress } from "@/hooks/use-progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EpisodeStill } from "@/components/episode-still";
 import { cn } from "@/lib/utils";
+import { tvSeasonQuery } from "@/lib/tv-season-query";
 
 const SKELETON_ROWS = 5;
 
@@ -35,7 +36,8 @@ function formatAirDate(date: string | null): string | null {
 }
 
 function isUnaired(date: string | null): boolean {
-  if (!date) return true;
+  // No date at all is common for older shows' aired episodes: let them play.
+  if (!date) return false;
   return new Date(`${date}T00:00:00`).getTime() > Date.now();
 }
 
@@ -43,15 +45,10 @@ function isUnaired(date: string | null): boolean {
 export function EpisodeList({ tvId, season, seriesPosterPath, seriesBackdropPath }: Props) {
   const navigate = useNavigate();
   const [newestFirst, setNewestFirst] = useState(false);
-  const { items: progressItems } = useProgress();
+  const showProgress = useShowProgress(tvId);
 
   const { data, isLoading } = useQuery({
-    queryKey: ["tmdb", "tv", "season", tvId, season],
-    queryFn: async () => {
-      const res = await fetch(`/api/tmdb/tv/${tvId}/season/${season}`);
-      if (!res.ok) return null;
-      return res.json() as Promise<{ poster_path?: string | null; episodes?: TmdbEpisode[] }>;
-    },
+    ...tvSeasonQuery<{ poster_path?: string | null; episodes?: TmdbEpisode[] }>(tvId, season),
   });
 
   const episodes = useMemo(() => {
@@ -59,15 +56,6 @@ export function EpisodeList({ tvId, season, seriesPosterPath, seriesBackdropPath
     return newestFirst ? list.reverse() : list;
   }, [data?.episodes, newestFirst]);
 
-  const progressByEpisode = useMemo(() => {
-    const map = new Map<number, number>();
-    for (const item of progressItems ?? []) {
-      if (item.tmdbId === tvId && item.season === season && item.episode != null) {
-        map.set(item.episode, item.progress);
-      }
-    }
-    return map;
-  }, [progressItems, tvId, season]);
 
   if (isLoading) {
     return (
@@ -107,7 +95,8 @@ export function EpisodeList({ tvId, season, seriesPosterPath, seriesBackdropPath
           const duration = formatRuntime(ep.runtime);
           const aired = formatAirDate(ep.air_date);
           const upcoming = isUnaired(ep.air_date);
-          const progress = progressByEpisode.get(ep.episode_number);
+          const progress = showProgress.get(`${season}:${ep.episode_number}`)?.progress;
+          const watched = progress != null && progress >= 0.95;
           return (
             <li key={ep.id}>
               <button
@@ -119,7 +108,7 @@ export function EpisodeList({ tvId, season, seriesPosterPath, seriesBackdropPath
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   upcoming ? "cursor-default opacity-60" : "hover:bg-white/[0.04]",
                 )}
-                aria-label={`${upcoming ? "Upcoming" : "Play"} episode ${ep.episode_number}: ${ep.name}`}
+                aria-label={`${upcoming ? "Upcoming" : "Play"} episode ${ep.episode_number}: ${ep.name}${watched ? " (watched)" : ""}`}
               >
                 <div className="relative aspect-video w-36 shrink-0 overflow-hidden rounded-lg bg-muted sm:w-56">
                   <EpisodeStill
@@ -136,11 +125,15 @@ export function EpisodeList({ tvId, season, seriesPosterPath, seriesBackdropPath
                       </span>
                     </div>
                   )}
-                  {progress != null && progress > 0 && (
+                  {watched ? (
+                    <span className="absolute right-1.5 top-1.5 flex items-center gap-1 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white backdrop-blur">
+                      <Check className="h-3 w-3" aria-hidden /> Watched
+                    </span>
+                  ) : progress != null && progress > 0 ? (
                     <div className="absolute inset-x-0 bottom-0 h-1 bg-white/20">
                       <div className="h-full bg-primary" style={{ width: `${Math.min(100, progress * 100)}%` }} />
                     </div>
-                  )}
+                  ) : null}
                 </div>
                 <div className="min-w-0 flex-1 py-0.5">
                   <div className="flex items-baseline justify-between gap-3">

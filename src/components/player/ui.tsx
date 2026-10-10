@@ -3,6 +3,7 @@
 import { useCallback, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { Check, ChevronLeft, Loader2, RotateCcw, Volume1, Volume2, VolumeX } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { CaptionBackground, CaptionColor, CaptionFont, CaptionSize } from "@/lib/profile-extras";
 
 export function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
@@ -70,6 +71,7 @@ export function SeekBar({
   const barRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<{ x: number; time: number } | null>(null);
   const [scrubTime, setScrubTime] = useState<number | null>(null);
+  const scrubbing = useRef(false);
   const safeDuration = duration > 0 ? duration : 1;
 
   const timeAt = useCallback(
@@ -89,8 +91,18 @@ export function SeekBar({
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
     e.stopPropagation();
+    // Only the primary button scrubs: a right click opens the context menu, it doesn't seek.
+    if (e.button !== 0) return;
     (e.target as Element).setPointerCapture?.(e.pointerId);
+    scrubbing.current = true;
     setScrubTime(timeAt(e.clientX).time);
+  };
+  /** A touch the browser took over (a scroll, a system gesture) must not leave the bar stuck mid-scrub. */
+  const cancelScrub = () => {
+    scrubbing.current = false;
+    setScrubTime(null);
+    setHover(null);
+    onHover?.(null);
   };
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
     const at = timeAt(e.clientX);
@@ -99,15 +111,24 @@ export function SeekBar({
     if (scrubTime !== null) setScrubTime(at.time);
   };
   const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
+    scrubbing.current = false;
     if (scrubTime === null) return;
     onSeek(timeAt(e.clientX).time);
     setScrubTime(null);
   };
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+    const jumps: Record<string, number> = {
+      ArrowLeft: currentTime - 5,
+      ArrowRight: currentTime + 5,
+      PageDown: currentTime - 60,
+      PageUp: currentTime + 60,
+      Home: 0,
+      End: Math.max(0, duration - 1),
+    };
+    if (e.key in jumps) {
       e.preventDefault();
       e.stopPropagation();
-      onSeek(currentTime + (e.key === "ArrowRight" ? 5 : -5));
+      onSeek(jumps[e.key]!);
     }
   };
 
@@ -125,6 +146,10 @@ export function SeekBar({
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerCancel={cancelScrub}
+      onLostPointerCapture={() => {
+        if (scrubbing.current) cancelScrub();
+      }}
       onPointerLeave={() => {
         if (scrubTime !== null) return;
         setHover(null);
@@ -210,7 +235,8 @@ export function PlayerMenu({
       aria-label={title}
       onClick={(e) => e.stopPropagation()}
       className={cn(
-        "glass-clear glass-dense flex max-h-[min(70vh,34rem)] w-[min(92vw,22rem)] flex-col overflow-hidden rounded-3xl text-white",
+        // Never taller than the space above the control bar (phones held sideways included).
+        "glass-clear glass-dense flex max-h-[min(70vh,34rem,calc(100dvh-8.5rem))] w-[min(92vw,22rem)] flex-col overflow-hidden rounded-3xl text-white",
         className
       )}
     >
@@ -394,11 +420,15 @@ export function Captions({
   raised,
   size = "medium",
   background = "box",
+  color = "white",
+  font = "sans",
 }: {
   text: string;
   raised: boolean;
-  size?: "small" | "medium" | "large";
-  background?: "box" | "shadow";
+  size?: CaptionSize;
+  background?: CaptionBackground;
+  color?: CaptionColor;
+  font?: CaptionFont;
 }) {
   if (!text) return null;
   return (
@@ -411,6 +441,8 @@ export function Captions({
       <p
         data-size={size}
         data-background={background}
+        data-color={color}
+        data-font={font}
         className="player-caption max-w-[80%] whitespace-pre-line rounded-lg bg-black/70 px-3 py-1 text-center font-medium leading-snug text-white"
       >
         {text}

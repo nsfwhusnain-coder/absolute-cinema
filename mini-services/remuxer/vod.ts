@@ -333,12 +333,19 @@ function stopRun(run: Run, reason: string): void {
   log(`run ${run.id} stopped: ${reason}`);
 }
 
+/** A session that asked for a segment this recently is someone watching right now. */
+const ACTIVE_VIEWER_MS = 20_000;
+
 function makeRoom(session: Session): void {
   const own = aliveRuns(session).sort((a, b) => lastTime(a) - lastTime(b));
   while (own.length >= MAX_RUNS_PER_SESSION) stopRun(own.shift()!, "session run limit");
   if (totalAliveRuns() < MAX_RUNS_TOTAL) return;
+  // Only other viewers who have gone quiet give up their runs. Taking runs
+  // from someone mid-film just moved the stall to them, and with a few
+  // viewers at once they took turns stalling each other.
+  const now = Date.now();
   const idleOthers = [...sessions.values()]
-    .filter((s) => s !== session)
+    .filter((s) => s !== session && now - s.lastRequestAt > ACTIVE_VIEWER_MS)
     .sort((a, b) => a.lastRequestAt - b.lastRequestAt);
   for (const other of idleOthers) {
     for (const run of aliveRuns(other)) stopRun(run, "global run limit");
@@ -485,7 +492,12 @@ export async function vodInit(id: string): Promise<Uint8Array> {
  * run that will produce it is followed and each keyframe group is yielded
  * the moment it is written, so playback can begin before the segment ends.
  */
-export async function* vodSegment(id: string, segment: number): AsyncGenerator<string> {
+/**
+ * Yields the fragment files of one segment as they appear. `gone` reports that
+ * the player hung up: the wait then ends instead of polling (and starting new
+ * ffmpeg runs) for a segment nobody will receive.
+ */
+export async function* vodSegment(id: string, segment: number, gone: () => boolean = () => false): AsyncGenerator<string> {
   const session = sessionOrThrow(id);
   if (!Number.isInteger(segment) || segment < 0 || segment >= session.bounds.length - 1) {
     throw new VodError("segment out of range", 404);
@@ -517,6 +529,7 @@ export async function* vodSegment(id: string, segment: number): AsyncGenerator<s
       break;
     }
     if (run) break;
+    if (gone()) return;
     if (Date.now() > deadline) throw new VodError("segment not ready", 504);
     if (!runReaching(session, segment)) {
       const failed = session.runs.filter((r) => r.failed && r.startSegment === segment).length;
@@ -533,7 +546,7 @@ export async function* vodSegment(id: string, segment: number): AsyncGenerator<s
       yield fragment.path;
       cursor++;
     }
-    if (run.finished) return;
+    if (run.finished || gone()) return;
     if (run.failed) throw new VodError("remux run failed mid-segment", 502);
     if (Date.now() > deadline) throw new VodError("segment stalled", 504);
     session.lastRequestAt = Date.now();

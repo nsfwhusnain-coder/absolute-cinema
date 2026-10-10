@@ -8,6 +8,7 @@ import { transitionView } from "@/lib/motion";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AppSection } from "./app-section";
 import { AppearanceSection } from "./appearance-section";
+import { HomeSection } from "./home-section";
 import { ConnectionsSection } from "./connections-section";
 import { LibrarySection } from "./library-section";
 import { PlaybackSection } from "./playback-section";
@@ -93,6 +94,7 @@ export function SettingsView() {
             <ProfileSection />
             <PlaybackSection />
             <AppearanceSection />
+            <HomeSection />
             <LibrarySection />
             <AppSection />
           </>

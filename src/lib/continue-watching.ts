@@ -32,3 +32,33 @@ export function collapseContinueItems<T extends ContinueProgressLike>(items: T[]
 
   return out;
 }
+
+export interface ResumeRow extends ContinueProgressLike {
+  progress?: number;
+  updatedAt?: string;
+  /** The server's "next episode" for a show whose latest episode was finished. */
+  upNext?: boolean;
+}
+
+/**
+ * The episode Play should open for a show: the most recently watched
+ * in-progress episode, or the next one after a finished episode. Null means
+ * nothing to resume (the caller starts at S1E1). Season 0 (Specials) counts.
+ */
+export function resumeTvEpisode(rows: ResumeRow[] | undefined, tmdbId: number): { season: number; episode: number } | null {
+  if (!rows?.length) return null;
+  const candidates = rows
+    .filter(
+      (p) =>
+        Number(p.tmdbId) === Number(tmdbId) &&
+        p.mediaType === "tv" &&
+        p.season != null &&
+        Number(p.season) >= 0 &&
+        p.episode != null &&
+        Number(p.episode) > 0 &&
+        (p.upNext === true || ((p.progress ?? 0) > 0.02 && (p.progress ?? 0) < 0.95))
+    )
+    .sort((a, b) => (b.updatedAt ? Date.parse(b.updatedAt) : 0) - (a.updatedAt ? Date.parse(a.updatedAt) : 0));
+  const best = candidates[0];
+  return best ? { season: Number(best.season), episode: Number(best.episode) } : null;
+}

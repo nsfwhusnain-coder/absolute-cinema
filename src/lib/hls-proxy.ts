@@ -1326,16 +1326,45 @@ export function isPrivateHostname(hostname: string): boolean {
 
   // IPv6 literal
   if (lower.includes(":")) {
-    if (lower === "::" || lower === "::1") return true; // unspecified / loopback
-    // IPv4-mapped/embedded (e.g. ::ffff:169.254.169.254) — judge by the IPv4 tail
-    const tail = lower.match(/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (tail) return isPrivateIpv4(Number(tail[1]), Number(tail[2]));
-    if (/^fe[89ab]/.test(lower)) return true; // fe80::/10 link-local
-    if (/^f[cd]/.test(lower)) return true; // fc00::/7 unique-local
+    const words = expandIpv6(lower.replace(/%.*$/, ""));
+    // Not a parseable address: refuse rather than guess.
+    if (!words) return true;
+    if (words.every((w) => w === 0)) return true; // :: unspecified
+    if (words.slice(0, 7).every((w) => w === 0) && words[7] === 1) return true; // ::1 loopback
+    const embedded = (hi: number, lo: number) => isPrivateIpv4(hi >> 8, hi & 0xff) || (hi === 0 && lo === 0);
+    // IPv4 inside IPv6, judged by the IPv4 address. URL() writes ::ffff:127.0.0.1
+    // as [::ffff:7f00:1], which the old dotted-tail check never matched.
+    if (words.slice(0, 5).every((w) => w === 0) && (words[5] === 0xffff || words[5] === 0)) return embedded(words[6]!, words[7]!); // ::ffff:0:0/96 mapped, ::/96 compatible
+    if (words[0] === 0x64 && words[1] === 0xff9b && words.slice(2, 6).every((w) => w === 0)) return embedded(words[6]!, words[7]!); // 64:ff9b::/96 NAT64
+    if (words[0] === 0x2002) return embedded(words[1]!, words[2]!); // 2002::/16 6to4
+    if ((words[0]! & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+    if ((words[0]! & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
+    if ((words[0]! & 0xffc0) === 0xfec0) return true; // fec0::/10 site-local (deprecated)
     return false; // other (global unicast) IPv6 is public
   }
 
   return false;
+}
+
+/** "::ffff:7f00:1" → eight 16-bit words; null when it isn't a valid IPv6 address. */
+function expandIpv6(address: string): number[] | null {
+  let text = address;
+  // A trailing dotted IPv4 counts as the last two words.
+  const dotted = text.match(/^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (dotted) {
+    const parts = dotted.slice(2, 6).map(Number);
+    if (parts.some((n) => n > 255)) return null;
+    text = `${dotted[1]}${((parts[0]! << 8) | parts[1]!).toString(16)}:${((parts[2]! << 8) | parts[3]!).toString(16)}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 1 ? missing !== 0 : missing < 1) return null;
+  const groups = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups.map((g) => parseInt(g, 16));
 }
 
 /** True when hostname is on the static CDN list or matches a known suffix. */

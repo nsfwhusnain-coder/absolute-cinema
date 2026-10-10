@@ -58,8 +58,11 @@ export function TvSpatialNavigation() {
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
-      // The player owns its own remote map, including media and Back keys.
-      if ((event.target as Element | null)?.closest(".player-shell")) return;
+      // The player owns its own remote map, including media and Back keys,
+      // for as long as it is on screen. (Checking the event target missed
+      // most presses: with nothing focused the target is <body>, so arrows
+      // both seeked and moved focus onto the hidden Back button.)
+      if (document.querySelector(".player-shell")) return;
 
       if (isRemoteBackEvent(event)) {
         event.preventDefault();

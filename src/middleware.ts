@@ -67,9 +67,12 @@ export const config = {
    * Excludes:
    *  - /api/**            — self-gated per-route (see file header)
    *  - /_next/static, /_next/image — Next.js internals
-   *  - any path containing a "." (favicon.ico, manifest.json, sw.js,
-   *    robots.txt, images under /public, etc.) — the standard Next.js
-   *    convention for "this is a static asset, not a page route"
+   *  - static files by extension (favicon.ico, manifest.json, sw.js,
+   *    robots.txt, images and fonts under /public). Only real file
+   *    extensions: excluding every path with a dot let "/movie/603." skip
+   *    the gate, because the page reads the id as Number("603.") = 603.
    */
-  matcher: ["/((?!api|_next/static|_next/image|.*\\..*).*)"],
+  matcher: [
+    "/((?!api|_next/static|_next/image|.*\\.(?:png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|otf|js|mjs|css|map|json|txt|xml|webmanifest)$).*)",
+  ],
 };

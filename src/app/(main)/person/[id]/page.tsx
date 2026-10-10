@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import { PersonView } from "@/views/person";
 import { tmdb } from "@/lib/tmdb";
+import { parseRouteId } from "@/lib/route-params";
 
 function personId(raw: string): number {
-  const id = Number(raw);
-  return Number.isFinite(id) && id > 0 ? id : 0;
+  return parseRouteId(raw) ?? 0;
 }
 
 export async function generateMetadata({
@@ -29,9 +30,7 @@ export async function generateMetadata({
 export default async function Page({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const numericId = personId(id);
-  if (!numericId) {
-    return <PersonView id={0} />;
-  }
+  if (!numericId) notFound();
   const [person, credits] = await Promise.all([
     tmdb.personDetails(numericId).catch(() => null),
     tmdb.personCredits(numericId).catch(() => null),

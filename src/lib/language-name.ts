@@ -5,7 +5,17 @@ const THREE_TO_TWO: Record<string, string> = {
   nld: "nl", swe: "sv", nor: "no", dan: "da", fin: "fi", gre: "el", ell: "el", heb: "he", hun: "hu",
   cze: "cs", ces: "cs", rum: "ro", ron: "ro", tha: "th", vie: "vi", ind: "id", may: "ms", msa: "ms",
   ukr: "uk", per: "fa", fas: "fa", tam: "ta", tel: "te", ben: "bn", fil: "fil", tgl: "tl",
+
+hrv: "hr", scc: "sr", srp: "sr", slv: "sl", slo: "sk", slk: "sk", bul: "bg", est: "et", lav: "lv", lit: "lt",
+  bos: "bs", alb: "sq", sqi: "sq", mac: "mk", mkd: "mk", ice: "is", isl: "is", cat: "ca", baq: "eu", eus: "eu",
+  glg: "gl",
 };
+
+/** "eng", "en-GB", "EN" → "en": the base language as a 2-letter code where one exists. */
+export function baseLanguage(code: string | null | undefined): string {
+  const base = (code ?? "").trim().toLowerCase().split(/[-_]/)[0] ?? "";
+  return THREE_TO_TWO[base] ?? base;
+}
 
 let displayNames: Intl.DisplayNames | null | undefined;
 

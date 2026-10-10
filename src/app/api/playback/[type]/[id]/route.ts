@@ -35,6 +35,7 @@ import { resolvePlaybackContentClass } from "@/lib/playback/content-class";
 import { rememberPlaybackRoster } from "@/lib/playback/source-url-cache";
 import { resolvePlayableTitle } from "@/lib/catalog/title-alias.server";
 import { PlaybackTracker } from "@/lib/playback/playback-observability";
+import { parseRouteId } from "@/lib/route-params";
 
 const FULL_RESOLVE_PER_TITLE_LIMIT = 12;
 const FULL_RESOLVE_PER_USER_LIMIT = 90;
@@ -100,7 +101,8 @@ export async function GET(
     return NextResponse.json({ error: "Invalid media type" }, { status: 400 });
   }
 
-  const requestedId = Number(id);
+  // Digits only: "-5" or "1.5" used to start a real (wasted) scrape.
+  const requestedId = parseRouteId(id);
   if (!requestedId) {
     return NextResponse.json({ error: "Invalid id" }, { status: 400 });
   }

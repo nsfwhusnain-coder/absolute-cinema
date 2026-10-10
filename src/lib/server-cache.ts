@@ -14,6 +14,38 @@ const store = new Map<string, Entry<unknown>>();
 
 const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000;
 const STALE_GRACE_MS = 30 * 60 * 1000;
+/**
+ * Entry caps. Keys include whatever the client asked for (every search
+ * query, every page), and entries were only dropped when the same key was
+ * read again after expiry, so the maps grew for as long as the server ran.
+ * Detail payloads are 70-170 KB, so 1500 catalog entries is ~100-250 MB at
+ * worst. Maps keep insertion order: re-inserting on use makes the first key
+ * the least recently used one.
+ */
+const CATALOG_MAX_ENTRIES = 1500;
+const PLAYBACK_MAX_ENTRIES = 400;
+const RAW_SCRAPE_MAX_ENTRIES = 400;
+const SWEEP_INTERVAL_MS = 60 * 1000;
+
+function remember<V>(map: Map<string, V>, key: string, value: V, max: number): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > max) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
+let lastSweep = 0;
+/** Drops expired entries from every map, at most once a minute. */
+function sweep(now: number): void {
+  if (now - lastSweep < SWEEP_INTERVAL_MS) return;
+  lastSweep = now;
+  for (const [key, entry] of store) if (now >= entry.staleUntil && !entry.revalidating) store.delete(key);
+  for (const [key, entry] of playbackStore) if (now > entry.until) playbackStore.delete(key);
+  for (const [key, entry] of rawScrapeStore) if (now > entry.until) rawScrapeStore.delete(key);
+}
 
 export async function cachedFetch<T>(
   key: string,
@@ -23,7 +55,9 @@ export async function cachedFetch<T>(
   const now = Date.now();
   const hit = store.get(key) as Entry<T> | undefined;
 
+  sweep(now);
   if (hit && now < hit.freshUntil) {
+    remember(store, key, hit, CATALOG_MAX_ENTRIES);
     return hit.value;
   }
 
@@ -31,11 +65,12 @@ export async function cachedFetch<T>(
     if (!hit.revalidating) {
       hit.revalidating = loader()
         .then((value) => {
-          store.set(key, {
-            value,
-            freshUntil: Date.now() + ttlMs,
-            staleUntil: Date.now() + ttlMs + STALE_GRACE_MS,
-          });
+          remember(
+            store,
+            key,
+            { value, freshUntil: Date.now() + ttlMs, staleUntil: Date.now() + ttlMs + STALE_GRACE_MS },
+            CATALOG_MAX_ENTRIES
+          );
           return value;
         })
         .catch(() => hit.value)
@@ -48,11 +83,7 @@ export async function cachedFetch<T>(
   }
 
   const value = await loader();
-  store.set(key, {
-    value,
-    freshUntil: now + ttlMs,
-    staleUntil: now + ttlMs + STALE_GRACE_MS,
-  });
+  remember(store, key, { value, freshUntil: now + ttlMs, staleUntil: now + ttlMs + STALE_GRACE_MS }, CATALOG_MAX_ENTRIES);
   return value;
 }
 
@@ -83,7 +114,8 @@ export function getCachedPlayback<T>(key: string): T | null {
 }
 
 export function setCachedPlayback(key: string, value: unknown, ttlMs = PLAYBACK_TTL_MS): void {
-  playbackStore.set(key, { value, until: Date.now() + ttlMs });
+  sweep(Date.now());
+  remember(playbackStore, key, { value, until: Date.now() + ttlMs }, PLAYBACK_MAX_ENTRIES);
 }
 
 function contentClassSuffix(contentClass?: string): string {
@@ -148,5 +180,6 @@ export function getCachedRawScrape<T>(key: string): T | null {
 }
 
 export function setCachedRawScrape(key: string, value: unknown, ttlMs = RAW_SCRAPE_TTL_MS): void {
-  rawScrapeStore.set(key, { value, until: Date.now() + ttlMs });
+  sweep(Date.now());
+  remember(rawScrapeStore, key, { value, until: Date.now() + ttlMs }, RAW_SCRAPE_MAX_ENTRIES);
 }
