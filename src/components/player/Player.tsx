@@ -53,8 +53,11 @@ import {
   formatTime,
 } from "./ui";
 import { EpisodesMenu, type SeasonOption } from "./episodes-menu";
-import { PLAYER_SHORTCUTS } from "@/lib/shortcuts";
+import { PLAYER_SHORTCUTS, REMOTE_BUTTONS } from "@/lib/shortcuts";
+import { useIsTv } from "@/hooks/use-is-tv";
 import { useMediaSession } from "./use-media-session";
+import { usePlayerRemote } from "./use-player-remote";
+import type { RemotePanel } from "./remote-control";
 import { useSleepTimer, useSleepTimerClock } from "./use-sleep-timer";
 import { SleepChip, SleepMenu, SleepMenuValue, SleepScreen, SleepWarning } from "./sleep-timer-ui";
 
@@ -101,6 +104,16 @@ type Panel =
   | "sleep"
   | "sleep-settings"
   | "shortcuts";
+
+/** Menus reached from the Settings menu: Back, on the screen or the remote, returns there. */
+const SETTINGS_PANELS: ReadonlySet<Panel> = new Set<Panel>(["subtitles", "audio", "picture", "quality", "speed", "servers", "download", "sleep-settings", "shortcuts"]);
+
+/** The menu a remote's colour button opens: one that has nothing to offer here gives way to Settings. */
+function remotePanel(target: RemotePanel, audioChoice: boolean, episodes: boolean): Panel {
+  if (target === "audio" && !audioChoice) return "settings";
+  if (target === "episodes" && !episodes) return "settings";
+  return target;
+}
 
 export interface PlayerProps {
   sources: PlaybackSource[];
@@ -210,6 +223,7 @@ export function Player(props: PlayerProps) {
     sourceType: activeSource?.type ?? null,
   });
   const airplay = useAirPlayAvailable(videoRef);
+  const isTv = useIsTv();
   useSleepTimerClock(videoRef);
   useMediaSession({
     videoRef,
@@ -238,6 +252,10 @@ export function Player(props: PlayerProps) {
       const s = usePlayerState.getState();
       if (s.playing && !s.buffering) s.set({ controlsVisible: false });
     }, CONTROLS_IDLE_MS);
+  }, []);
+  const hideControls = useCallback(() => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+    usePlayerState.getState().set({ controlsVisible: false });
   }, []);
   useEffect(() => {
     if (!state.playing || panel !== "none") usePlayerState.getState().set({ controlsVisible: true });
@@ -287,6 +305,8 @@ export function Player(props: PlayerProps) {
   // Keyboard shortcuts (the player owns the keyboard while mounted).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // On a television the remote map (use-player-remote) has already answered this press.
+      if (e.defaultPrevented) return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -484,6 +504,31 @@ export function Player(props: PlayerProps) {
         }));
   const activeAudioLabel = audioOptions.find((o) => o.selected)?.label ?? "";
 
+  usePlayerRemote({
+    shellRef: containerRef,
+    videoRef,
+    panel,
+    panelHasParent: SETTINGS_PANELS.has(panel) && !(panel === "servers" && Boolean(state.failureMessage)),
+    started: started || state.autoplayBlocked,
+    playing: state.playing,
+    controlsShown,
+    promptKey: [state.autoplayBlocked, Boolean(state.failureMessage), showSkip ? skipIndex : -1, state.upNextVisible].join(),
+    seekStep,
+    poke,
+    hideControls,
+    togglePlay: actions.togglePlay,
+    seek: actions.seek,
+    seekBy: actions.seekBy,
+    onOpenPanel: (target) => {
+      const next = remotePanel(target, audioOptions.length > 1, Boolean(props.tv));
+      setPanel(panel === next ? "none" : next);
+    },
+    onParentPanel: () => setPanel("settings"),
+    onClosePanel: () => setPanel("none"),
+    onNextEpisode: props.tv?.onNextEpisode,
+    onBack: props.onBack,
+  });
+
   return (
     <div
       ref={containerRef}
@@ -538,7 +583,7 @@ export function Player(props: PlayerProps) {
       )}
       {started && state.buffering && !state.failureMessage && <BufferingSpinner />}
       {state.autoplayBlocked && !state.failureMessage && (
-        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
+        <div data-remote-default className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
           <IconButton label="Play" onClick={actions.togglePlay} className="glass-clear pointer-events-auto" size="xl">
             <Play className="h-7 w-7 translate-x-0.5 fill-current" />
           </IconButton>
@@ -564,6 +609,8 @@ export function Player(props: PlayerProps) {
 
       {/* Top bar */}
       <div
+        data-remote-zone="chrome"
+        data-remote-hidden={!controlsShown}
         className={cn(
           "absolute inset-x-0 top-0 z-20 isolate flex items-start justify-between gap-4 p-4 sm:p-6",
           !controlsShown && "pointer-events-none"
@@ -594,6 +641,8 @@ export function Player(props: PlayerProps) {
       {/* Centre transport (touch-friendly) */}
       {started && (
         <div
+          data-remote-zone="chrome"
+          data-remote-hidden={!(controlsShown && !state.buffering)}
           className={cn(
             "absolute inset-0 z-10 flex items-center justify-center gap-10",
             !(controlsShown && !state.buffering) && "pointer-events-none"
@@ -631,6 +680,7 @@ export function Player(props: PlayerProps) {
         <div className={cn("absolute right-4 z-30 transition-[bottom] duration-300 sm:right-8", controlsShown ? "bottom-32" : "bottom-10")}>
           <button
             type="button"
+            data-remote-default
             onClick={(e) => {
               e.stopPropagation();
               if (skipToNext) props.tv!.onNextEpisode!();
@@ -646,6 +696,8 @@ export function Player(props: PlayerProps) {
 
       {/* Bottom bar */}
       <div
+        data-remote-zone="chrome"
+        data-remote-hidden={!(controlsShown && started)}
         className={cn(
           "absolute inset-x-0 bottom-0 z-20 px-3 pb-3 sm:px-6 sm:pb-6",
           !(controlsShown && started) && "pointer-events-none"
@@ -763,8 +815,10 @@ export function Player(props: PlayerProps) {
               {downloads.length > 0 && (
                 <MenuItem label="Download" trailing={<MenuValue>{`${downloads.length} option${downloads.length > 1 ? "s" : ""}`}</MenuValue>} onClick={() => setPanel("download")} />
               )}
-              {lastPointer.current === "mouse" && (
-                <MenuItem label="Keyboard shortcuts" trailing={<MenuValue>?</MenuValue>} onClick={() => setPanel("shortcuts")} />
+              {isTv ? (
+                <MenuItem label="Remote buttons" onClick={() => setPanel("shortcuts")} />
+              ) : (
+                lastPointer.current === "mouse" && <MenuItem label="Keyboard shortcuts" trailing={<MenuValue>?</MenuValue>} onClick={() => setPanel("shortcuts")} />
               )}
             </PlayerMenu>
           )}
@@ -877,9 +931,9 @@ export function Player(props: PlayerProps) {
             />
           )}
           {panel === "shortcuts" && (
-            <PlayerMenu title="Keyboard shortcuts" onBack={() => setPanel("settings")}>
+            <PlayerMenu title={isTv ? "Remote buttons" : "Keyboard shortcuts"} onBack={() => setPanel("settings")}>
               <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 px-3 pb-3 text-sm">
-                {PLAYER_SHORTCUTS.map(({ key, desc }) => (
+                {(isTv ? REMOTE_BUTTONS : PLAYER_SHORTCUTS).map(({ key, desc }) => (
                   <div key={key} className="contents">
                     <kbd className="justify-self-start whitespace-nowrap rounded-md bg-white/10 px-2 py-0.5 font-mono text-xs text-white/90">{key}</kbd>
                     <span className="text-white/75">{desc}</span>

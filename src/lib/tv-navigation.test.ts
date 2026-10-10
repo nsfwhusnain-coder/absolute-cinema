@@ -35,6 +35,11 @@ describe("isRemoteBackEvent", () => {
     expect(isRemoteBackEvent({ key: "BrowserBack", keyCode: 0 })).toBe(true);
   });
 
+  it("counts Backspace as Back only when told the press was not typing (Hisense)", () => {
+    expect(isRemoteBackEvent({ key: "Backspace", keyCode: 8 })).toBe(false);
+    expect(isRemoteBackEvent({ key: "Backspace", keyCode: 8 }, true)).toBe(true);
+  });
+
   it("leaves Escape alone", () => {
     // Escape closes dialogs and the settings dock. Treating it as Back would
     // navigate away from the page instead of closing what is open on it.

@@ -290,11 +290,16 @@ function PinPad({ value, onChange, onSubmit, busy }: { value: string; onChange: 
     const onKey = (e: KeyboardEvent) => {
       if (busy) return;
       if (/^[0-9]$/.test(e.key) && value.length < PIN_MAX) onChange(value + e.key);
-      else if (e.key === "Backspace") onChange(value.slice(0, -1));
-      else if (e.key === "Enter" && value.length >= PIN_MIN) onSubmit();
+      else if (e.key === "Backspace" && value.length > 0) {
+        // Marked as taken: on a Hisense remote Backspace is also Back, and with
+        // digits entered it should clear one, not leave the page.
+        e.preventDefault();
+        onChange(value.slice(0, -1));
+      } else if (e.key === "Enter" && value.length >= PIN_MIN) onSubmit();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Capture, so the press is marked before the remote navigation hears it.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [value, onChange, onSubmit, busy]);
 
   const key = (label: React.ReactNode, action: () => void, aria: string) => (

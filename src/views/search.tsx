@@ -192,9 +192,9 @@ export function SearchView({ initialQuery, initialGenre, initialType }: Props) {
       .filter((r: { adult?: boolean }) => !hideAdult || r.adult !== true)
       .slice(0, 8);
     return (
-      <div className="min-h-screen px-4 pb-12 sm:px-6 lg:px-8">
+      <div className="min-h-screen px-4 pb-12 pt-24 sm:px-6 lg:px-8">
         <motion.div
-          className="mx-auto flex min-h-[70vh] max-w-2xl flex-col items-center justify-center text-center"
+          className="mx-auto flex min-h-[60vh] max-w-2xl flex-col items-center justify-center text-center"
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
           transition={transitionView}

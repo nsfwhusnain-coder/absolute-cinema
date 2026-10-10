@@ -903,7 +903,7 @@ function NextEpisodeCard({
         <div className="font-display text-lg font-semibold">Still watching?</div>
         <p className="mt-1 text-sm text-white/65">Next up: S{target.season} · E{target.episode}</p>
         <div className="mt-4 flex gap-2">
-          <Button type="button" onClick={onPlayNow} className="flex-1 rounded-full">
+          <Button type="button" data-remote-default onClick={onPlayNow} className="flex-1 rounded-full">
             Keep watching
           </Button>
         </div>
@@ -927,7 +927,7 @@ function NextEpisodeCard({
             Cancel
           </Button>
         )}
-        <Button type="button" onClick={onPlayNow} className="rounded-full">
+        <Button type="button" data-remote-default onClick={onPlayNow} className="rounded-full">
           {counting ? "Play now" : playLabel}
         </Button>
       </div>

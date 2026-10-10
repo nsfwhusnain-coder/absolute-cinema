@@ -117,6 +117,8 @@ export function SeekBar({
     setScrubTime(null);
   };
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    // A television remote's arrows were already answered by the player.
+    if (e.defaultPrevented) return;
     const jumps: Record<string, number> = {
       ArrowLeft: currentTime - 5,
       ArrowRight: currentTime + 5,
@@ -137,6 +139,7 @@ export function SeekBar({
       ref={barRef}
       role="slider"
       tabIndex={0}
+      data-remote-home
       aria-label="Seek"
       aria-valuemin={0}
       aria-valuemax={Math.round(duration)}
@@ -392,6 +395,7 @@ export function FailureCard({
         <div className="mt-5 flex flex-col gap-2">
           <button
             type="button"
+            data-remote-default
             onClick={onRetry}
             className="inline-flex h-11 items-center justify-center gap-2 rounded-full bg-white font-semibold text-black transition hover:bg-white/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
           >

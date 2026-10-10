@@ -1,4 +1,5 @@
 import { isTvLikeDevice } from "./tv-detect";
+import { remoteKey } from "./remote-keys";
 
 export type SpatialDirection = "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown";
 
@@ -8,24 +9,35 @@ export { isTvLikeDevice };
 /**
  * Whether a key event is the remote's Back button.
  *
- * webOS sends keyCode 461, Tizen sends 10009, and Chromium-based panels send a
- * named key. Both handlers used to test 461 and "GoBack" only, so Back did
- * nothing at all on every Samsung set — in the player as well as outside it,
- * since the player owns its own map. Back is the first control a viewer
- * reaches for, and a set that ignores it reads as having frozen.
+ * Every set reports Back its own way; `remoteKey` holds the codes. Hisense
+ * sends Backspace, which only counts as Back when the caller says the press
+ * did not land in a text field (`backspaceIsBack`).
  *
  * Escape is deliberately excluded: it is how dialogs and the settings dock
  * close, and treating it as Back would navigate away instead of closing them.
  */
 export function isRemoteBackEvent(
-  event: Pick<KeyboardEvent, "key" | "keyCode">
+  event: Pick<KeyboardEvent, "key" | "keyCode">,
+  backspaceIsBack = false
 ): boolean {
-  return (
-    event.keyCode === 461 ||
-    event.keyCode === 10009 ||
-    event.key === "GoBack" ||
-    event.key === "BrowserBack"
-  );
+  return remoteKey(event, backspaceIsBack) === "back";
+}
+
+/** Menus and dialogs exist in the page only while open, or for the moment they take to animate shut. */
+const OPEN_LAYER_SELECTOR = ["dialog", "alertdialog", "menu", "listbox"]
+  .map((role) => `[role="${role}"]:not([data-state="closed"])`)
+  .join(", ");
+
+/**
+ * Closes the menu or dialog that is open, if one is, and says whether it did.
+ * Back on a remote means "close this" before it means "leave this page". Every
+ * layer here already closes on Escape, so Back is handed to them as one.
+ */
+export function dismissOpenLayer(root: Document = document): boolean {
+  if (!root.querySelector(OPEN_LAYER_SELECTOR)) return false;
+  const target = root.activeElement ?? root.body;
+  target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  return true;
 }
 
 const FOCUSABLE_SELECTOR = [
@@ -120,7 +132,8 @@ function intersects(a: DOMRect, b: DOMRect): boolean {
 function candidatesInBand(
   root: ParentNode,
   current: HTMLElement,
-  direction: SpatialDirection
+  direction: SpatialDirection,
+  accept?: (element: HTMLElement) => boolean
 ): Candidate[] {
   const band = searchBand(direction);
   const found = root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
@@ -131,6 +144,7 @@ function candidatesInBand(
     if (!intersects(rect, band)) continue;
     if (!isRenderedAtRect(element, rect)) continue;
     if (element.closest("[aria-hidden='true']")) continue;
+    if (accept && !accept(element)) continue;
     candidates.push({ element, rect });
   }
   return candidates;
@@ -186,17 +200,19 @@ export function crossGap(
 /**
  * Geometry-based focus movement for TV remotes. Candidates must clear the
  * current element's edge in the requested direction; among those, the nearest
- * one still aligned with the current row or column wins.
+ * one still aligned with the current row or column wins. `accept` lets a
+ * caller rule elements out that are rendered but not on offer (faded controls).
  */
 export function spatialTarget(
   root: ParentNode,
   current: HTMLElement,
-  direction: SpatialDirection
+  direction: SpatialDirection,
+  accept?: (element: HTMLElement) => boolean
 ): HTMLElement | null {
   const currentRect = current.getBoundingClientRect();
   let best: { element: HTMLElement; score: number } | null = null;
 
-  for (const { element, rect } of candidatesInBand(root, current, direction)) {
+  for (const { element, rect } of candidatesInBand(root, current, direction, accept)) {
     const primary = primaryGap(currentRect, rect, direction);
     if (primary < -EDGE_TOLERANCE_PX) continue;
     const score = Math.max(primary, 0) + crossGap(currentRect, rect, direction) * MISALIGNMENT_PENALTY;

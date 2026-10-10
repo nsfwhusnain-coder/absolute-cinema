@@ -16,3 +16,18 @@ export const PLAYER_SHORTCUTS: { key: string; desc: string }[] = [
   { key: "?", desc: "Show these shortcuts" },
   { key: "Esc", desc: "Close menu, then leave the player" },
 ];
+
+/** What each remote button does in the player on a television, as decided in components/player/remote-control.ts. */
+export const REMOTE_BUTTONS: { key: string; desc: string }[] = [
+  { key: "OK", desc: "Play or pause, or press the highlighted control" },
+  { key: "◀ / ▶", desc: "Skip back or forward (hold to keep going)" },
+  { key: "▲ / ▼", desc: "Show the controls, then move between them" },
+  { key: "Back", desc: "Close the menu, hide the controls, then leave" },
+  { key: "⏯  ⏪  ⏩", desc: "Play or pause, rewind, fast-forward" },
+  { key: "⏭ / ⏮", desc: "Next episode / start over" },
+  { key: "Stop", desc: "Leave the player" },
+  { key: "Red", desc: "Subtitles" },
+  { key: "Green", desc: "Audio" },
+  { key: "Yellow", desc: "Episodes" },
+  { key: "Blue", desc: "Settings" },
+];

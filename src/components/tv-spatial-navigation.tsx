@@ -3,19 +3,27 @@
 import { useEffect } from "react";
 import { usePathname } from "next/navigation";
 import {
+  dismissOpenLayer,
   focusableElements,
-  isRemoteBackEvent,
   isTvLikeDevice,
   spatialTarget,
   type SpatialDirection,
 } from "@/lib/tv-navigation";
+import { isPlayerPath } from "@/lib/nav";
+import { caretKeepsKey, isRemoteDirection, isTextEntry, remoteKey, type RemoteDirection } from "@/lib/remote-keys";
 
-const ARROWS = new Set<SpatialDirection>([
-  "ArrowLeft",
-  "ArrowRight",
-  "ArrowUp",
-  "ArrowDown",
-]);
+const ARROWS: Record<RemoteDirection, SpatialDirection> = {
+  left: "ArrowLeft",
+  right: "ArrowRight",
+  up: "ArrowUp",
+  down: "ArrowDown",
+};
+
+const SLIDER_SELECTOR = 'input[type="range"], [role="slider"]';
+
+/** How long a new page is given to show its nominated first-focus control: tries × interval. */
+const FIRST_FOCUS_TRIES = 12;
+const FIRST_FOCUS_RETRY_MS = 250;
 
 /**
  * Two D-pad moves closer together than this are a held button rather than two
@@ -63,18 +71,23 @@ export function TvSpatialNavigation() {
       // most presses: with nothing focused the target is <body>, so arrows
       // both seeked and moved focus onto the hidden Back button.)
       if (document.querySelector(".player-shell")) return;
+      // An open menu, a slider or the PIN pad already took this press.
+      if (event.defaultPrevented) return;
 
-      if (isRemoteBackEvent(event)) {
+      const target = event.target as HTMLElement | null;
+      const typing = isTextEntry(target);
+      const key = remoteKey(event, !typing);
+
+      if (key === "back") {
         event.preventDefault();
-        window.history.back();
+        if (!dismissOpenLayer()) window.history.back();
         return;
       }
 
       // A remote's OK button lands as Enter. Native activation covers buttons
       // and links; elements that are only ARIA buttons need the click synthesised
       // or OK does nothing on them.
-      if (event.key === "Enter") {
-        const target = event.target as HTMLElement | null;
+      if (key === "ok") {
         const role = target?.getAttribute("role");
         if (target && role === "button" && target.tagName !== "BUTTON") {
           event.preventDefault();
@@ -83,7 +96,11 @@ export function TvSpatialNavigation() {
         return;
       }
 
-      if (!ARROWS.has(event.key as SpatialDirection)) return;
+      if (!isRemoteDirection(key)) return;
+      // In a text field Left and Right move the caret until it reaches the end;
+      // on a slider they change its value.
+      if (typing && caretKeepsKey(target as HTMLInputElement, key)) return;
+      if ((key === "left" || key === "right") && target?.matches(SLIDER_SELECTOR)) return;
 
       // One move per frame. A held D-pad fires far faster than the panel can
       // paint, and without this each repeat queued another full spatial search
@@ -93,7 +110,7 @@ export function TvSpatialNavigation() {
         return;
       }
 
-      const direction = event.key as SpatialDirection;
+      const direction = ARROWS[key];
       const current = document.activeElement as HTMLElement | null;
       const hasFocus =
         current &&
@@ -140,18 +157,36 @@ export function TvSpatialNavigation() {
     if (!isTvLikeDevice()) return;
     // Login owns focus via the name/PIN fields. Do not steal it.
     if (pathname === "/login") return;
-    const handle = window.requestAnimationFrame(() => {
+    // In the player nothing is focused until the viewer reaches for a control:
+    // its first focusable element is Back, and OK would leave instead of pausing.
+    if (isPlayerPath(pathname)) return;
+    // A page nominates its main action with data-tv-first-focus, but that
+    // button often arrives with the page's data, after the first frame. Focus
+    // takes the first control meanwhile and moves to the nominated one when it
+    // appears, unless the viewer has moved focus themselves by then.
+    let placeholder: HTMLElement | null = null;
+    let tries = 0;
+    let timer = 0;
+    const claim = () => {
       const active = document.activeElement;
-      if (active && active !== document.body) return;
+      if (active && active !== document.body && active !== placeholder) return;
       const main = document.querySelector("main") ?? document;
       const preferred = main.querySelector<HTMLElement>("[data-tv-first-focus]");
-      const first =
-        preferred && !preferred.closest("[aria-hidden='true']")
-          ? preferred
-          : focusableElements(main)[0];
-      first?.focus({ preventScroll: true });
-    });
-    return () => window.cancelAnimationFrame(handle);
+      if (preferred && !preferred.closest("[aria-hidden='true']")) {
+        preferred.focus({ preventScroll: true });
+        return;
+      }
+      if (!placeholder?.isConnected) {
+        placeholder = focusableElements(main)[0] ?? null;
+        placeholder?.focus({ preventScroll: true });
+      }
+      if (++tries < FIRST_FOCUS_TRIES) timer = window.setTimeout(claim, FIRST_FOCUS_RETRY_MS);
+    };
+    const handle = window.requestAnimationFrame(claim);
+    return () => {
+      window.cancelAnimationFrame(handle);
+      window.clearTimeout(timer);
+    };
   }, [pathname]);
 
   return null;
