@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 import { describe, expect, it } from "bun:test";
-import { siblingTierCodec } from "./index";
+import { debridTitleMatch, siblingTierCodec } from "./index";
 
 describe("siblingTierCodec", () => {
   it("keeps a codec the resolver read from the file", () => {
@@ -16,5 +16,18 @@ describe("siblingTierCodec", () => {
 
   it("stays unknown when neither says", () => {
     expect(siblingTierCodec(undefined, "Rick and Morty S02 Season 2 [1080p] [REMUX] [BDRip]")).toBe("unknown");
+  });
+});
+
+describe("debridTitleMatch", () => {
+  it("takes a season pack for the episode asked for", () => {
+    expect(debridTitleMatch("tv", "Rick and Morty S02 2160p BluRay AI AV1 TrueHD 5.1 [Enrav1sh]")).toBe("exact");
+    expect(debridTitleMatch("tv", "Dark.Matter.2024.S01.1080p.x265-ELiTE")).toBe("exact");
+    expect(debridTitleMatch("tv", "Rick and Morty Season 1-4 Upscale 2160p x265 - Uncensored")).toBe("exact");
+  });
+
+  it("still holds a film collection back", () => {
+    expect(debridTitleMatch("movie", "The.Matrix.Trilogy.1999-2003.2160p.UHD.BluRay.x265")).toBe("pack");
+    expect(debridTitleMatch("movie", "Project.Hail.Mary.2026.2160p.WEB-DL.H265")).toBe("exact");
   });
 });

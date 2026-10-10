@@ -455,6 +455,20 @@ function buildLabel(provider: DebridProvider, quality: RdQuality, safariHint: st
 }
 
 /**
+ * Whether a release is the title asked for or a collection it is one part of.
+ *
+ * A collection is a risk for a film: the file taken from a trilogy may be the
+ * wrong one, so those never start on their own while a single-title source
+ * exists. A season pack is not that. It is how nearly every episode is
+ * released, and the episode's own file is picked out of it by number. Tagged
+ * as collections, season packs lost every automatic start to whatever web
+ * stream was also on offer, and most episodes never began on a debrid file.
+ */
+export function debridTitleMatch(mediaType: MediaType, releaseTitle: string): "pack" | "exact" {
+  return mediaType === "movie" && isMoviePackRelease(releaseTitle) ? "pack" : "exact";
+}
+
+/**
  * The codec of a TorBox or AllDebrid row: what the resolver read from the
  * file, else what the release title says. These rows used to carry H.264 and
  * HEVC only, and nothing once read back from the cache, so an AV1 release
@@ -494,7 +508,7 @@ function toPlaybackSource(
     origin: "debrid",
     compat: record.compat,
     audioLanguage: inferredLang === "und" ? "en" : inferredLang,
-    titleMatch: isMoviePackRelease(record.title) ? "pack" : "exact",
+    titleMatch: debridTitleMatch(mediaType, record.title),
     identityEvidence: "release_title",
     ...(sizeBytes ? { sizeBytes } : {}),
     codec,
@@ -555,7 +569,7 @@ function toRdPlaybackSource(
     origin: "debrid",
     compat: record.compat,
     audioLanguage: inferredLang === "und" ? "en" : inferredLang,
-    titleMatch: isMoviePackRelease(record.title) ? "pack" : "exact",
+    titleMatch: debridTitleMatch(mediaType, record.title),
     identityEvidence: "release_title",
     ...(sizeBytes ? { sizeBytes } : {}),
     ...(codec && codec !== "unknown" ? { codec } : {}),
