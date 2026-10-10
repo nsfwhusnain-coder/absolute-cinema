@@ -155,8 +155,9 @@ export function TvSpatialNavigation() {
    */
   useEffect(() => {
     if (!isTvLikeDevice()) return;
-    // Login owns focus via the name/PIN fields. Do not steal it.
-    if (pathname === "/login") return;
+    // Sign-in focuses its own name and PIN fields. Only the profile picker's
+    // nominated profile is focused there, never a stand-in.
+    const standIn = pathname !== "/login";
     // In the player nothing is focused until the viewer reaches for a control:
     // its first focusable element is Back, and OK would leave instead of pausing.
     if (isPlayerPath(pathname)) return;
@@ -176,7 +177,7 @@ export function TvSpatialNavigation() {
         preferred.focus({ preventScroll: true });
         return;
       }
-      if (!placeholder?.isConnected) {
+      if (standIn && !placeholder?.isConnected) {
         placeholder = focusableElements(main)[0] ?? null;
         placeholder?.focus({ preventScroll: true });
       }

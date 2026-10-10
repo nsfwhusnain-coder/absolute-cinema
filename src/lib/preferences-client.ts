@@ -13,10 +13,31 @@ export interface ProfilePreferences extends ProfilePlaybackPreferences, ProfileE
 
 export const PREFERENCES_QUERY_KEY = ["profile-preferences"] as const;
 
+const UNAUTHORIZED = 401;
+
+/** A failed preferences request, with the status the server answered. */
+export class PreferencesError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * True when the server no longer knows the signed-in profile: it was deleted
+ * on another device, or the database was restored from before it existed. The
+ * browser still holds a session that reads as valid, so every request fails.
+ */
+export function isSignedOutError(error: unknown): boolean {
+  return error instanceof PreferencesError && error.status === UNAUTHORIZED;
+}
+
 export async function fetchPreferences(): Promise<ProfilePreferences> {
   const res = await fetch("/api/preferences", { cache: "no-store" });
-  const json = (await res.json()) as ProfilePreferences & { error?: string };
-  if (!res.ok) throw new Error(json.error || "Could not load preferences");
+  const json = (await res.json().catch(() => ({}))) as ProfilePreferences & { error?: string };
+  if (!res.ok) throw new PreferencesError(json.error || "Could not load preferences", res.status);
   return json;
 }
 

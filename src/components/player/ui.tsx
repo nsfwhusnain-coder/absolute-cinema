@@ -282,9 +282,12 @@ export function MenuItem({
   trailing,
   onClick,
   disabled = false,
+  opens,
 }: {
   label: ReactNode;
   detail?: ReactNode;
+  /** The menu this row leads to, so a remote's Back can return focus to the row it came from. */
+  opens?: string;
   /** Set for choices (a check marks the current one); leave out for navigation rows. */
   selected?: boolean;
   trailing?: ReactNode;
@@ -297,6 +300,7 @@ export function MenuItem({
       type="button"
       role={choice ? "menuitemradio" : "menuitem"}
       aria-checked={choice ? selected : undefined}
+      data-remote-opens={opens}
       disabled={disabled}
       onClick={onClick}
       className={cn(

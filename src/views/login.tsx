@@ -233,6 +233,9 @@ function PickScreen({
     onDone(profile.name);
   };
 
+  // Where a remote starts: the profile last used on this device, else the first.
+  const remoteStart = data.profiles.some((profile) => profile.name === last) ? last : data.profiles[0]?.name;
+
   return (
     <div className="mx-auto flex max-w-4xl flex-col items-center">
       <h1 className="font-display text-3xl font-bold tracking-tight sm:text-5xl">Who&apos;s watching?</h1>
@@ -243,7 +246,7 @@ function PickScreen({
               type="button"
               onClick={() => void open(profile)}
               disabled={opening !== null}
-              data-tv-first-focus={profile.name === last ? true : undefined}
+              data-tv-first-focus={profile.name === remoteStart ? true : undefined}
               className="group flex w-24 flex-col items-center gap-3 rounded-3xl p-1 focus-visible:outline-none disabled:cursor-wait sm:w-36"
             >
               <span className="relative rounded-[30%] ring-0 ring-white/80 ring-offset-4 ring-offset-[#050508] transition group-hover:scale-105 group-hover:ring-2 group-focus-visible:scale-105 group-focus-visible:ring-2">

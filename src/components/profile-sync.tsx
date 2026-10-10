@@ -2,10 +2,10 @@
 
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useSession } from "next-auth/react";
+import { signOut, useSession } from "next-auth/react";
 import { applyAccent, applyMaterial, applyUiScale, currentAccent, currentMaterial } from "@/lib/appearance";
 import { UI_SCALE_PERCENT } from "@/lib/profile-extras";
-import { PREFERENCES_QUERY_KEY, fetchPreferences } from "@/lib/preferences-client";
+import { PREFERENCES_QUERY_KEY, fetchPreferences, isSignedOutError } from "@/lib/preferences-client";
 import { setAutoplayNext, syncProfilePlaybackPreferences } from "@/lib/player-preferences";
 
 /**
@@ -52,12 +52,20 @@ export function ProfileSync() {
       /* storage unavailable (private mode): nothing is kept, so nothing can leak */
     }
   }, [profileId]);
-  const { data } = useQuery({
+  const { data, error } = useQuery({
     queryKey: PREFERENCES_QUERY_KEY,
     queryFn: fetchPreferences,
     enabled: status === "authenticated",
     staleTime: 5 * 60_000,
   });
+
+  // A session for a profile the server no longer has: every page would sit on
+  // its loading state for good (the player on its loader). End the session, so
+  // the viewer lands on the profile picker instead.
+  const sessionDead = status === "authenticated" && isSignedOutError(error);
+  useEffect(() => {
+    if (sessionDead) void signOut({ callbackUrl: "/login" });
+  }, [sessionDead]);
 
   useEffect(() => {
     if (!data) return;

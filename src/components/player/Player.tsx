@@ -307,7 +307,7 @@ export function Player(props: PlayerProps) {
     const onKey = (e: KeyboardEvent) => {
       // On a television the remote map (use-player-remote) has already answered this press.
       if (e.defaultPrevented) return;
-      const target = e.target as HTMLElement | null;
+      const target = e.target instanceof HTMLElement ? e.target : null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       // Tabbing through the controls shows them: focus must never sit on an invisible button.
@@ -779,19 +779,20 @@ export function Player(props: PlayerProps) {
         <div className="player-menus absolute bottom-28 right-3 z-30 sm:bottom-32 sm:right-6">
           {panel === "settings" && (
             <PlayerMenu title="Settings">
-              <MenuItem label="Subtitles" trailing={<MenuValue>{subtitleLabel}</MenuValue>} onClick={() => setPanel("subtitles")} />
+              <MenuItem label="Subtitles" trailing={<MenuValue>{subtitleLabel}</MenuValue>} opens="subtitles" onClick={() => setPanel("subtitles")} />
               {audioOptions.length > 1 && (
-                <MenuItem label="Audio" trailing={<MenuValue>{activeAudioLabel}</MenuValue>} onClick={() => setPanel("audio")} />
+                <MenuItem label="Audio" trailing={<MenuValue>{activeAudioLabel}</MenuValue>} opens="audio" onClick={() => setPanel("audio")} />
               )}
               <MenuItem
                 label="Quality"
                 trailing={<MenuValue>{state.qualityChoice === "auto" ? `Auto${nowHeight ? ` (${qualityLabel(nowHeight)})` : ""}` : qualityLabel(state.qualityChoice)}</MenuValue>}
+                opens="quality"
                 onClick={() => setPanel("quality")}
               />
-              <MenuItem label="Picture" trailing={<MenuValue>{VIDEO_FITS.find((f) => f.value === state.videoFit)?.label}</MenuValue>} onClick={() => setPanel("picture")} />
-              <MenuItem label="Playback speed" trailing={<MenuValue>{state.rate === 1 ? "Normal" : `${state.rate}×`}</MenuValue>} onClick={() => setPanel("speed")} />
-              <MenuItem label="Server" trailing={<MenuValue>{serverName(activeSource)}</MenuValue>} onClick={() => setPanel("servers")} />
-              <MenuItem label="Sleep timer" trailing={<SleepMenuValue mediaType={mediaType} />} onClick={() => setPanel("sleep-settings")} />
+              <MenuItem label="Picture" trailing={<MenuValue>{VIDEO_FITS.find((f) => f.value === state.videoFit)?.label}</MenuValue>} opens="picture" onClick={() => setPanel("picture")} />
+              <MenuItem label="Playback speed" trailing={<MenuValue>{state.rate === 1 ? "Normal" : `${state.rate}×`}</MenuValue>} opens="speed" onClick={() => setPanel("speed")} />
+              <MenuItem label="Server" trailing={<MenuValue>{serverName(activeSource)}</MenuValue>} opens="servers" onClick={() => setPanel("servers")} />
+              <MenuItem label="Sleep timer" trailing={<SleepMenuValue mediaType={mediaType} />} opens="sleep-settings" onClick={() => setPanel("sleep-settings")} />
               {typeof document !== "undefined" && document.pictureInPictureEnabled && (
                 <MenuItem
                   label="Picture in picture"
@@ -813,12 +814,12 @@ export function Player(props: PlayerProps) {
                 />
               )}
               {downloads.length > 0 && (
-                <MenuItem label="Download" trailing={<MenuValue>{`${downloads.length} option${downloads.length > 1 ? "s" : ""}`}</MenuValue>} onClick={() => setPanel("download")} />
+                <MenuItem label="Download" trailing={<MenuValue>{`${downloads.length} option${downloads.length > 1 ? "s" : ""}`}</MenuValue>} opens="download" onClick={() => setPanel("download")} />
               )}
               {isTv ? (
-                <MenuItem label="Remote buttons" onClick={() => setPanel("shortcuts")} />
+                <MenuItem label="Remote buttons" opens="shortcuts" onClick={() => setPanel("shortcuts")} />
               ) : (
-                lastPointer.current === "mouse" && <MenuItem label="Keyboard shortcuts" trailing={<MenuValue>?</MenuValue>} onClick={() => setPanel("shortcuts")} />
+                lastPointer.current === "mouse" && <MenuItem label="Keyboard shortcuts" trailing={<MenuValue>?</MenuValue>} opens="shortcuts" onClick={() => setPanel("shortcuts")} />
               )}
             </PlayerMenu>
           )}

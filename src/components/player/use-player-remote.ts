@@ -82,11 +82,12 @@ function focusElement(element: HTMLElement | null | undefined): boolean {
   return true;
 }
 
-/** The current choice in the open menu, or its first row. */
-function focusMenu(scope: HTMLElement): boolean {
+/** In the open menu: the row that led to the menu just left, else the current choice, else the first row. */
+function focusMenu(scope: HTMLElement, cameFrom?: string): boolean {
   const menu = scope.querySelector<HTMLElement>(MENU_SELECTOR);
   if (!menu) return false;
-  return focusElement(menu.querySelector<HTMLElement>(MENU_CURRENT_SELECTOR) ?? focusableElements(menu)[0]);
+  const origin = cameFrom ? menu.querySelector<HTMLElement>(`[data-remote-opens="${cameFrom}"]`) : null;
+  return focusElement(origin ?? menu.querySelector<HTMLElement>(MENU_CURRENT_SELECTOR) ?? focusableElements(menu)[0]);
 }
 
 /** Brings focus to the controls: the open menu, else the seek bar, else whatever is showing (Back, while loading). */
@@ -196,6 +197,7 @@ export function usePlayerRemote(options: PlayerRemoteOptions): void {
   latest.current = options;
   const lastActedAt = useRef(0);
   const opener = useRef<HTMLElement | null>(null);
+  const previousPanel = useRef("none");
 
   useEffect(() => {
     if (!isTvLikeDevice()) return;
@@ -211,6 +213,8 @@ export function usePlayerRemote(options: PlayerRemoteOptions): void {
     const shell = shellRef.current;
     if (!shell || !isTvLikeDevice()) return;
     const scope = scopeOf(shell);
+    const cameFrom = previousPanel.current;
+    previousPanel.current = panel;
     if (panel === "none") {
       const back = opener.current;
       opener.current = null;
@@ -219,7 +223,7 @@ export function usePlayerRemote(options: PlayerRemoteOptions): void {
     }
     const active = activeIn(scope);
     if (active && !active.closest(MENU_SELECTOR)) opener.current = active;
-    const frame = window.requestAnimationFrame(() => focusMenu(scope));
+    const frame = window.requestAnimationFrame(() => focusMenu(scope, cameFrom));
     return () => window.cancelAnimationFrame(frame);
   }, [panel, shellRef]);
 

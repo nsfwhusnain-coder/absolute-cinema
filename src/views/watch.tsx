@@ -291,7 +291,8 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
   // Wait for the saved position (a fraction of a second) so the player starts
   // where the viewer left off rather than at 0 and jumping.
   const showPlayerShell = mounted && !!session && progressLoaded && (mediaType !== "tv" || showProgress.isFetched);
-  const baseTitle = meta?.title || meta?.name || playback?.title || "Untitled";
+  const knownTitle = meta?.title || meta?.name || playback?.title;
+  const baseTitle = knownTitle || "Untitled";
   const { data: loaderLook } = useQuery({
     queryKey: loaderLookQueryKey(mediaType, id),
     queryFn: () => fetchLoaderLook(mediaType, id),
@@ -712,7 +713,8 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
               episode: tvEpisode,
               originalLanguage: meta?.original_language ?? null,
             }}
-            displayTitle={baseTitle}
+            // Blank until the title is known: the loading screen showed "UNTITLED" for the first moments.
+            displayTitle={knownTitle ?? ""}
             episodeLabel={episodeLabel}
             overview={overview}
             loaderLook={loaderLook}
