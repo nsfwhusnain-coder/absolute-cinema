@@ -2,6 +2,42 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.4.0] - 2026-10-10
+
+### Added
+- **Profile pictures:** 59 characters drawn for the app (The Classics, Animals,
+  Creatures, The Cast, Movie Night), offered first in the picker. New profiles
+  get one by default.
+- **HDR on or off** under Picture in the player, remembered per device, on
+  browsers that support it (Chrome 136+, Safari 26+). The resolution badge
+  shows HDR or Dolby Vision when the file states it.
+- **New Series** row on Home.
+- A play button on the loading screen when the browser refuses to start
+  playback by itself.
+
+### Changed
+- Home, Movies and Shows no longer list anime; it has its own section, which
+  now includes Chinese and Korean animation. Anime reaches Home only through
+  Continue Watching and "Because you watched".
+- Home leads with Trending Movies, Trending Series, New Movies and New Series.
+- Seven of the older illustration sets are no longer offered; profiles using
+  one keep it.
+- The container runs a real init process, caps its logs, and its image no
+  longer includes database backups or runtime data.
+
+### Fixed
+- Dark scenes in HDR titles were washed out: a brightness and contrast filter
+  applied to HDR video raised black to grey. The picture is no longer filtered.
+- Dolby Vision files without an HDR10 layer (profile 5) played green and
+  purple. They are now sent as Dolby Vision to browsers that decode it and
+  skipped elsewhere.
+- The loading screen could stay flat, most often on tablets: its scene waited
+  on the GPU with nothing behind it. A backdrop in the title's colours now
+  animates from the first frame on every device, and the scene fades in over it.
+- My List had no navigation bar or dock.
+- A watch page opened directly on a phone or tablet could wait on the loading
+  screen forever.
+
 ## [2.3.0] - 2026-10-07
 
 ### Added
