@@ -454,7 +454,19 @@ function buildLabel(provider: DebridProvider, quality: RdQuality, safariHint: st
   return `${q} • Debrid${safariHint}`;
 }
 
-/** TorBox tier only (unchanged 2-row-per-title shape). Real-Debrid uses `toRdPlaybackSource` below for its richer slot roster. */
+/**
+ * The codec of a TorBox or AllDebrid row: what the resolver read from the
+ * file, else what the release title says. These rows used to carry H.264 and
+ * HEVC only, and nothing once read back from the cache, so an AV1 release
+ * looked like any unlabelled file and was offered to browsers that cannot
+ * decode AV1, where it failed on the first frame.
+ */
+export function siblingTierCodec(known: ReleaseCodec | undefined, releaseTitle: string): ReleaseCodec {
+  if (known && known !== "unknown") return known;
+  return parseReleaseTitle(releaseTitle).codec;
+}
+
+/** TorBox and AllDebrid tiers (one row per height). Real-Debrid uses `toRdPlaybackSource` below for its richer slot roster. */
 function toPlaybackSource(
   provider: DebridProvider,
   quality: DebridQuality,
@@ -462,10 +474,11 @@ function toPlaybackSource(
   mediaType: MediaType,
   season: number,
   episode: number,
-  record: Pick<CachedStreamRecord, "url" | "compat" | "title">,
-  codec?: "h264" | "hevc" | "unknown"
+  record: Pick<CachedStreamRecord, "url" | "compat" | "title" | "codec">,
+  known?: ReleaseCodec
 ): PlaybackSource {
   const height = heightForQuality(quality);
+  const codec = siblingTierCodec(known ?? record.codec, record.title);
   const safariHint = safariHintFor(record.compat, codec);
   const release = parseReleaseTitle(record.title);
   const inferredLang = inferAudioLanguageFromText(record.title);
@@ -484,7 +497,7 @@ function toPlaybackSource(
     titleMatch: isMoviePackRelease(record.title) ? "pack" : "exact",
     identityEvidence: "release_title",
     ...(sizeBytes ? { sizeBytes } : {}),
-    ...(codec ? { codec } : {}),
+    codec,
     ...(release.audioCodec !== "unknown"
       ? { audioCodec: release.audioCodec }
       : {}),
@@ -1723,13 +1736,10 @@ export async function resolveDebridSources(
                 source: resolvedCandidate.infoHash ?? resolvedCandidate.directUrl,
                 url: resolvedCandidate.directUrl,
                 compat: resolvedCandidate.compat,
+                codec: siblingTierCodec(resolvedCandidate.codec, resolvedCandidate.title),
               };
-              const codec =
-                resolvedCandidate.codec === "hevc" || resolvedCandidate.codec === "h264"
-                  ? resolvedCandidate.codec
-                  : "unknown";
               sources.push(
-                toPlaybackSource("torbox", quality, imdbId, req.mediaType, season, episode, record, codec)
+                toPlaybackSource("torbox", quality, imdbId, req.mediaType, season, episode, record)
               );
               await upsertCachedStream({ ...keyBase, quality, provider: "torbox" }, record);
               break; // this quality tier is satisfied
@@ -1804,18 +1814,10 @@ async function resolveAllDebridTier(
       source: candidate.infoHash ?? safeUrl,
       url: safeUrl,
       compat,
+      codec: siblingTierCodec(codec, candidate.title),
     };
     sources.push(
-      toPlaybackSource(
-        "alldebrid",
-        quality,
-        keyBase.imdbId,
-        req.mediaType,
-        keyBase.season,
-        keyBase.episode,
-        record,
-        codec === "hevc" || codec === "h264" ? codec : "unknown"
-      )
+      toPlaybackSource("alldebrid", quality, keyBase.imdbId, req.mediaType, keyBase.season, keyBase.episode, record)
     );
     await upsertCachedStream({ ...keyBase, quality, provider: "alldebrid" }, record);
   }
