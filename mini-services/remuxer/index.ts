@@ -17,7 +17,7 @@
 import { createServer, type ServerResponse } from "node:http";
 import { mkdirSync } from "node:fs";
 import type { AudioPreference } from "../../src/lib/profile-preferences";
-import { serveRange } from "./source-proxy";
+import { onClientGone, serveRange } from "./source-proxy";
 import {
   VodError,
   configureVod,
@@ -101,23 +101,29 @@ const server = createServer(async (req, res) => {
     // player can start decoding before the whole segment has been produced.
     let started = false;
     let gone = false;
-    res.once("close", () => {
+    let resume = (): void => {};
+    const stopWatching = onClientGone(req, res, () => {
       gone = true;
+      resume();
     });
-    for await (const path of vodSegment(id!, Number(segment), () => gone)) {
-      if (gone) break;
-      if (!started) {
-        res.writeHead(200, { "Content-Type": "video/mp4", "Cache-Control": "no-store" });
-        started = true;
+    try {
+      for await (const path of vodSegment(id!, Number(segment), () => gone)) {
+        if (gone) break;
+        if (!started) {
+          res.writeHead(200, { "Content-Type": "video/mp4", "Cache-Control": "no-store" });
+          started = true;
+        }
+        // Wait for the socket to drain, or for the player to hang up (a closed
+        // socket never drains, and the loop would have waited forever).
+        if (!res.write(readFragment(path)) && !gone) {
+          await new Promise<void>((resolve) => {
+            resume = resolve;
+            res.once("drain", resolve);
+          });
+        }
       }
-      // Wait for the socket to drain, or for the player to hang up (a closed
-      // socket never drains, and the loop would have waited forever).
-      if (!res.write(readFragment(path))) {
-        await new Promise((resolve) => {
-          res.once("drain", resolve);
-          res.once("close", resolve);
-        });
-      }
+    } finally {
+      stopWatching();
     }
     if (gone) return;
     if (!started) res.writeHead(200, { "Content-Type": "video/mp4", "Cache-Control": "no-store" });

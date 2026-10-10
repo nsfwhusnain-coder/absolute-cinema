@@ -2,6 +2,29 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.5.1] - 2026-10-10
+
+### Fixed
+- **The remuxer could use all of the server's memory.** It reads each MKV
+  through a small local proxy, and that proxy never noticed ffmpeg going away:
+  the runtime (Bun) does not report a disconnect on the response, only on the
+  request and its socket. Every stopped run (a seek, a finished or abandoned
+  episode) left its download going with nobody reading it, and the rest of
+  the file arrived in memory: 20 GB in a few hours of viewing, 10 GB in twelve
+  minutes with a few episodes open, until the host ran out. The same happened,
+  more slowly, whenever ffmpeg was paused for running ahead of the viewer.
+  - Disconnects are now detected from the request and socket, for the proxy
+    and for the segments sent to the player.
+  - The source is fetched in 16 MB pieces, the next only once the last has
+    been handed to ffmpeg, so what can wait in memory is bounded per run.
+  - A piece in flight when ffmpeg leaves is finished and discarded, since an
+    aborted download is not freed by the runtime.
+
+### Changed
+- The container has a memory ceiling (`AC_MEMORY_LIMIT`, 8 GB by default), so
+  a fault inside it restarts a helper process instead of exhausting the
+  machine.
+
 ## [2.5.0] - 2026-10-10
 
 ### Added

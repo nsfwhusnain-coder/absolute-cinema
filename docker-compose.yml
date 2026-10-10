@@ -44,6 +44,11 @@ services:
       # Remux cache (regenerable, bounded by the settings above).
       - ./transcode-cache:/app/transcode-cache
     shm_size: "2gb"
+    # A ceiling on memory, so a fault inside the container costs it a restarted
+    # helper rather than costing the whole machine its memory. Normal use is
+    # around 1 GB; on a machine with less than this, the ceiling does nothing.
+    mem_limit: ${AC_MEMORY_LIMIT:-8g}
+    memswap_limit: ${AC_MEMORY_LIMIT:-8g}
     restart: unless-stopped
     # A real init as PID 1: forwards stop signals to the entrypoint and reaps
     # the ffmpeg and Chromium processes its helpers leave behind.
