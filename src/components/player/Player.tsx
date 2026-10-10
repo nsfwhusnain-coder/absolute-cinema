@@ -22,7 +22,7 @@ import type { PlaybackSource } from "@/lib/playback/types";
 import type { PlaybackQualityPreference, SubtitlePreference } from "@/lib/profile-preferences";
 import { sourceDelivery, sourceMaxHeight } from "@/lib/playback/source-quality";
 import { useHoverPreview } from "@/hooks/use-hover-preview";
-import { dynamicRangeBadge, dynamicRangeLimit, hdrOutputControllable, type HdrOutput } from "@/lib/playback/dynamic-range";
+import { dynamicRangeBadge, dynamicRangeLimit, hdrLiftExponent, hdrOutputControllable, isPqRange, type HdrLift, type HdrOutput } from "@/lib/playback/dynamic-range";
 import { buildDownloadOptions, downloadDetailLine, downloadFilename, downloadSizeLabel } from "@/lib/playback/download-options";
 import { cn } from "@/lib/utils";
 import { usePlayerState, PLAYBACK_SPEEDS, VIDEO_FITS, type PlayerState } from "./store";
@@ -85,9 +85,19 @@ const START_BUFFER_S = 4;
 
 /** Offered under Picture on screens that show HDR; remembered on this device. */
 const HDR_OUTPUTS: { value: HdrOutput; label: string; detail: string }[] = [
-  { value: "on", label: "On", detail: "Brighter highlights on HDR screens" },
-  { value: "off", label: "Off", detail: "Standard range: deeper blacks on LCD screens" },
+  { value: "off", label: "Standard", detail: "Follows your screen's brightness" },
+  { value: "on", label: "HDR", detail: "Brighter highlights, on an HDR screen" },
 ];
+
+/** How bright an HDR title is shown in the standard range; remembered on this device. */
+const HDR_LIFTS: { value: HdrLift; label: string; detail: string }[] = [
+  { value: "low", label: "Low", detail: "As graded, for a dark room" },
+  { value: "medium", label: "Medium", detail: "Shadows raised, for most rooms" },
+  { value: "high", label: "High", detail: "For a bright room" },
+];
+
+/** The SVG filter that applies one lift; the video refers to it by id. */
+const liftFilterId = (exponent: number): string => `player-hdr-lift-${Math.round(exponent * 100)}`;
 
 /** "sleep" is the sleep menu opened from its own button; "sleep-settings" the same menu reached through Settings. */
 type Panel =
@@ -242,6 +252,7 @@ export function Player(props: PlayerProps) {
   // the only say the player has is whether HDR is held to the standard range.
   const [hdrControllable] = useState(hdrOutputControllable);
   const rangeLimit = hdrControllable ? dynamicRangeLimit(state.hdrOutput) : undefined;
+  const liftExponent = hdrControllable ? hdrLiftExponent(state.dynamicRange, state.hdrOutput, state.hdrLift) : null;
   const rangeBadge = dynamicRangeBadge(state.dynamicRange, hdrControllable ? state.hdrOutput : "on");
 
   // Controls auto-hide while playing.
@@ -557,11 +568,28 @@ export function Player(props: PlayerProps) {
           "main-player absolute inset-0 h-full w-full bg-black",
           state.videoFit === "cover" ? "object-cover" : state.videoFit === "fill" ? "object-fill" : "object-contain"
         )}
-        style={rangeLimit ? ({ dynamicRangeLimit: rangeLimit } as React.CSSProperties) : undefined}
+        style={
+          {
+            ...(rangeLimit ? { dynamicRangeLimit: rangeLimit } : {}),
+            ...(liftExponent !== null ? { filter: `url(#${liftFilterId(liftExponent)})` } : {}),
+          } as React.CSSProperties
+        }
         playsInline
         preload="auto"
         x-webkit-airplay="allow"
       />
+      {liftExponent !== null && (
+        // A gamma curve: raises shadows and mid-tones, leaves black at black and white at white.
+        <svg aria-hidden width="0" height="0" className="absolute">
+          <filter id={liftFilterId(liftExponent)} colorInterpolationFilters="sRGB">
+            <feComponentTransfer>
+              <feFuncR type="gamma" exponent={liftExponent} />
+              <feFuncG type="gamma" exponent={liftExponent} />
+              <feFuncB type="gamma" exponent={liftExponent} />
+            </feComponentTransfer>
+          </filter>
+        </svg>
+      )}
       <video ref={scoutRef} className="hidden" muted playsInline aria-hidden />
 
       <LiveCaptions
@@ -850,7 +878,7 @@ export function Player(props: PlayerProps) {
                 <MenuItem key={fit.value} label={fit.label} detail={fit.detail} selected={state.videoFit === fit.value} onClick={() => usePlayerState.getState().set({ videoFit: fit.value })} />
               ))}
               {hdrControllable && (
-                <MenuSection label="HDR">
+                <MenuSection label="HDR titles">
                   {HDR_OUTPUTS.map((option) => (
                     <MenuItem
                       key={option.value}
@@ -858,6 +886,19 @@ export function Player(props: PlayerProps) {
                       detail={option.detail}
                       selected={state.hdrOutput === option.value}
                       onClick={() => usePlayerState.getState().set({ hdrOutput: option.value })}
+                    />
+                  ))}
+                </MenuSection>
+              )}
+              {hdrControllable && state.hdrOutput === "off" && isPqRange(state.dynamicRange) && (
+                <MenuSection label="Brightness of this HDR title">
+                  {HDR_LIFTS.map((option) => (
+                    <MenuItem
+                      key={option.value}
+                      label={option.label}
+                      detail={option.detail}
+                      selected={state.hdrLift === option.value}
+                      onClick={() => usePlayerState.getState().set({ hdrLift: option.value })}
                     />
                   ))}
                 </MenuSection>

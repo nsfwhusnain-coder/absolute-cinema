@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import type { Phase } from "@/lib/playback/orchestrator";
-import { parseHdrOutput, type HdrOutput } from "@/lib/playback/dynamic-range";
+import { defaultHdrOutput, parseHdrChoice, parseHdrLift, type HdrLift, type HdrOutput } from "@/lib/playback/dynamic-range";
 import type { EngineAudioTrack, QualityLevel } from "./engine";
 
 export const PLAYBACK_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
@@ -10,6 +10,7 @@ export const PLAYBACK_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
 const VOLUME_KEY = "absolute-cinema:player-volume";
 const FIT_KEY = "absolute-cinema:player-fit";
 const HDR_KEY = "absolute-cinema:player-hdr";
+const HDR_LIFT_KEY = "absolute-cinema:player-hdr-lift";
 
 /** How the picture fills the screen: letterboxed, cropped to fill, or stretched. */
 export type VideoFit = "contain" | "cover" | "fill";
@@ -28,11 +29,20 @@ function readFit(): VideoFit {
   }
 }
 
+/** The viewer's choice on this device if they made one, otherwise what suits the screen. */
 function readHdrOutput(): HdrOutput {
   try {
-    return parseHdrOutput(window.localStorage.getItem(HDR_KEY));
+    return parseHdrChoice(window.localStorage.getItem(HDR_KEY)) ?? defaultHdrOutput();
   } catch {
-    return parseHdrOutput(null);
+    return defaultHdrOutput();
+  }
+}
+
+function readHdrLift(): HdrLift {
+  try {
+    return parseHdrLift(window.localStorage.getItem(HDR_LIFT_KEY));
+  } catch {
+    return parseHdrLift(null);
   }
 }
 
@@ -113,6 +123,8 @@ export interface PlayerState {
   videoFit: VideoFit;
   /** HDR video shown as HDR, or kept to the standard range (this device). */
   hdrOutput: HdrOutput;
+  /** How far an HDR picture is brightened when kept to the standard range (this device). */
+  hdrLift: HdrLift;
   /** User's chosen maximum/target height; "auto" lets the player decide. */
   qualityChoice: "auto" | number;
   notice: PlayerNotice | null;
@@ -165,13 +177,15 @@ export const usePlayerState = create<PlayerState>((set) => ({
   ...initial,
   volume: typeof window === "undefined" ? 1 : readVolume(),
   videoFit: typeof window === "undefined" ? "contain" : readFit(),
-  hdrOutput: typeof window === "undefined" ? parseHdrOutput(null) : readHdrOutput(),
+  hdrOutput: typeof window === "undefined" ? "on" : readHdrOutput(),
+  hdrLift: typeof window === "undefined" ? parseHdrLift(null) : readHdrLift(),
   muted: false,
   set: (partial) => {
     try {
       if (partial.volume !== undefined) window.localStorage.setItem(VOLUME_KEY, String(partial.volume));
       if (partial.videoFit !== undefined) window.localStorage.setItem(FIT_KEY, partial.videoFit);
       if (partial.hdrOutput !== undefined) window.localStorage.setItem(HDR_KEY, partial.hdrOutput);
+      if (partial.hdrLift !== undefined) window.localStorage.setItem(HDR_LIFT_KEY, partial.hdrLift);
     } catch {
       /* private mode: the change still applies to this session */
     }
