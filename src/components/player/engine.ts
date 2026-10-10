@@ -16,10 +16,17 @@ import type HlsType from "hls.js";
 import type { ErrorData, Level, MediaPlaylist } from "hls.js";
 import { activeBufferProfile } from "@/lib/playback/device-profile";
 import { HLS_WORKER_PATH, hlsWorkerSupportedHere } from "@/lib/playback/player-engine";
+import { seekPointAtOrBefore, snapSeek } from "@/lib/playback/seek-points";
 
 export interface Playable {
   kind: "hls" | "file";
   url: string;
+  /**
+   * The same stream cut into slices shorter than its keyframe interval. Only
+   * hls.js can play it: it appends whatever arrives, where the browser's own
+   * HLS player wants every entry to open on a keyframe.
+   */
+  slicedUrl?: string;
   /** Force the browser's own HLS stack. */
   nativeHls?: boolean;
   /** Same-origin stream that needs the session cookie. */
@@ -63,6 +70,8 @@ export interface LoadOptions {
   startHeight?: number;
   /** Keep to the opening rendition instead of adapting (the viewer asked for that quality). */
   lockLevel?: boolean;
+  /** Times a sliced stream may be entered at. */
+  seekPoints?: readonly number[];
 }
 /**
  * Automatic quality never picks renditions below this. Embed CDNs that take
@@ -81,6 +90,8 @@ export class MediaEngine {
   private networkRecoveries = 0;
   private mediaRecoveries = 0;
   private abandoned = false;
+  /** Set while a sliced stream is attached: jumps then land on these times. */
+  private seekPoints: readonly number[] | null = null;
   kind: EngineKind = "native_file";
 
   constructor(
@@ -98,6 +109,7 @@ export class MediaEngine {
     this.teardown();
     const generation = ++this.generation;
     this.abandoned = false;
+    this.seekPoints = null;
     this.networkRecoveries = 0;
     this.mediaRecoveries = 0;
     const video = this.video;
@@ -123,6 +135,11 @@ export class MediaEngine {
     }
 
     this.kind = "hlsjs";
+    const sliced = Boolean(playable.slicedUrl && options.seekPoints?.length);
+    if (sliced) {
+      this.seekPoints = options.seekPoints!;
+      startAt = seekPointAtOrBefore(this.seekPoints, startAt);
+    }
     const profile = activeBufferProfile();
     const hls = new Hls({
       enableWorker: hlsWorkerSupportedHere(),
@@ -175,7 +192,14 @@ export class MediaEngine {
       if (generation === this.generation) this.handlers.onAudioTracks(toAudio(hls.audioTracks), hls.audioTrack);
     });
     hls.on(Hls.Events.ERROR, (_e, data: ErrorData) => {
-      if (generation !== this.generation || !data.fatal) return;
+      if (generation !== this.generation) return;
+      // The remuxer has said this file cannot be served from here. hls.js
+      // would ask again, with growing pauses, and be told the same each time.
+      if (isRemuxRefusal(data)) {
+        this.handlers.onFatal(`remux:${data.response?.code}`);
+        return;
+      }
+      if (!data.fatal) return;
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR && this.networkRecoveries < 1) {
         this.networkRecoveries++;
         hls.startLoad();
@@ -190,7 +214,17 @@ export class MediaEngine {
     });
 
     hls.attachMedia(video);
-    hls.loadSource(playable.url);
+    hls.loadSource(sliced ? playable.slicedUrl! : playable.url);
+  }
+
+  /**
+   * Where a jump to `to` should go. In a sliced stream a time not yet
+   * buffered can only be reached from the keyframe before it; anything
+   * buffered, and every other kind of stream, is reached directly.
+   */
+  seekTarget(to: number): number {
+    if (!this.seekPoints || isBuffered(this.video, to)) return to;
+    return snapSeek(this.seekPoints, this.video.currentTime, to);
   }
 
   /**
@@ -287,6 +321,24 @@ export class MediaEngine {
     };
     video.addEventListener("loadedmetadata", apply, { once: true });
   }
+}
+
+/** Statuses the remuxer answers with when a source is beyond serving (a busy or slow one answers 503 or 504, and is asked again). */
+const REMUX_REFUSALS: readonly number[] = [415, 502];
+
+function isRemuxRefusal(data: ErrorData): boolean {
+  const code = data.response?.code;
+  return code !== undefined && REMUX_REFUSALS.includes(code) && (data.url ?? data.frag?.url ?? "").includes("/api/vod/");
+}
+
+/** A little slack at the edges, so a time on the last buffered frame still counts. */
+const BUFFERED_EDGE_S = 0.25;
+
+function isBuffered(video: HTMLVideoElement, time: number): boolean {
+  for (let i = 0; i < video.buffered.length; i++) {
+    if (time >= video.buffered.start(i) && time <= video.buffered.end(i) - BUFFERED_EDGE_S) return true;
+  }
+  return false;
 }
 
 /** Index of the highest rendition at or below `height` (the lowest one if none are). */

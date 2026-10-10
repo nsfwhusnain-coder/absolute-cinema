@@ -50,8 +50,47 @@ export function segmentForTime(bounds: readonly number[], t: number): number {
   return lo;
 }
 
-/** Complete VOD playlist; segment URIs are `<index>.m4s` beside `init.mp4`. */
-export function buildVodPlaylist(bounds: readonly number[]): string {
+/** Nominal length of the slices a segment is cut into for players that can start between keyframes. */
+export const TARGET_SLICE_S = 2;
+/** URI prefix of a slice, beside the segments' bare numbers. */
+export const SLICE_PREFIX = "s";
+
+/**
+ * A finer cut of the same timeline. A segment runs from keyframe to keyframe,
+ * and releases with a keyframe every ten seconds make that 45 MB of 4K a
+ * player has to receive whole before it shows a frame. A player built on
+ * Media Source Extensions appends whatever arrives, so for it each segment is
+ * divided into slices of about TARGET_SLICE_S. Only a segment's first slice
+ * opens on a keyframe: the rest continue it, and play in sequence but cannot
+ * be jumped into (a jump goes to the segment's start, see `seekPoint`).
+ */
+export interface SlicePlan {
+  /** Slice start times; the final entry is the title's duration. */
+  bounds: number[];
+  /** Index of the segment each slice belongs to. */
+  segmentOf: number[];
+}
+
+export function computeSlicePlan(bounds: readonly number[], targetS = TARGET_SLICE_S): SlicePlan {
+  const starts: number[] = [];
+  const segmentOf: number[] = [];
+  for (let segment = 0; segment < bounds.length - 1; segment++) {
+    const start = bounds[segment]!;
+    const length = bounds[segment + 1]! - start;
+    const count = Math.max(1, Math.round(length / targetS));
+    for (let i = 0; i < count; i++) {
+      starts.push(start + (length * i) / count);
+      segmentOf.push(segment);
+    }
+  }
+  return { bounds: [...starts, bounds[bounds.length - 1]!], segmentOf };
+}
+
+/**
+ * Complete VOD playlist; URIs are `<prefix><index>.m4s` beside `init.mp4`.
+ * `independent` says every entry opens on a keyframe (segments do, slices do not).
+ */
+export function buildVodPlaylist(bounds: readonly number[], prefix = "", independent = true): string {
   const durations = bounds.slice(1).map((end, i) => end - bounds[i]!);
   const target = Math.max(1, Math.ceil(Math.max(...durations)));
   const lines = [
@@ -60,11 +99,11 @@ export function buildVodPlaylist(bounds: readonly number[]): string {
     `#EXT-X-TARGETDURATION:${target}`,
     "#EXT-X-PLAYLIST-TYPE:VOD",
     "#EXT-X-MEDIA-SEQUENCE:0",
-    "#EXT-X-INDEPENDENT-SEGMENTS",
+    ...(independent ? ["#EXT-X-INDEPENDENT-SEGMENTS"] : []),
     '#EXT-X-MAP:URI="init.mp4"',
   ];
   durations.forEach((duration, i) => {
-    lines.push(`#EXTINF:${duration.toFixed(6)},`, `${i}.m4s`);
+    lines.push(`#EXTINF:${duration.toFixed(6)},`, `${prefix}${i}.m4s`);
   });
   lines.push("#EXT-X-ENDLIST", "");
   return lines.join("\n");
@@ -78,33 +117,67 @@ export interface FragmentRecord {
   bytes: number;
 }
 
+/** A stretch of the timeline served as one request: a segment, or a slice of one. */
+export interface PlanWindow {
+  /** Fragments that start in [start, end) belong to it. */
+  start: number;
+  end: number;
+  /** The keyframe it depends on: a run that began after this cannot serve it. */
+  anchor: number;
+  /** Nothing follows it, so it ends when the run does. */
+  last: boolean;
+}
+
+export function segmentWindow(bounds: readonly number[], index: number): PlanWindow {
+  return { start: bounds[index]!, end: bounds[index + 1]!, anchor: bounds[index]!, last: index === bounds.length - 2 };
+}
+
+export function sliceWindow(bounds: readonly number[], plan: SlicePlan, index: number): PlanWindow {
+  return {
+    start: plan.bounds[index]!,
+    end: plan.bounds[index + 1]!,
+    anchor: bounds[plan.segmentOf[index]!]!,
+    last: index === plan.bounds.length - 2,
+  };
+}
+
+/** Whether a run's output can serve a window anchored at `anchor`: it began at that keyframe or before it. */
+export function runCovers(fragments: readonly FragmentRecord[], anchor: number): boolean {
+  return fragments.length > 0 && fragments[0]!.time <= anchor + KEYFRAME_MATCH_TOLERANCE_S;
+}
+
 /**
- * Fragments (in order) that make up segment `index`, taken from one run's
- * contiguous output. Returns null until the run has produced past the
- * segment's end (or finished the title).
+ * Fragments (in order) that make up a window, taken from one run's contiguous
+ * output. Returns null until the run has produced past the window's end (or
+ * finished the title). A slice shorter than one fragment can be empty.
  */
+export function fragmentsInWindow(
+  window: PlanWindow,
+  fragments: readonly FragmentRecord[],
+  runFinished: boolean
+): FragmentRecord[] | null {
+  if (!runCovers(fragments, window.anchor)) return null;
+  const first = fragments.findIndex((f) => f.time >= window.start - KEYFRAME_MATCH_TOLERANCE_S);
+  if (first < 0) return null;
+  const selected: FragmentRecord[] = [];
+  for (let i = first; i < fragments.length; i++) {
+    const fragment = fragments[i]!;
+    if (!window.last && fragment.time >= window.end - KEYFRAME_MATCH_TOLERANCE_S) return selected;
+    selected.push(fragment);
+  }
+  // Ran out of fragments before reaching the next boundary.
+  return runFinished && selected.length ? selected : null;
+}
+
+/** Fragments of segment `index`; null until complete (see `fragmentsInWindow`). */
 export function fragmentsForSegment(
   bounds: readonly number[],
   index: number,
   fragments: readonly FragmentRecord[],
   runFinished: boolean
 ): FragmentRecord[] | null {
-  const start = bounds[index]!;
-  const end = bounds[index + 1]!;
-  const isLast = index === bounds.length - 2;
-  const first = fragments.findIndex((f) => f.time >= start - KEYFRAME_MATCH_TOLERANCE_S);
-  if (first < 0) return null;
-  // The run must have started at or before this segment's first keyframe;
-  // otherwise its opening keyframes are missing from this run's output.
-  if (fragments[first]!.time > start + KEYFRAME_MATCH_TOLERANCE_S && first === 0) return null;
-  const selected: FragmentRecord[] = [];
-  for (let i = first; i < fragments.length; i++) {
-    const fragment = fragments[i]!;
-    if (!isLast && fragment.time >= end - KEYFRAME_MATCH_TOLERANCE_S) return selected.length ? selected : null;
-    selected.push(fragment);
-  }
-  // Ran out of fragments before reaching the next boundary.
-  return runFinished && selected.length ? selected : null;
+  const selected = fragmentsInWindow(segmentWindow(bounds, index), fragments, runFinished);
+  return selected?.length ? selected : null;
 }
 
 /**

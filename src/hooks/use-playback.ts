@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import type { MediaType, PlaybackResponse, PlaybackSource } from "@/lib/playback/types";
@@ -15,6 +15,7 @@ import { usableCachedPlayback } from "@/lib/playback/cache-age";
 import { PlaybackRequestError, shouldRetryPlaybackRequest } from "@/lib/playback/request-error";
 import { tvQueryIndex } from "@/lib/playback/tv-index";
 import { timeoutSignal } from "@/lib/abort";
+import { prewarmStart } from "@/components/player/prewarm";
 
 export { tvQueryIndex } from "@/lib/playback/tv-index";
 
@@ -82,6 +83,61 @@ export function usePrefetchPlayback({ tmdbId, mediaType, season, episode, enable
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
+}
+
+/** How often a prewarm still wanted is renewed (the server drops one nobody plays after 75 s). */
+const PREWARM_RENEW_MS = 50_000;
+
+/**
+ * Gets a title ready before Play. Its sources are resolved in full (the same
+ * answers the watch page asks for, so Play finds them already in hand), and
+ * when the source Play would start is a remux its session is opened: the
+ * file indexed and the first seconds made. See components/player/prewarm.
+ */
+export function usePrewarmStart(args: Args & { startAt: number; originalLanguage?: string | null }) {
+  const { tmdbId, mediaType, season, episode, enabled = true, startAt, originalLanguage } = args;
+  const { data: session } = useSession();
+  const active = enabled && !!session;
+  const fast = useQuery({
+    queryKey: playbackQueryKey(mediaType, tmdbId, season, episode, true),
+    queryFn: () => fetchPlayback(mediaType, tmdbId, season, episode, true),
+    enabled: active,
+    retry: 1,
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const full = useQuery({
+    queryKey: playbackQueryKey(mediaType, tmdbId, season, episode, false),
+    queryFn: () => fetchPlayback(mediaType, tmdbId, season, episode, false),
+    enabled: active,
+    retry: false,
+    staleTime: 2 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const response = full.data ?? fast.data;
+  const sources = useMemo(
+    () => mergeProgressivePlaybackSources(fast.data?.sources, full.data?.sources, false),
+    [fast.data?.sources, full.data?.sources]
+  );
+  const remuxAvailable = response?.remuxAvailable !== false;
+  const audioPreference = response?.preferences?.audioPreference ?? "original";
+  const audioLanguage = response?.preferences?.audioLanguage ?? "en";
+  const quality = response?.preferences?.playbackQuality;
+  useEffect(() => {
+    if (!active || !sources.length) return;
+    const warm = () =>
+      prewarmStart({
+        sources,
+        remuxAvailable,
+        title: { tmdbId, mediaType, season, episode, originalLanguage },
+        audio: { preference: audioPreference, language: audioLanguage },
+        quality,
+        startAt,
+      });
+    warm();
+    const timer = setInterval(warm, PREWARM_RENEW_MS);
+    return () => clearInterval(timer);
+  }, [active, sources, remuxAvailable, audioPreference, audioLanguage, quality, tmdbId, mediaType, season, episode, originalLanguage, startAt]);
 }
 
 export interface Streams {

@@ -375,10 +375,18 @@ export type RangeFetcher = (start: number, endInclusive: number) => Promise<Uint
 /** A fetcher that also reports the file's size as soon as the first response says it. */
 export type SizedRangeFetcher = RangeFetcher & { whenSized?: Promise<number> };
 
-const HEAD_BYTES = 256 * 1024;
+/**
+ * Read from the start of the file when it is indexed, and kept: the header
+ * the index is parsed from, and the first packets after it. ffmpeg reads
+ * those packets every time it opens the file, to learn what each stream is
+ * (see FFMPEG_PROBE_BYTES in vod.ts); from memory, that costs a jump nothing.
+ */
+export const HEAD_BYTES = 2 * 1024 * 1024;
 const CUES_GUESS_BYTES = 1024 * 1024;
 /** How much of the file's end is read alongside its head, on the guess that it holds the Cues. */
 const TAIL_GUESS_BYTES = 384 * 1024;
+/** How long the index waits for the tail once it has the Cues by another route. */
+const TAIL_GRACE_MS = 1_500;
 /** A 3-hour 4K film's Cues are ~200-400 KB; refuse anything absurd. */
 const MAX_CUES_BYTES = 16 * 1024 * 1024;
 
@@ -420,6 +428,18 @@ function readTail(fetchRange: SizedRangeFetcher): Promise<Tail | null> | null {
   );
 }
 
+/** Resolves with nothing after `ms`: the longest the index waits on a read it can do without. */
+function settled(ms: number): Promise<null> {
+  return new Promise((resolve) => setTimeout(() => resolve(null), ms));
+}
+
+/** The tail read as a cached range, when it arrived. */
+async function tailBytes(pending: Promise<Tail | null> | null): Promise<{ start: number; bytes: Uint8Array } | null> {
+  const tail = await pending;
+  const bytes = tail ? await tail.bytes : null;
+  return tail && bytes?.length ? { start: tail.start, bytes } : null;
+}
+
 /** The bytes from `cuesOffset` to the end of the file, when the tail read covers them. */
 async function cuesFromTail(pending: Promise<Tail | null> | null, cuesOffset: number): Promise<Uint8Array | null> {
   const tail = await pending;
@@ -444,6 +464,10 @@ export async function readMkvKeyframes(fetchRange: SizedRangeFetcher): Promise<K
   // One speculative request usually holds the whole Cues element; a second
   // is made only when it is larger than the guess.
   let cues = (await cuesFromTail(tail, layout.cuesOffset)) ?? (await fetchRange(layout.cuesOffset, layout.cuesOffset + CUES_GUESS_BYTES - 1));
+  // ffmpeg reads whatever closes the file (its tags, usually) every time it
+  // opens it. Kept, the tail spares each start and each jump a request.
+  const end = await Promise.race([tailBytes(tail), settled(TAIL_GRACE_MS)]);
+  if (end) fetched.push(end);
   const cuesEl = readElementHeader(cues, 0);
   if (!cuesEl || cuesEl.id !== CUES_ID || cuesEl.size === UNKNOWN_SIZE || cuesEl.size > MAX_CUES_BYTES) {
     return null;
@@ -473,21 +497,42 @@ export async function readMkvKeyframes(fetchRange: SizedRangeFetcher): Promise<K
  * response's Content-Range clamps later requests: some CDNs answer a range
  * that runs past end-of-file with a response Bun's fetch rejects.
  */
+const RANGE_RETRY_MS = 400;
+
+/** A range request the server answered but did not honour; `transient` when asking again may work. */
+class RangeRequestError extends Error {
+  constructor(
+    message: string,
+    readonly transient: boolean
+  ) {
+    super(message);
+  }
+}
+
 export function httpRangeFetcher(url: string, timeoutMs: number): SizedRangeFetcher & { size(): number | null } {
   let totalSize: number | null = null;
   let sized: (total: number) => void = () => {};
   const whenSized = new Promise<number>((resolve) => (sized = resolve));
-  const fetcher = async (start: number, endInclusive: number) => {
-    const end = totalSize !== null ? Math.min(endInclusive, totalSize - 1) : endInclusive;
+  const request = async (start: number, end: number) => {
     const res = await fetch(url, {
       headers: { Range: `bytes=${start}-${end}` },
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (res.status !== 206) {
-      // A 200 means Range was ignored and the whole file is on its way.
-      await res.body?.cancel().catch(() => {});
-      throw new Error(`range not supported (HTTP ${res.status})`);
-    }
+    if (res.status === 206) return res;
+    await res.body?.cancel().catch(() => {});
+    // A 200 means Range was ignored and the whole file is on its way.
+    throw new RangeRequestError(`range not supported (HTTP ${res.status})`, res.status >= 500 || res.status === 429);
+  };
+  const fetcher = async (start: number, endInclusive: number) => {
+    const end = totalSize !== null ? Math.min(endInclusive, totalSize - 1) : endInclusive;
+    // A debrid CDN answers the odd request with a 503 and the next one
+    // normally. One failed read used to fail the whole title.
+    const res = await request(start, end).catch(async (err: unknown) => {
+      const timedOut = err instanceof DOMException && err.name === "TimeoutError";
+      if (timedOut || (err instanceof RangeRequestError && !err.transient)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, RANGE_RETRY_MS));
+      return request(start, end);
+    });
     const total = Number(res.headers.get("content-range")?.split("/")[1]);
     if (Number.isFinite(total) && total > 0) {
       totalSize = total;

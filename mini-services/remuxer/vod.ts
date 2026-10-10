@@ -27,11 +27,18 @@ import { firstVideoDecodeTime, readVideoTrackInfo, stripEditLists, type VideoTra
 import {
   Fmp4StreamSplitter,
   KEYFRAME_MATCH_TOLERANCE_S,
+  SLICE_PREFIX,
   buildVodPlaylist,
   computeSegmentBounds,
-  fragmentsForSegment,
+  computeSlicePlan,
+  fragmentsInWindow,
+  runCovers,
   segmentForTime,
+  segmentWindow,
+  sliceWindow,
   type FragmentRecord,
+  type PlanWindow,
+  type SlicePlan,
 } from "./vod-plan";
 
 const VOD_VERSION = "vod-v1";
@@ -43,6 +50,20 @@ const AHEAD_RESUME_S = 120;
 const REACH_S = 40;
 /** Runs of a session nobody has requested from recently are stopped. */
 const RUN_IDLE_MS = 3 * 60 * 1000;
+/**
+ * A session opened ahead of Play (the viewer is on the title's page, or the
+ * episode before is ending) gets this much made and then waits: enough to
+ * start at once, little enough to throw away if Play never comes.
+ */
+const PREWARM_AHEAD_S = 12;
+/** A prewarmed session nobody went on to play gives its run back after this long. */
+const PREWARM_IDLE_MS = 75 * 1000;
+/**
+ * The source is read in pieces this size until someone plays: a piece keeps
+ * arriving after its run is paused, and a full-size one is a lot to fetch for
+ * a title that may only have been looked at.
+ */
+const PREWARM_WINDOW_BYTES = 24 * 1024 * 1024;
 /** Whole sessions (and their files) are removed after this long unused. */
 const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
 const SEGMENT_WAIT_MS = 45_000;
@@ -51,7 +72,22 @@ const POLL_MS = 100;
 const MAX_RUNS_PER_SESSION = 2;
 const MAX_FAILED_RUNS_PER_SEGMENT = 2;
 const AUDIO_BITRATE = "192k";
-const FRAGMENT_MAX_US = 1_000_000;
+/**
+ * How much ffmpeg may read to identify the streams before it starts. A file
+ * with image subtitles never satisfies it (those say nothing until a caption
+ * appears), so it read the default 5 MB from the start of the file on every
+ * start and every jump: one more request to the debrid CDN each time, three
+ * seconds of it. Video and audio describe themselves in the header and their
+ * first packets; this much holds those and fits in the indexed head.
+ */
+const FFMPEG_PROBE_BYTES = 1_500_000;
+/** A run that has made nothing this long after starting is not going to. */
+const FIRST_FRAGMENT_TIMEOUT_MS = 11_000;
+/** Its first fragment may begin this far past the keyframe it was started at before the keyframe is called unusable. */
+const ENTRY_TOLERANCE_S = 1;
+/** Half a second: a slice (two seconds or so) then always holds several fragments, and never none. */
+const FRAGMENT_MAX_US = 500_000;
+const SEEK_POINT_DECIMALS = 3;
 const JANITOR_INTERVAL_MS = 30_000;
 /** Text subtitle tracks carried per session (each is one more ffmpeg output). */
 const MAX_SUBTITLE_TRACKS = 6;
@@ -72,6 +108,8 @@ function freeBytes(dir: string): number {
   }
 }
 
+const UNUSABLE_ENTRY = "source cannot be started at this position";
+
 export class VodError extends Error {
   constructor(
     message: string,
@@ -90,6 +128,12 @@ interface Run {
   finished: boolean;
   failed: boolean;
   paused: boolean;
+  /**
+   * It could not begin at its keyframe: ffmpeg made nothing, or began later.
+   * Some AV1 files index frames as keyframes that a decoder cannot start
+   * from, and ffmpeg then reads on for minutes looking for one it can.
+   */
+  unusable: boolean;
   dir: string;
 }
 
@@ -99,6 +143,7 @@ interface Session {
   source: ProxySource;
   dir: string;
   bounds: number[];
+  slices: SlicePlan;
   keyframes: number[];
   durationS: number;
   audioIndex: number | null;
@@ -112,6 +157,8 @@ interface Session {
   nextRunId: number;
   lastRequestAt: number;
   wantedTime: number;
+  /** A player has asked for it (false while it is only prewarmed). */
+  demanded: boolean;
   info: VodSessionInfo;
 }
 
@@ -119,6 +166,8 @@ export interface VodSessionInfo {
   id: string;
   durationS: number;
   segments: number;
+  /** Where each segment starts: the times playback can begin from. */
+  seekPoints: number[];
   videoCodecId: string | null;
   /** What the viewer receives: SDR, PQ (HDR10), HLG or DV (Dolby Vision). */
   dynamicRange: DeliveredRange;
@@ -190,13 +239,18 @@ function chooseAudio(tracks: MkvAudioTrack[], selection: VodAudioRequest): MkvAu
   return tracks.find((t) => t.audioIndex === picked?.id) ?? tracks[0]!;
 }
 
-/** Opens (or reuses) a session for a remote MKV. Throws VodError(415) when it cannot be indexed. */
+/**
+ * Opens (or reuses) a session for a remote MKV. Throws VodError(415) when it
+ * cannot be indexed. With `prewarm`, nobody is watching yet: the session is
+ * made ready and never takes a run from someone who is.
+ */
 export async function openVodSession(
   cacheRoot: string,
   url: string,
   audio: VodAudioRequest,
   startAtS = 0,
-  viewer: VodViewer = BASELINE_VIEWER
+  viewer: VodViewer = BASELINE_VIEWER,
+  prewarm = false
 ): Promise<VodSessionInfo> {
   const id = sessionId(url, audio, viewer);
   let session = sessions.get(id);
@@ -209,11 +263,21 @@ export async function openVodSession(
     session = await pending;
   }
   session.lastRequestAt = Date.now();
-  // Prewarm where the viewer will start, so the init and first segment are
-  // already being produced when the player asks.
+  if (!prewarm) demand(session);
+  // Start where the viewer will, so the init and first segment are already
+  // being produced when the player asks.
   const startSegment = segmentForTime(session.bounds, startAtS);
+  // A session someone is watching keeps its own position.
+  if (prewarm && session.demanded) return session.info;
   session.wantedTime = session.bounds[startSegment]!;
-  if (!runReaching(session, startSegment)) startRun(session, startSegment);
+  if (!runReaching(session, segmentWindow(session.bounds, startSegment))) {
+    try {
+      startRun(session, startSegment);
+    } catch (err) {
+      // No room or no disk: the session is indexed, which is most of the wait.
+      if (!prewarm) throw err;
+    }
+  }
   return session.info;
 }
 
@@ -238,9 +302,10 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
   const session: Session = {
     id,
     url,
-    source: { url, totalSize, cached: index.fetched },
+    source: { url, totalSize, cached: index.fetched, windowBytes: PREWARM_WINDOW_BYTES },
     dir,
     bounds,
+    slices: computeSlicePlan(bounds),
     keyframes: index.keyframes,
     durationS: index.durationS,
     audioIndex: audioTrack?.audioIndex ?? null,
@@ -253,10 +318,12 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
     nextRunId: 0,
     lastRequestAt: Date.now(),
     wantedTime: 0,
+    demanded: false,
     info: {
       id,
       durationS: index.durationS,
       segments: bounds.length - 1,
+      seekPoints: bounds.slice(0, -1).map((t) => Number(t.toFixed(SEEK_POINT_DECIMALS))),
       videoCodecId: index.videoCodecId,
       dynamicRange: deliveredRange(index.dynamicRange, index.dolbyVision, asDolbyVision),
       audio: audioTrack
@@ -293,6 +360,7 @@ function ffmpegArgs(session: Session, startTime: number): string[] {
     "-reconnect", "1",
     "-reconnect_streamed", "1",
     "-reconnect_delay_max", "5",
+    "-probesize", String(FFMPEG_PROBE_BYTES),
   ];
   // ffmpeg backs off slightly before the target and lands on the previous
   // keyframe; a small margin makes it land on the segment's own keyframe.
@@ -340,11 +408,10 @@ function lastTime(run: Run): number {
   return run.fragments.length ? run.fragments[run.fragments.length - 1]!.time : run.startTime;
 }
 
-/** An alive run that already covers, or will soon reach, the segment. */
-function runReaching(session: Session, segment: number): Run | null {
-  const target = session.bounds[segment]!;
+/** An alive run that already covers, or will soon reach, the window. */
+function runReaching(session: Session, window: PlanWindow): Run | null {
   const candidates = aliveRuns(session).filter(
-    (run) => run.startTime <= target + KEYFRAME_MATCH_TOLERANCE_S && lastTime(run) >= target - REACH_S
+    (run) => run.startTime <= window.anchor + KEYFRAME_MATCH_TOLERANCE_S && lastTime(run) >= window.start - REACH_S
   );
   return candidates.sort((a, b) => lastTime(b) - lastTime(a))[0] ?? null;
 }
@@ -373,10 +440,12 @@ function makeRoom(session: Session): void {
   // Only other viewers who have gone quiet give up their runs. Taking runs
   // from someone mid-film just moved the stall to them, and with a few
   // viewers at once they took turns stalling each other.
+  // A prewarm takes nothing from anyone: it only uses a free run.
+  if (!session.demanded) throw new VodError("remux capacity reached", 503);
   const now = Date.now();
   const idleOthers = [...sessions.values()]
-    .filter((s) => s !== session && now - s.lastRequestAt > ACTIVE_VIEWER_MS)
-    .sort((a, b) => a.lastRequestAt - b.lastRequestAt);
+    .filter((s) => s !== session && (!s.demanded || now - s.lastRequestAt > ACTIVE_VIEWER_MS))
+    .sort((a, b) => Number(a.demanded) - Number(b.demanded) || a.lastRequestAt - b.lastRequestAt);
   for (const other of idleOthers) {
     for (const run of aliveRuns(other)) stopRun(run, "global run limit");
     if (totalAliveRuns() < MAX_RUNS_TOTAL) return;
@@ -384,8 +453,16 @@ function makeRoom(session: Session): void {
   throw new VodError("remux capacity reached", 503);
 }
 
+/** A player wants this session: it reads the source at full size from here on. */
+function demand(session: Session): void {
+  session.demanded = true;
+  delete session.source.windowBytes;
+}
+
 function startRun(session: Session, segment: number): Run {
   if (freeBytes(session.dir) < MIN_FREE_BYTES) {
+    // A prewarm does not clear anyone's cache to make its own.
+    if (!session.demanded) throw new VodError("not enough free disk space to remux", 507);
     reclaimDisk(session);
     if (freeBytes(session.dir) < MIN_FREE_BYTES) throw new VodError("not enough free disk space to remux", 507);
   }
@@ -397,8 +474,16 @@ function startRun(session: Session, segment: number): Run {
   const proc = spawn("ffmpeg", ffmpegArgs(session, startTime), {
     stdio: ["ignore", "pipe", "pipe", ...session.subtitles.map(() => "pipe" as const)],
   });
-  const run: Run = { id, startSegment: segment, proc, startTime, fragments: [], finished: false, failed: false, paused: false, dir };
+  const run: Run = { id, startSegment: segment, proc, startTime, fragments: [], finished: false, failed: false, paused: false, unusable: false, dir };
   session.runs.push(run);
+  const giveUp = (reason: string) => {
+    run.unusable = true;
+    stopRun(run, reason);
+    run.failed = true;
+  };
+  const firstFragment = setTimeout(() => {
+    if (!run.fragments.length && !run.finished && !run.failed) giveUp("made nothing");
+  }, FIRST_FRAGMENT_TIMEOUT_MS);
   const splitter = new Fmp4StreamSplitter();
   let stderr = "";
   let seq = 0;
@@ -423,6 +508,13 @@ function startRun(session: Session, segment: number): Run {
       const raw = firstVideoDecodeTime(part.bytes, session.video);
       if (raw === null) continue;
       const time = snapToKeyframe(session.keyframes, raw);
+      if (!run.fragments.length) {
+        clearTimeout(firstFragment);
+        if (time > startTime + ENTRY_TOLERANCE_S) {
+          giveUp(`began at ${time.toFixed(1)}s, not ${startTime.toFixed(1)}s`);
+          return;
+        }
+      }
       const path = join(dir, `${seq++}.m4s`);
       writeFileSync(path, part.bytes);
       run.fragments.push({ time, path, bytes: part.bytes.length });
@@ -445,6 +537,7 @@ function startRun(session: Session, segment: number): Run {
     stream.on("error", () => undefined);
   });
   proc.on("close", (code, signal) => {
+    clearTimeout(firstFragment);
     if (run.finished) return;
     if (code === 0) {
       run.finished = true;
@@ -478,10 +571,11 @@ function snapToKeyframe(keyframes: readonly number[], t: number): number {
 /** Pause a run that has raced far ahead of the viewer; resume it as they catch up. */
 function throttle(session: Session, run: Run): void {
   const lead = lastTime(run) - session.wantedTime;
-  if (!run.paused && lead > AHEAD_PAUSE_S) {
+  const pauseAt = session.demanded ? AHEAD_PAUSE_S : PREWARM_AHEAD_S;
+  if (!run.paused && lead > pauseAt) {
     run.paused = true;
     run.proc.kill("SIGSTOP");
-  } else if (run.paused && lead < AHEAD_RESUME_S) {
+  } else if (run.paused && session.demanded && lead < AHEAD_RESUME_S) {
     run.paused = false;
     run.proc.kill("SIGCONT");
   }
@@ -501,14 +595,17 @@ export function vodSubtitleCues(id: string, index: number): VttCue[] {
   return [...track.cues.values()].sort((a, b) => a.start - b.start);
 }
 
-export function vodPlaylist(id: string): string {
-  return buildVodPlaylist(sessionOrThrow(id).bounds);
+/** The playlist of whole segments, or of slices for players that can start between keyframes. */
+export function vodPlaylist(id: string, sliced = false): string {
+  const session = sessionOrThrow(id);
+  return sliced ? buildVodPlaylist(session.slices.bounds, SLICE_PREFIX, false) : buildVodPlaylist(session.bounds);
 }
 
 export async function vodInit(id: string): Promise<Uint8Array> {
   const session = sessionOrThrow(id);
   const deadline = Date.now() + INIT_WAIT_MS;
   while (!session.init) {
+    if (session.runs.some((run) => run.unusable)) throw new VodError(UNUSABLE_ENTRY, 502);
     if (!aliveRuns(session).length) startRun(session, segmentForTime(session.bounds, session.wantedTime));
     if (Date.now() > deadline) throw new VodError("init not ready", 504);
     await sleep(POLL_MS);
@@ -517,51 +614,65 @@ export async function vodInit(id: string): Promise<Uint8Array> {
 }
 
 /**
- * The fragments of segment `segment`, in order, as they become available.
- * A segment already complete in any run is yielded at once; otherwise the
- * run that will produce it is followed and each keyframe group is yielded
- * the moment it is written, so playback can begin before the segment ends.
- */
-/**
  * Yields the fragment files of one segment as they appear. `gone` reports that
  * the player hung up: the wait then ends instead of polling (and starting new
  * ffmpeg runs) for a segment nobody will receive.
  */
-export async function* vodSegment(id: string, segment: number, gone: () => boolean = () => false): AsyncGenerator<string> {
+export function vodSegment(id: string, segment: number, gone: () => boolean = () => false): AsyncGenerator<string> {
   const session = sessionOrThrow(id);
   if (!Number.isInteger(segment) || segment < 0 || segment >= session.bounds.length - 1) {
     throw new VodError("segment out of range", 404);
   }
-  session.wantedTime = session.bounds[segment]!;
+  return windowFragments(session, segmentWindow(session.bounds, segment), segment, gone);
+}
+
+/** The same for one slice of a segment (see `computeSlicePlan`). */
+export function vodSlice(id: string, slice: number, gone: () => boolean = () => false): AsyncGenerator<string> {
+  const session = sessionOrThrow(id);
+  if (!Number.isInteger(slice) || slice < 0 || slice >= session.slices.segmentOf.length) {
+    throw new VodError("slice out of range", 404);
+  }
+  return windowFragments(session, sliceWindow(session.bounds, session.slices, slice), session.slices.segmentOf[slice]!, gone);
+}
+
+/**
+ * The fragments of a window, in order, as they become available. A window
+ * already complete in any run is yielded at once; otherwise the run that will
+ * produce it is followed (started at `segment`, the keyframe it depends on,
+ * when none will reach it) and each fragment is yielded the moment it is
+ * written, so playback can begin before the window ends.
+ */
+async function* windowFragments(session: Session, window: PlanWindow, segment: number, gone: () => boolean): AsyncGenerator<string> {
+  demand(session);
+  session.wantedTime = window.start;
   for (const run of aliveRuns(session)) throttle(session, run);
 
   for (const run of [...session.runs].reverse()) {
-    const complete = fragmentsForSegment(session.bounds, segment, run.fragments, run.finished);
+    const complete = fragmentsInWindow(window, run.fragments, run.finished);
     if (complete) {
       for (const fragment of complete) yield fragment.path;
       return;
     }
   }
 
-  const start = session.bounds[segment]!;
-  const end = session.bounds[segment + 1]!;
-  const isLast = segment === session.bounds.length - 2;
   const deadline = Date.now() + SEGMENT_WAIT_MS;
   let run: Run | null = null;
   let cursor = -1;
   while (!run) {
     for (const candidate of [...session.runs].reverse()) {
-      const first = candidate.fragments.findIndex((f) => f.time >= start - KEYFRAME_MATCH_TOLERANCE_S);
+      if (!runCovers(candidate.fragments, window.anchor)) continue;
+      const first = candidate.fragments.findIndex((f) => f.time >= window.start - KEYFRAME_MATCH_TOLERANCE_S);
       if (first < 0) continue;
-      if (first === 0 && candidate.fragments[0]!.time > start + KEYFRAME_MATCH_TOLERANCE_S) continue;
       run = candidate;
       cursor = first;
       break;
     }
     if (run) break;
     if (gone()) return;
+    // Waiting longer, or starting again, would end the same way.
+    if (session.runs.some((r) => r.unusable && r.startSegment === segment)) throw new VodError(UNUSABLE_ENTRY, 502);
     if (Date.now() > deadline) throw new VodError("segment not ready", 504);
-    if (!runReaching(session, segment)) {
+    if (!runReaching(session, window)) {
       const failed = session.runs.filter((r) => r.failed && r.startSegment === segment).length;
       if (failed >= MAX_FAILED_RUNS_PER_SEGMENT) throw new VodError("source failed to remux", 502);
       startRun(session, segment);
@@ -572,7 +683,7 @@ export async function* vodSegment(id: string, segment: number, gone: () => boole
   for (;;) {
     while (cursor < run.fragments.length) {
       const fragment = run.fragments[cursor]!;
-      if (!isLast && fragment.time >= end - KEYFRAME_MATCH_TOLERANCE_S) return;
+      if (!window.last && fragment.time >= window.end - KEYFRAME_MATCH_TOLERANCE_S) return;
       yield fragment.path;
       cursor++;
     }
@@ -630,7 +741,7 @@ export function vodJanitor(): void {
       removeSession(session, "expired");
       continue;
     }
-    if (idle > RUN_IDLE_MS) for (const run of aliveRuns(session)) stopRun(run, "idle");
+    if (idle > (session.demanded ? RUN_IDLE_MS : PREWARM_IDLE_MS)) for (const run of aliveRuns(session)) stopRun(run, "idle");
   }
   let total = [...sessions.values()].reduce((sum, s) => sum + dirBytes(s.dir), 0);
   const byAge = [...sessions.values()].sort((a, b) => a.lastRequestAt - b.lastRequestAt);

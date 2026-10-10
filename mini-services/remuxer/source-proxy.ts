@@ -20,6 +20,8 @@ export interface ProxySource {
   url: string;
   totalSize: number;
   cached: CachedRange[];
+  /** A smaller window than the default, while set (a session nobody is watching yet). */
+  windowBytes?: number;
 }
 
 const UPSTREAM_TIMEOUT_MS = 20_000;
@@ -157,7 +159,7 @@ export async function serveRange(
         .filter((r) => r.start > offset)
         .reduce((min, r) => Math.min(min, r.start), Number.POSITIVE_INFINITY);
       const upstreamEnd = Math.min(range.end, nextCached - 1);
-      offset = await streamUpstream(res, source.url, offset, upstreamEnd, client, windowBytes);
+      offset = await streamUpstream(res, source, offset, upstreamEnd, client, windowBytes);
     }
     res.end();
   } catch {
@@ -232,7 +234,7 @@ async function copyWindow(
  */
 async function streamUpstream(
   res: ServerResponse,
-  url: string,
+  source: ProxySource,
   start: number,
   end: number,
   client: Client,
@@ -245,9 +247,9 @@ async function streamUpstream(
     failures = 0;
   };
   while (offset <= end && !client.gone) {
-    const last = windowEnd(offset, end, windowBytes);
+    const last = windowEnd(offset, end, Math.min(windowBytes, source.windowBytes ?? windowBytes));
     try {
-      await copyWindow(res, url, offset, last, client, written);
+      await copyWindow(res, source.url, offset, last, client, written);
       if (offset <= last && !client.gone) throw new Error("upstream ended early");
     } catch (err) {
       if (client.gone) break;

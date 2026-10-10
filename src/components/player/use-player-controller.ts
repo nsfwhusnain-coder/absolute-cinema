@@ -22,7 +22,7 @@ import type { PlaybackQualityPreference } from "@/lib/profile-preferences";
 import { lacksWantedAudio, normalizeTrackLanguage, selectAudioTrack } from "@/lib/playback/track-selection";
 import { isHdrLikeRange, videoFrameRange } from "@/lib/playback/dynamic-range";
 import { MediaEngine, type EngineAudioTrack } from "./engine";
-import { createRanker, resolvePlayable, type AudioChoice, type TitleContext } from "./playable";
+import { createRanker, resolvePlayable, startAudio, type AudioChoice, type TitleContext } from "./playable";
 import { usePlayerState } from "./store";
 import { useSleepTimer } from "./use-sleep-timer";
 import { getTitleLanguage, rememberTitleLanguage, titleLanguageKey } from "@/lib/title-language";
@@ -273,8 +273,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       const { title } = optionsRef.current;
       const override = audioOverride.current?.sourceId === source.id ? audioOverride.current.index : undefined;
       // A language picked earlier for this show beats the profile default.
-      const remembered = getTitleLanguage(titleLanguageKey(title.mediaType, title.tmdbId))?.audio;
-      const baseAudio = remembered ? { preference: "preferred" as const, language: remembered } : optionsRef.current.audio;
+      const baseAudio = startAudio(title, optionsRef.current.audio);
       const audio = override === undefined ? baseAudio : { ...baseAudio, index: override };
       try {
         const resolved = await resolvePlayable(source, title, audio, startAt, video, abort.signal);
@@ -302,6 +301,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
         await engine.load(resolved.playable, startAt, {
           startHeight: choice === "auto" ? undefined : choice,
           lockLevel: choice !== "auto",
+          seekPoints: resolved.seekPoints,
         });
         if (abort.signal.aborted) return;
         video.playbackRate = s.rate;
@@ -561,7 +561,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
       const v = video();
       if (!v) return;
       const duration = store.getState().duration || v.duration;
-      const target = Math.max(0, Math.min(time, (duration || time) - 0.5));
+      const wanted = Math.max(0, Math.min(time, (duration || time) - 0.5));
+      const target = engineRef.current?.seekTarget(wanted) ?? wanted;
       v.currentTime = target;
       positionRef.current = target;
       store.getState().set({ currentTime: target });

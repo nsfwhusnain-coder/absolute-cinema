@@ -10,7 +10,7 @@ const LANGUAGE = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/;
 
 /**
  * GET /api/vod/open?type=&id=&sourceId=&ticket=&season=&episode=&startAt=
- *                  &audioPreference=&originalLanguage=&audioLanguage=&dolbyVision=
+ *                  &audioPreference=&originalLanguage=&audioLanguage=&dolbyVision=&prewarm=
  *
  * Opens a seekable video-on-demand remux of an MKV source and returns the
  * playlist URL plus the title's real duration.
@@ -55,6 +55,8 @@ export async function GET(req: NextRequest) {
   if (audioIndex !== undefined && Number.isInteger(audioIndex) && audioIndex >= 0) worker.set("audioIndex", String(audioIndex));
   // The viewer's browser said it decodes Dolby Vision.
   if (params.get("dolbyVision") === "1") worker.set("dolbyVision", "1");
+  // Asked for ahead of Play: made ready, but never at a viewer's expense.
+  if (params.get("prewarm") === "1") worker.set("prewarm", "1");
 
   const res = await fetch(`${REMUXER_URL}/vod/open?${worker}`, { signal: AbortSignal.timeout(OPEN_TIMEOUT_MS) }).catch(
     () => null
@@ -63,6 +65,7 @@ export async function GET(req: NextRequest) {
   const body = (await res.json().catch(() => ({}))) as {
     id?: string;
     durationS?: number;
+    seekPoints?: number[];
     dynamicRange?: string;
     audio?: unknown;
     audioIndex?: number | null;
@@ -76,6 +79,10 @@ export async function GET(req: NextRequest) {
   return NextResponse.json(
     {
       playlistUrl: `/api/vod/${body.id}/index.m3u8`,
+      // The same stream in short slices, for players built on Media Source
+      // Extensions, with the times a jump into it may land on.
+      slicedPlaylistUrl: `/api/vod/${body.id}/slices.m3u8`,
+      seekPoints: body.seekPoints ?? [],
       durationS: body.durationS,
       dynamicRange: body.dynamicRange ?? "SDR",
       audio: body.audio ?? null,

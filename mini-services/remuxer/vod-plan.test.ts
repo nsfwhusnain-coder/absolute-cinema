@@ -3,8 +3,11 @@ import {
   Fmp4StreamSplitter,
   buildVodPlaylist,
   computeSegmentBounds,
+  computeSlicePlan,
   fragmentsForSegment,
+  fragmentsInWindow,
   segmentForTime,
+  sliceWindow,
   type FragmentRecord,
 } from "./vod-plan";
 
@@ -72,6 +75,55 @@ describe("fragmentsForSegment", () => {
     const fragments = [12, 14].map(frag);
     expect(fragmentsForSegment(bounds, 2, fragments, false)).toBeNull();
     expect(fragmentsForSegment(bounds, 2, fragments, true)?.map((f) => f.time)).toEqual([12, 14]);
+  });
+});
+
+describe("slices", () => {
+  // A ten-second keyframe interval, a three-second one, and a short tail.
+  const bounds = [0, 10, 13, 13.6];
+  const plan = computeSlicePlan(bounds, 2);
+  const frag = (time: number): FragmentRecord => ({ time, path: `${time}.m4s`, bytes: 1 });
+  const everyHalfSecond = (from: number, to: number) =>
+    Array.from({ length: Math.round((to - from) / 0.5) }, (_, i) => frag(from + i * 0.5));
+
+  it("cuts each segment into equal slices of about the target, and never across a segment", () => {
+    expect(plan.bounds).toEqual([0, 2, 4, 6, 8, 10, 11.5, 13, 13.6]);
+    expect(plan.segmentOf).toEqual([0, 0, 0, 0, 0, 1, 1, 2]);
+  });
+
+  it("lists slices under their own names and does not call them independent", () => {
+    const text = buildVodPlaylist(plan.bounds, "s", false);
+    expect(text).toContain("#EXTINF:2.000000,\ns0.m4s");
+    expect(text).toContain("#EXTINF:1.500000,\ns6.m4s");
+    expect(text).not.toContain("#EXT-X-INDEPENDENT-SEGMENTS");
+    expect(buildVodPlaylist(bounds)).toContain("#EXT-X-INDEPENDENT-SEGMENTS");
+  });
+
+  it("gives a slice the fragments that start inside it, once the run is past it", () => {
+    const window = sliceWindow(bounds, plan, 1);
+    expect(fragmentsInWindow(window, everyHalfSecond(0, 4), false)).toBeNull();
+    expect(fragmentsInWindow(window, everyHalfSecond(0, 4.5), false)?.map((f) => f.time)).toEqual([2, 2.5, 3, 3.5]);
+  });
+
+  it("serves a slice only from a run that began at its segment's keyframe or before", () => {
+    // A run started at the second segment holds nothing the first one's slices can use.
+    expect(fragmentsInWindow(sliceWindow(bounds, plan, 4), everyHalfSecond(10, 13), false)).toBeNull();
+    // A slice in the middle of a segment needs the run to have begun at that segment's start.
+    expect(fragmentsInWindow(sliceWindow(bounds, plan, 6), everyHalfSecond(10, 13.6), false)?.map((f) => f.time)).toEqual([11.5, 12, 12.5]);
+    expect(fragmentsInWindow(sliceWindow(bounds, plan, 6), everyHalfSecond(11.5, 13.6), false)).toBeNull();
+  });
+
+  it("returns an empty slice rather than waiting when no fragment starts in it", () => {
+    // One fragment covers 2 to 4.2 (a still picture): nothing starts in the second slice.
+    const fragments = [0, 0.5, 1, 1.5, 4.2, 4.7].map(frag);
+    expect(fragmentsInWindow(sliceWindow(bounds, plan, 1), fragments, false)).toEqual([]);
+  });
+
+  it("ends the last slice when the run does", () => {
+    const window = sliceWindow(bounds, plan, 7);
+    const fragments = [13, 13.5].map(frag);
+    expect(fragmentsInWindow(window, fragments, false)).toBeNull();
+    expect(fragmentsInWindow(window, fragments, true)?.map((f) => f.time)).toEqual([13, 13.5]);
   });
 });
 

@@ -12,7 +12,7 @@ import { pickTitleLogoUrl, backdropSrcSet, type TmdbImages } from "@/lib/tmdb";
 import { transitionContent } from "@/lib/motion";
 import { useNavigate } from "@/hooks/use-navigate";
 import { useAmbientColor } from "@/hooks/use-ambient-color";
-import { usePrefetchPlayback } from "@/hooks/use-playback";
+import { usePrefetchPlayback, usePrewarmStart } from "@/hooks/use-playback";
 import { Play, ArrowLeft, Clock, Calendar, PenLine, Wallet, TrendingUp, Globe2, SearchX } from "lucide-react";
 import { MessageCard } from "@/components/message-card";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,7 @@ import { EpisodeStrip } from "@/components/episode-strip";
 import { GenrePills } from "@/components/genre-pills";
 import { BrowseError } from "@/components/empty-states";
 import { yearOf } from "@/lib/utils";
-import { resumeTvEpisode } from "@/lib/continue-watching";
+import { resumeSeconds, resumeTvEpisode } from "@/lib/continue-watching";
 
 const fadeUp = {
   hidden: { opacity: 0, y: 18 },
@@ -44,6 +44,9 @@ interface Props {
   id: number;
   initialData?: Record<string, any>;
 }
+
+/** How long a title's page has to stay open before its start is made ready. */
+const PREWARM_AFTER_MS = 700;
 
 // Both limits: older engines (Chromium 76) throw when the maximum is below the currency's default minimum of 2.
 const CURRENCY_FORMAT = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: 0 });
@@ -228,6 +231,8 @@ interface ProgressRow {
   tmdbId: number;
   mediaType: string;
   progress: number;
+  position: number;
+  duration: number;
   season?: number | null;
   episode?: number | null;
   updatedAt?: string;
@@ -326,6 +331,30 @@ function DetailContent({
     mediaType,
     season: mediaType === "tv" ? selectedSeason : undefined,
     episode: mediaType === "tv" ? selectedEpisode : undefined,
+  });
+
+  // Someone who stays on a title's page is likely to press Play: have it
+  // ready by then, at the point they would resume from.
+  const [stayed, setStayed] = useState(false);
+  useEffect(() => {
+    setStayed(false);
+    const timer = setTimeout(() => setStayed(true), PREWARM_AFTER_MS);
+    return () => clearTimeout(timer);
+  }, [mediaType, id, selectedSeason, selectedEpisode]);
+  const savedRow = progressList?.find(
+    (row) =>
+      Number(row.tmdbId) === id &&
+      row.mediaType === mediaType &&
+      (mediaType !== "tv" || (Number(row.season) === selectedSeason && Number(row.episode) === selectedEpisode))
+  );
+  usePrewarmStart({
+    tmdbId: id,
+    mediaType,
+    season: mediaType === "tv" ? selectedSeason : undefined,
+    episode: mediaType === "tv" ? selectedEpisode : undefined,
+    startAt: resumeSeconds(savedRow),
+    originalLanguage: data?.original_language ?? null,
+    enabled: stayed,
   });
 
   const releaseLabel = date

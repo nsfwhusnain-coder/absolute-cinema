@@ -139,8 +139,8 @@ describe("Matroska index", () => {
     // The head and the tail: no third request for the Cues.
     expect(requests.length).toBe(2);
     expect(requests).toContain(`0-${file.length - 1}`);
-    const cached = index!.fetched[1]!;
-    expect(cached.start + cached.bytes.length).toBe(file.length);
+    // The tail itself is kept: ffmpeg reads the end of the file on every start.
+    expect(index!.fetched.some((range) => range.start + range.bytes.length === file.length)).toBe(true);
   });
 
   it("asks for the Cues by offset when the tail read fails", async () => {

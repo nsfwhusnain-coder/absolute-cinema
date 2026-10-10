@@ -5,11 +5,13 @@
  * Internal only (127.0.0.1:3040); the Next.js app authenticates viewers and
  * proxies these routes.
  *
- *   GET /vod/open?u=<url>&audioPreference=&originalLanguage=&audioLanguage=&audioIndex=&startAt=&dolbyVision=
+ *   GET /vod/open?u=<url>&audioPreference=&originalLanguage=&audioLanguage=&audioIndex=&startAt=&dolbyVision=&prewarm=
  *        → { id, durationS, segments, videoCodecId, dynamicRange, audio, audioIndex, audioTracks, subtitles }
- *   GET /vod/<id>/index.m3u8   complete VOD playlist
+ *   GET /vod/<id>/index.m3u8   complete VOD playlist, one entry per segment (keyframe to keyframe)
+ *   GET /vod/<id>/slices.m3u8  the same timeline in slices of about two seconds, for MSE players
  *   GET /vod/<id>/init.mp4     initialisation segment
  *   GET /vod/<id>/<n>.m4s      media segment n (produced on demand)
+ *   GET /vod/<id>/s<n>.m4s     slice n
  *   GET /vod/<id>/sub-<k>.json text subtitle track k: cues produced so far
  *   GET /health
  */
@@ -30,6 +32,7 @@ import {
   vodSubtitleCues,
   type VodAudioRequest,
   vodSegment,
+  vodSlice,
   vodSource,
   vodStats,
 } from "./vod";
@@ -81,7 +84,8 @@ const server = createServer(async (req, res) => {
       if (!/^https?:\/\//.test(input)) return send(res, 400, JSON.stringify({ error: "bad url" }), "application/json");
       const startAt = Math.min(MAX_START_AT_S, Math.max(0, Number(url.searchParams.get("startAt")) || 0));
       const viewer = { decodesDolbyVision: url.searchParams.get("dolbyVision") === "1" };
-      const info = await openVodSession(CACHE_DIR, input, parseAudio(url), startAt, viewer);
+      const prewarm = url.searchParams.get("prewarm") === "1";
+      const info = await openVodSession(CACHE_DIR, input, parseAudio(url), startAt, viewer, prewarm);
       return send(res, 200, JSON.stringify(info), "application/json");
     }
     const src = url.pathname.match(/^\/src\/([a-f0-9]{24})$/);
@@ -92,10 +96,11 @@ const server = createServer(async (req, res) => {
     }
     const subs = url.pathname.match(/^\/vod\/([a-f0-9]{24})\/sub-(\d{1,2})\.json$/);
     if (subs) return send(res, 200, JSON.stringify({ cues: vodSubtitleCues(subs[1]!, Number(subs[2])) }), "application/json");
-    const match = url.pathname.match(/^\/vod\/([a-f0-9]+)\/(index\.m3u8|init\.mp4|(\d+)\.m4s)$/);
+    const match = url.pathname.match(/^\/vod\/([a-f0-9]+)\/(index\.m3u8|slices\.m3u8|init\.mp4|(s?)(\d+)\.m4s)$/);
     if (!match || !SESSION_ID.test(match[1]!)) return send(res, 404, "not found", "text/plain");
-    const [, id, file, segment] = match;
+    const [, id, file, sliced, number] = match;
     if (file === "index.m3u8") return send(res, 200, vodPlaylist(id!), "application/vnd.apple.mpegurl");
+    if (file === "slices.m3u8") return send(res, 200, vodPlaylist(id!, true), "application/vnd.apple.mpegurl");
     if (file === "init.mp4") return send(res, 200, await vodInit(id!), "video/mp4");
     // Streamed: each keyframe group is sent as soon as it exists, so the
     // player can start decoding before the whole segment has been produced.
@@ -107,7 +112,8 @@ const server = createServer(async (req, res) => {
       resume();
     });
     try {
-      for await (const path of vodSegment(id!, Number(segment), () => gone)) {
+      const fragments = sliced ? vodSlice(id!, Number(number), () => gone) : vodSegment(id!, Number(number), () => gone);
+      for await (const path of fragments) {
         if (gone) break;
         if (!started) {
           res.writeHead(200, { "Content-Type": "video/mp4", "Cache-Control": "no-store" });

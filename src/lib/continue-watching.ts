@@ -62,3 +62,16 @@ export function resumeTvEpisode(rows: ResumeRow[] | undefined, tmdbId: number): 
   const best = candidates[0];
   return best ? { season: Number(best.season), episode: Number(best.episode) } : null;
 }
+
+/** Saved positions this close to either end are a title not really begun, or finished. */
+const RESUME_MIN_PROGRESS = 0.02;
+const RESUME_MAX_PROGRESS = 0.95;
+const RESUME_MIN_SECONDS = 5;
+
+/** Where a saved row says to pick up from, in seconds; 0 to start from the beginning. */
+export function resumeSeconds(row: { progress: number; position: number; duration: number } | undefined): number {
+  if (!row || !(row.progress > RESUME_MIN_PROGRESS && row.progress < RESUME_MAX_PROGRESS && row.duration > 0)) return 0;
+  const position = Number(row.position) || 0;
+  const seconds = position > RESUME_MIN_SECONDS ? position : (Number(row.progress) || 0) * (Number(row.duration) || 0);
+  return seconds > RESUME_MIN_SECONDS ? seconds : 0;
+}

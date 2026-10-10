@@ -5,7 +5,7 @@ import { REMUXER_URL } from "@/lib/playback/remuxer";
 export const dynamic = "force-dynamic";
 
 const SESSION_ID = /^[a-f0-9]{24}$/;
-const FILE = /^(index\.m3u8|init\.mp4|\d{1,6}\.m4s|sub-\d{1,2}\.json)$/;
+const FILE = /^(index\.m3u8|slices\.m3u8|init\.mp4|s?\d{1,6}\.m4s|sub-\d{1,2}\.json)$/;
 
 /** Authenticated pass-through of remuxer playlists, segments and subtitle cues (streamed, never buffered). */
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string; file: string }> }) {

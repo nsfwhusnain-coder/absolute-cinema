@@ -13,7 +13,7 @@ import { useMounted } from "@/hooks/use-mounted";
 import { Player } from "@/components/player/Player";
 import { AlertCircle, ExternalLink, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { usePrefetchPlayback, useStreams } from "@/hooks/use-playback";
+import { usePrefetchPlayback, usePrewarmStart, useStreams } from "@/hooks/use-playback";
 import { NoProvider } from "@/components/empty-states";
 import { toast } from "sonner";
 import { useSession } from "next-auth/react";
@@ -27,11 +27,13 @@ import { LoaderBackdrop, NEUTRAL_PALETTE } from "@/components/loader/loader-back
 import type { LoaderPalette } from "@/lib/loader/palette";
 import { resolveNextEpisode, type AiredEpisode, type SeasonMeta } from "@/lib/playback/next-episode";
 import { tvSeasonQuery } from "@/lib/tv-season-query";
-import { resumeTvEpisode } from "@/lib/continue-watching";
+import { resumeSeconds, resumeTvEpisode } from "@/lib/continue-watching";
 import { useShowProgressQuery } from "@/hooks/use-progress";
 
 /** Cancelable countdown once an episode has really ended, before the next one starts. */
 const NEXT_EPISODE_COUNTDOWN_S = 6;
+/** With this much of an episode left, the next one is made ready to start. */
+const NEXT_EPISODE_READY_S = 150;
 /** After this many episodes start on their own with no interaction, ask "Still watching?". */
 const STILL_WATCHING_AFTER = 3;
 
@@ -260,12 +262,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
   const sessionPositions = useRef(new Map<string, { position: number; duration: number }>());
   const savedTime = useMemo(() => {
     const key = mediaType === "tv" ? `${tvSeason}:${tvEpisode}` : "0:0";
-    const fromRow = (row: { progress: number; position: number; duration: number } | undefined) => {
-      if (!row || !(row.progress > 0.02 && row.progress < 0.95 && row.duration > 0)) return 0;
-      const fromPos = Number(row.position) || 0;
-      const t = fromPos > 5 ? fromPos : (Number(row.progress) || 0) * (Number(row.duration) || 0);
-      return t > 5 ? t : 0;
-    };
+    const fromRow = resumeSeconds;
     const local = sessionPositions.current.get(`${id}:${key}`);
     if (local) return fromRow({ ...local, progress: local.position / local.duration });
     const saved = mediaType === "tv" ? showProgress.map.get(key) : undefined;
@@ -561,6 +558,23 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
     season: nextEpisodeTarget?.season,
     episode: nextEpisodeTarget?.episode,
     enabled: mounted && tvParamsInUrl && mediaType === "tv" && nextEpisodeTarget != null,
+  });
+
+  // As this episode nears its end, have the next one resolved in full and its
+  // first seconds made, so it starts as the credits are skipped.
+  const nearEnd = usePlayerState(
+    (state) => state.duration > 0 && state.currentTime > 0 && state.duration - state.currentTime < NEXT_EPISODE_READY_S
+  );
+  usePrewarmStart({
+    tmdbId: id,
+    mediaType: "tv",
+    season: nextEpisodeTarget?.season,
+    episode: nextEpisodeTarget?.episode,
+    startAt: resumeSeconds(
+      nextEpisodeTarget ? showProgress.map.get(`${nextEpisodeTarget.season}:${nextEpisodeTarget.episode}`) : undefined
+    ),
+    originalLanguage: meta?.original_language ?? null,
+    enabled: nearEnd && mounted && tvParamsInUrl && mediaType === "tv" && nextEpisodeTarget != null,
   });
 
   /**

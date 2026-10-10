@@ -7,6 +7,7 @@ import type { Ranker } from "@/lib/playback/orchestrator";
 import type { Playable } from "./engine";
 import type { RemuxAudioTrack, StreamSubtitleTrack } from "./store";
 import { timeoutSignal } from "@/lib/abort";
+import { getTitleLanguage, titleLanguageKey } from "@/lib/title-language";
 
 export interface TitleContext {
   tmdbId: number;
@@ -114,6 +115,8 @@ export interface ResolvedPlayable {
   /** SDR, PQ (HDR10), HLG or DV (Dolby Vision) when the server read it from the file. */
   dynamicRange?: string;
   remux: boolean;
+  /** Times a jump may land on when the stream is played in slices (see seek-points.ts). */
+  seekPoints?: number[];
   /** Subtitle and audio tracks inside a remuxed file. */
   remuxTracks?: {
     subtitleBase: string;
@@ -124,6 +127,38 @@ export interface ResolvedPlayable {
 }
 
 const VOD_OPEN_TIMEOUT_MS = 15_000;
+
+/**
+ * The audio a title starts with: a language the viewer picked for this show
+ * before, else the profile's choice.
+ */
+export function startAudio(title: TitleContext, profile: AudioChoice): AudioChoice {
+  const remembered = getTitleLanguage(titleLanguageKey(title.mediaType, title.tmdbId))?.audio;
+  return remembered ? { preference: "preferred", language: remembered } : profile;
+}
+
+/**
+ * The /api/vod/open query for a source. The player and the prewarm before
+ * Play both build it here: the server keys a session on these values, so the
+ * two must agree to the letter or the prewarm warms a session nobody uses.
+ */
+export function remuxOpenQuery(source: PlaybackSource, title: TitleContext, audio: AudioChoice, startAt: number): URLSearchParams {
+  const params = new URLSearchParams({
+    type: title.mediaType,
+    id: String(title.tmdbId),
+    sourceId: source.id,
+    startAt: String(Math.floor(startAt)),
+    audioPreference: audio.preference,
+    audioLanguage: audio.language,
+  });
+  if (audio.index !== undefined) params.set("audioIndex", String(audio.index));
+  if (source.remuxTicket) params.set("ticket", source.remuxTicket);
+  if (title.season != null) params.set("season", String(title.season));
+  if (title.episode != null) params.set("episode", String(title.episode));
+  if (title.originalLanguage) params.set("originalLanguage", title.originalLanguage);
+  if (supportsDolbyVision()) params.set("dolbyVision", "1");
+  return params;
+}
 
 /** Turns a source into something the engine can load (opening a remux session when needed). */
 export async function resolvePlayable(
@@ -136,24 +171,13 @@ export async function resolvePlayable(
 ): Promise<ResolvedPlayable> {
   const sameOrigin = source.url.startsWith("/");
   if (sourceDelivery(source) === "remux") {
-    const params = new URLSearchParams({
-      type: title.mediaType,
-      id: String(title.tmdbId),
-      sourceId: source.id,
-      startAt: String(Math.floor(startAt)),
-      audioPreference: audio.preference,
-      audioLanguage: audio.language,
-    });
-    if (audio.index !== undefined) params.set("audioIndex", String(audio.index));
-    if (source.remuxTicket) params.set("ticket", source.remuxTicket);
-    if (title.season != null) params.set("season", String(title.season));
-    if (title.episode != null) params.set("episode", String(title.episode));
-    if (title.originalLanguage) params.set("originalLanguage", title.originalLanguage);
-    if (supportsDolbyVision()) params.set("dolbyVision", "1");
+    const params = remuxOpenQuery(source, title, audio, startAt);
     const timeout = timeoutSignal(VOD_OPEN_TIMEOUT_MS, signal);
     const res = await fetch(`/api/vod/open?${params}`, { signal: timeout.signal }).finally(timeout.done);
     const body = (await res.json().catch(() => ({}))) as {
       playlistUrl?: string;
+      slicedPlaylistUrl?: string;
+      seekPoints?: number[];
       durationS?: number;
       dynamicRange?: string;
       audioIndex?: number | null;
@@ -164,7 +188,14 @@ export async function resolvePlayable(
     };
     if (!res.ok || !body.playlistUrl) throw new Error(body.error || `remux open failed (${res.status})`);
     return {
-      playable: { kind: "hls", url: body.playlistUrl, withCredentials: true, nativeHls: preferNativeHls(video, source) },
+      playable: {
+        kind: "hls",
+        url: body.playlistUrl,
+        ...(body.slicedPlaylistUrl && body.seekPoints?.length ? { slicedUrl: body.slicedPlaylistUrl } : {}),
+        withCredentials: true,
+        nativeHls: preferNativeHls(video, source),
+      },
+      seekPoints: body.seekPoints,
       durationS: body.durationS,
       dynamicRange: body.dynamicRange,
       remux: true,
