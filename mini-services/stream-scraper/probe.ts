@@ -6,6 +6,7 @@
 import { isImplausibleEmbedDuration } from "./embed-duration";
 import { isPoisonStreamUrl } from "./poison-url";
 import { safeStreamTarget, type StreamPathKind } from "./safe-url-summary";
+import { plainClientHeaders, wantsPlainClient } from "../../src/lib/playback/cdn-request-policy";
 import { hlsMediaDurationSeconds } from "../../src/lib/playback/media-duration";
 import type { MediaType } from "../../src/lib/playback/types";
 
@@ -109,6 +110,7 @@ function refererForCdn(targetUrl: string, referer: string): string {
 }
 
 function buildHeaders(entry: ProbeableEntry, targetUrl: string): Record<string, string> {
+  if (wantsPlainClient(targetUrl)) return plainClientHeaders();
   const effectiveReferer = refererForCdn(targetUrl, entry.session.referer || "");
   let origin = entry.session.origin || effectiveReferer;
   try {

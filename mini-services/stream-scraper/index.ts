@@ -10,6 +10,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { URL } from "url";
 import { resolveVidlinkApi } from "./vidlink-api";
 import { curlGet } from "./curl-http";
+import { plainClientHeaders, wantsPlainClient } from "../../src/lib/playback/cdn-request-policy";
 import { resolveVixsrc } from "./providers/vixsrc";
 import { resolveNotorrent } from "./providers/notorrent";
 import { lookupTmdb } from "./providers/tmdb-lookup";
@@ -1212,14 +1213,16 @@ async function verifySourceEntry(entry: SourceEntry): Promise<HlsVerifyResult> {
       return plain(mpdRes.ok && mpdRes.text.includes("<MPD"));
     }
     // Sniff: an m3u8 without the extension, or a real progressive media body.
-    const headers: Record<string, string> = {
-      Referer: refererForCdn(entry.url, referer),
-      Origin: origin,
-      "User-Agent": ua,
-      Range: "bytes=0-4095",
-      Accept: "*/*",
-    };
-    if (cookies) headers.Cookie = cookies;
+    const headers: Record<string, string> = wantsPlainClient(entry.url)
+      ? plainClientHeaders("bytes=0-4095")
+      : {
+          Referer: refererForCdn(entry.url, referer),
+          Origin: origin,
+          "User-Agent": ua,
+          Range: "bytes=0-4095",
+          Accept: "*/*",
+          ...(cookies ? { Cookie: cookies } : {}),
+        };
     const res = await curlGet(entry.url, { headers, timeoutSec: VERIFY_TIMEOUT_SEC });
     if (!res.ok || res.body.byteLength < 200) return plain(false);
     const head = res.text?.trimStart() || "";

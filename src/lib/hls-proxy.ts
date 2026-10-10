@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import type { HlsSession } from "@/lib/hls-session";
 import { SegmentReadAhead, type ReadAheadBody } from "@/lib/hls-readahead";
+import { plainClientHeaders, wantsPlainClient } from "@/lib/playback/cdn-request-policy";
 import {
   buildDashTemplateProxyUrl,
   dashRepresentationIdForProxy,
@@ -1165,6 +1166,7 @@ function buildUpstreamHeaders(
   upstream: string,
   rangeHeader: string | null
 ): Record<string, string> {
+  if (wantsPlainClient(upstream)) return plainClientHeaders(rangeHeader);
   const headers: Record<string, string> = {
     Accept: "*/*",
     "Accept-Language": "en-US,en;q=0.9",

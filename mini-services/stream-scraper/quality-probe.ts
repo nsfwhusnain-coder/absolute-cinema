@@ -9,6 +9,8 @@
  * sources keep maxHeight 0 (unknown, not bad).
  */
 
+import { plainClientHeaders, wantsPlainClient } from "../../src/lib/playback/cdn-request-policy";
+
 export type StreamKind = "hls" | "mp4" | "dash";
 
 /**
@@ -144,6 +146,7 @@ function refererForCdn(targetUrl: string, referer: string): string {
 }
 
 function buildHeaders(session: QualitySession, targetUrl: string): Record<string, string> {
+  if (wantsPlainClient(targetUrl)) return plainClientHeaders();
   const effectiveReferer = refererForCdn(targetUrl, session.referer || "");
   let origin = session.origin || effectiveReferer;
   try {
