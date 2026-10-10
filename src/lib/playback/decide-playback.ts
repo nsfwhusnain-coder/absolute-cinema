@@ -7,6 +7,7 @@ import {
   sourceAudioLanguageRank,
 } from "./source-facts";
 import { isSourcePlayableHere, sourceDelivery, normalizedBitrate } from "./source-quality";
+import { supportsHev1Files } from "./decode-capability";
 import { isNeverAutoDefaultUrl } from "./poison-url";
 import { isMoviePackRelease } from "./debrid/torrentio";
 import { filterHighQualitySources } from "./quality-floor";
@@ -113,6 +114,22 @@ function isEnglishRemuxUhd(
   );
 }
 
+const STARTS_AS_IS = 2;
+const STARTS_REMUXED = 1;
+const MAY_NOT_START = 0;
+
+/**
+ * How sure a source is to start: as it is, once remuxed, or perhaps not at
+ * all. The last is an HEVC MP4 on a browser that refuses `hev1` files
+ * (Safari): the file may be tagged `hev1` or `hvc1` and nothing says which
+ * before it is opened, where a remuxed file is always written as `hvc1`.
+ */
+function startConfidence(source: PlaybackSource): number {
+  if (sourceDelivery(source) !== "direct") return STARTS_REMUXED;
+  const gamble = source.type === "mp4" && source.codec === "hevc" && !supportsHev1Files();
+  return gamble ? MAY_NOT_START : STARTS_AS_IS;
+}
+
 function heightTier(height: number): number {
   if (height >= STARTUP_UHD_HEIGHT) return 4;
   if (height >= HD_FLOOR_HEIGHT) return 3;
@@ -156,13 +173,18 @@ function compareForAutoStart(
   if (aTier !== bTier) return bTier - aTier;
   if (aTier !== 1 && aH !== bH) return bH - aH;
 
-  const aDirect = sourceDelivery(a) === "direct" ? 1 : 0;
-  const bDirect = sourceDelivery(b) === "direct" ? 1 : 0;
-  if (aDirect !== bDirect) return bDirect - aDirect;
-
+  // A debrid file before a web stream of the same height, even one that has to
+  // be remuxed first: the remux is a second or two of startup on a CDN that
+  // holds its speed, where web streams are the ones that stall mid-film. With
+  // direct-first here, devices that needed the remux started on a web stream
+  // while the debrid file sat unused.
   const aDebrid = a.origin === "debrid" ? 1 : 0;
   const bDebrid = b.origin === "debrid" ? 1 : 0;
   if (aDebrid !== bDebrid) return bDebrid - aDebrid;
+
+  const aStart = startConfidence(a);
+  const bStart = startConfidence(b);
+  if (aStart !== bStart) return bStart - aStart;
 
   const rate = normalizedBitrate(b) - normalizedBitrate(a);
   if (rate !== 0) return rate;

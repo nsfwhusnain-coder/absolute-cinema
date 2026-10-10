@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { decidePlayback } from "./decide-playback";
+import { resetDecodeCapabilityCache } from "./decode-capability";
 import type { PlaybackSource } from "./types";
 
 function src(overrides: Partial<PlaybackSource> & { id: string }): PlaybackSource {
@@ -215,11 +216,74 @@ describe("decidePlayback contract", () => {
     expect(decision.deferredFourK).toBeNull();
   });
 
+  it("starts a debrid file that needs remuxing over a web stream of the same height", () => {
+    const debridMkv = src({
+      id: "debrid-mkv",
+      provider: "Debrid",
+      origin: "debrid",
+      label: "1080p • Debrid",
+      audioLanguage: "en",
+      titleMatch: "exact",
+      container: "mkv",
+      compat: "native",
+      maxHeight: 1080,
+    });
+    const decision = decidePlayback([luna, debridMkv], { remuxAvailable: true });
+    expect(decision.immediate?.id).toBe("debrid-mkv");
+  });
+
   it("drops failed ids before ranking", () => {
     const decision = decidePlayback([kronos, luna], {
       fourKStartup: "fast",
       failedIds: ["kronos"],
     });
     expect(decision.immediate?.id).toBe("luna");
+  });
+});
+
+describe("HEVC in a plain MP4", () => {
+  const scope = globalThis as { window?: unknown; document?: unknown };
+
+  /** A browser that decodes HEVC, and takes the `hev1` tag in a file or does not. */
+  function browser(playsHev1Files: boolean): void {
+    scope.window = {};
+    scope.document = {
+      documentElement: { getAttribute: () => null },
+      createElement: () => ({
+        canPlayType: (type: string) => (type.includes("hvc1") || (playsHev1Files && type.includes("hev1")) ? "probably" : ""),
+      }),
+    };
+    resetDecodeCapabilityCache();
+  }
+
+  afterEach(() => {
+    delete scope.window;
+    delete scope.document;
+    resetDecodeCapabilityCache();
+  });
+
+  const hevc = (id: string, container: "mp4" | "mkv") =>
+    src({
+      id,
+      provider: "Debrid",
+      origin: "debrid",
+      codec: "hevc",
+      container,
+      compat: "safari",
+      audioLanguage: "en",
+      titleMatch: "exact",
+      maxHeight: 1080,
+    });
+
+  it("comes after a remuxed file where the browser refuses hev1 files", () => {
+    browser(false);
+    const decision = decidePlayback([hevc("a-mp4", "mp4"), hevc("b-mkv", "mkv")], { remuxAvailable: true });
+    expect(decision.immediate?.id).toBe("b-mkv");
+  });
+
+  it("still starts first where hev1 files play", () => {
+    browser(true);
+    const decision = decidePlayback([hevc("a-mp4", "mp4"), hevc("b-mkv", "mkv")], { remuxAvailable: true });
+    expect(decision.immediate?.id).toBe("a-mp4");
   });
 });

@@ -30,6 +30,12 @@ export const AV1_PROBE_TYPES: readonly string[] = [
   'video/mp4; codecs="av01"',
 ];
 
+/** HEVC under the `hev1` sample entry, as it appears in a plain MP4 file. */
+export const HEV1_FILE_PROBE_TYPES: readonly string[] = [
+  'video/mp4; codecs="hev1.1.6.L93.B0"',
+  'video/mp4; codecs="hev1.2.4.L120.B0"',
+];
+
 /** Dolby Vision profile 5 (the one with no HDR10 layer to fall back on), in both sample-entry spellings. */
 export const DOLBY_VISION_PROBE_TYPES: readonly string[] = [
   'video/mp4; codecs="dvh1.05.06"',
@@ -137,6 +143,20 @@ export function supportsAv1(): boolean {
   return av1Support().supported;
 }
 
+let hev1FileCache: boolean | null = null;
+
+/**
+ * Whether a plain MP4 whose HEVC is tagged `hev1` plays here. Chromium takes
+ * either tag; Apple's player takes only `hvc1`, and half the HEVC MP4s in
+ * circulation are `hev1`. No opinion (true) without a DOM, and on TV panels
+ * whose codec probes answer nothing at all.
+ */
+export function supportsHev1Files(): boolean {
+  if (typeof document === "undefined" || isLivingRoomHevcTrust()) return true;
+  if (hev1FileCache === null) hev1FileCache = elementAccepts(HEV1_FILE_PROBE_TYPES);
+  return hev1FileCache;
+}
+
 /** True where the browser decodes Dolby Vision itself (Safari on Apple screens that support it). */
 export function supportsDolbyVision(): boolean {
   return probeDecodeSync(DOLBY_VISION_PROBE_TYPES).supported;
@@ -204,4 +224,5 @@ export function hevcNeedsNativePath(): boolean {
 export function resetDecodeCapabilityCache(): void {
   hevcCache.value = null;
   av1Cache.value = null;
+  hev1FileCache = null;
 }
