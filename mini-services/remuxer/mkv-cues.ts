@@ -372,8 +372,13 @@ export function parseCueTimes(
 
 export type RangeFetcher = (start: number, endInclusive: number) => Promise<Uint8Array>;
 
+/** A fetcher that also reports the file's size as soon as the first response says it. */
+export type SizedRangeFetcher = RangeFetcher & { whenSized?: Promise<number> };
+
 const HEAD_BYTES = 256 * 1024;
 const CUES_GUESS_BYTES = 1024 * 1024;
+/** How much of the file's end is read alongside its head, on the guess that it holds the Cues. */
+const TAIL_GUESS_BYTES = 384 * 1024;
 /** A 3-hour 4K film's Cues are ~200-400 KB; refuse anything absurd. */
 const MAX_CUES_BYTES = 16 * 1024 * 1024;
 
@@ -390,12 +395,46 @@ export interface KeyframeIndex {
   fetched: Array<{ start: number; bytes: Uint8Array }>;
 }
 
+interface Tail {
+  start: number;
+  bytes: Promise<Uint8Array | null>;
+}
+
+/**
+ * Starts reading the end of the file the moment its size is known.
+ *
+ * The Cues close nearly every file, but where exactly is written in the head.
+ * A debrid CDN takes about two seconds to deliver any range, however small,
+ * so waiting for the head before asking for the Cues cost every first play
+ * that long. The size arrives with the head's response headers, well before
+ * its body, and the two downloads then overlap.
+ */
+function readTail(fetchRange: SizedRangeFetcher): Promise<Tail | null> | null {
+  if (!fetchRange.whenSized) return null;
+  return fetchRange.whenSized.then(
+    (total) => {
+      const start = Math.max(0, total - TAIL_GUESS_BYTES);
+      return { start, bytes: fetchRange(start, total - 1).catch(() => null) };
+    },
+    () => null
+  );
+}
+
+/** The bytes from `cuesOffset` to the end of the file, when the tail read covers them. */
+async function cuesFromTail(pending: Promise<Tail | null> | null, cuesOffset: number): Promise<Uint8Array | null> {
+  const tail = await pending;
+  if (!tail || cuesOffset < tail.start) return null;
+  const bytes = await tail.bytes;
+  return bytes && cuesOffset - tail.start < bytes.length ? bytes.subarray(cuesOffset - tail.start) : null;
+}
+
 /**
  * Reads the keyframe index of a remote MKV through range requests.
  * Returns null when the file is not Matroska or carries no usable Cues.
  */
-export async function readMkvKeyframes(fetchRange: RangeFetcher): Promise<KeyframeIndex | null> {
+export async function readMkvKeyframes(fetchRange: SizedRangeFetcher): Promise<KeyframeIndex | null> {
   const fetched: Array<{ start: number; bytes: Uint8Array }> = [];
+  const tail = readTail(fetchRange);
   const head = await fetchRange(0, HEAD_BYTES - 1);
   fetched.push({ start: 0, bytes: head });
   const layout = parseSegmentLayout(head);
@@ -404,7 +443,7 @@ export async function readMkvKeyframes(fetchRange: RangeFetcher): Promise<Keyfra
   }
   // One speculative request usually holds the whole Cues element; a second
   // is made only when it is larger than the guess.
-  let cues = await fetchRange(layout.cuesOffset, layout.cuesOffset + CUES_GUESS_BYTES - 1);
+  let cues = (await cuesFromTail(tail, layout.cuesOffset)) ?? (await fetchRange(layout.cuesOffset, layout.cuesOffset + CUES_GUESS_BYTES - 1));
   const cuesEl = readElementHeader(cues, 0);
   if (!cuesEl || cuesEl.id !== CUES_ID || cuesEl.size === UNKNOWN_SIZE || cuesEl.size > MAX_CUES_BYTES) {
     return null;
@@ -434,8 +473,10 @@ export async function readMkvKeyframes(fetchRange: RangeFetcher): Promise<Keyfra
  * response's Content-Range clamps later requests: some CDNs answer a range
  * that runs past end-of-file with a response Bun's fetch rejects.
  */
-export function httpRangeFetcher(url: string, timeoutMs: number): RangeFetcher & { size(): number | null } {
+export function httpRangeFetcher(url: string, timeoutMs: number): SizedRangeFetcher & { size(): number | null } {
   let totalSize: number | null = null;
+  let sized: (total: number) => void = () => {};
+  const whenSized = new Promise<number>((resolve) => (sized = resolve));
   const fetcher = async (start: number, endInclusive: number) => {
     const end = totalSize !== null ? Math.min(endInclusive, totalSize - 1) : endInclusive;
     const res = await fetch(url, {
@@ -448,8 +489,11 @@ export function httpRangeFetcher(url: string, timeoutMs: number): RangeFetcher &
       throw new Error(`range not supported (HTTP ${res.status})`);
     }
     const total = Number(res.headers.get("content-range")?.split("/")[1]);
-    if (Number.isFinite(total) && total > 0) totalSize = total;
+    if (Number.isFinite(total) && total > 0) {
+      totalSize = total;
+      sized(total);
+    }
     return new Uint8Array(await res.arrayBuffer());
   };
-  return Object.assign(fetcher, { size: () => totalSize });
+  return Object.assign(fetcher, { size: () => totalSize, whenSized });
 }

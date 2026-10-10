@@ -125,6 +125,38 @@ describe("Matroska index", () => {
     expect(requests.length).toBe(2);
   });
 
+  it("reads the end of the file alongside the head once the size is known, and takes the Cues from it", async () => {
+    const requests: string[] = [];
+    const fetcher = Object.assign(
+      async (start: number, end: number) => {
+        requests.push(`${start}-${end}`);
+        return file.subarray(start, Math.min(end + 1, file.length));
+      },
+      { whenSized: Promise.resolve(file.length) }
+    );
+    const index = await readMkvKeyframes(fetcher);
+    expect(index?.keyframes).toEqual([0, 3.42, 6.84, 10.302]);
+    // The head and the tail: no third request for the Cues.
+    expect(requests.length).toBe(2);
+    expect(requests).toContain(`0-${file.length - 1}`);
+    const cached = index!.fetched[1]!;
+    expect(cached.start + cached.bytes.length).toBe(file.length);
+  });
+
+  it("asks for the Cues by offset when the tail read fails", async () => {
+    let calls = 0;
+    const fetcher = Object.assign(
+      async (start: number, end: number) => {
+        calls++;
+        if (end === file.length - 1) throw new Error("tail refused");
+        return file.subarray(start, Math.min(end + 1, file.length));
+      },
+      { whenSized: Promise.resolve(file.length) }
+    );
+    expect((await readMkvKeyframes(fetcher))?.keyframes).toEqual([0, 3.42, 6.84, 10.302]);
+    expect(calls).toBe(3);
+  });
+
   it("reads a Dolby Vision configuration from the video track's block addition mapping", () => {
     // Profile 5, level 6, no compatible base layer, as a "dvcC" mapping.
     const record = [1, 0, 0x0a, 0x35, 0x00, ...new Array<number>(19).fill(0)];
