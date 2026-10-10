@@ -8,6 +8,7 @@ import {
   recordSourceFeedback,
 } from "@/lib/playback/source-memory-store";
 import { RateLimiter } from "@/lib/rate-limit";
+import { isViewerSideFailure } from "@/lib/playback/failure-kind";
 
 const FEEDBACK_LIMIT = 180;
 const FEEDBACK_WINDOW_MS = 5 * 60 * 1000;
@@ -111,7 +112,10 @@ export async function POST(req: NextRequest) {
       feedbackEvent: feedback.event,
     })
   );
-  providerHealthRegistry.observe({ provider, viewerId: userId }, feedback);
+  // A file this device could not decode says nothing about the server it came
+  // from, and both histories below are read by every screen in the house.
+  const viewerSide = isViewerSideFailure(feedback);
+  if (!viewerSide) providerHealthRegistry.observe({ provider, viewerId: userId }, feedback);
 
   // Durable per-title memory. The registry above is ephemeral and keyed by
   // provider; this remembers what THIS source actually delivered for THIS
@@ -120,7 +124,7 @@ export async function POST(req: NextRequest) {
   // can never fail the request — the store swallows its own errors.
   const tmdbId = text(body.tmdbId, 24);
   const mediaType = body.mediaType === "tv" ? "tv" : "movie";
-  if (tmdbId) {
+  if (tmdbId && !viewerSide) {
     const watchedMs = finite(body.watchedMs, MAX_WATCHED_MS_PER_EVENT);
     await recordSourceFeedback(
       sourceMemoryScope(
