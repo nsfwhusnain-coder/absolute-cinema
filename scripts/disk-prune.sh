@@ -50,6 +50,25 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
+# Short IDs (as `docker images` prints them) of the image the container is
+# running and of the newest image update.sh tagged for rollback, one per line.
+# The rollback tag carries its own UTC timestamp, so the newest sorts last.
+short_id() {
+  sed -e 's/^sha256://' | cut -c1-12
+}
+
+protected_image_ids() {
+  local running rollback_ref rollback
+  running="$(docker inspect --format '{{.Image}}' "${CONTAINER:-absolute-cinema}" 2>/dev/null | short_id || true)"
+  rollback_ref="$(docker images --format '{{.Repository}}:{{.Tag}}' \
+    | grep -E '^absolute-cinema:rollback-[0-9]{8}T[0-9]{6}Z$' | sort | tail -1 || true)"
+  rollback=""
+  if [ -n "${rollback_ref}" ]; then
+    rollback="$(docker image inspect --format '{{.Id}}' "${rollback_ref}" 2>/dev/null | short_id || true)"
+  fi
+  printf '%s\n%s\n' "${running}" "${rollback}" | awk 'NF && !seen[$0]++' | tr '\n' ' '
+}
+
 echo "=== before ==="
 df -h /
 docker system df || true
@@ -77,9 +96,20 @@ if [ "${PRUNE_OLD_IMAGES}" -eq 1 ]; then
   # rollback) out of the two kept, so a deploy deleted its own rollback.
   # Dedupe by image ID (multi-tag rows for the same ID must not consume two KEEP slots).
   # Sort by docker inspect Created (RFC3339) so ordering is a true timestamp, not string date fields.
+  #
+  # The running image and the newest rollback are kept whatever their age, and
+  # fill the two slots first. Age alone got this wrong: a staging image promoted
+  # to live is older than the rollback taken before it, so the deploy after
+  # that removed the rollback tag it had just printed and kept a stale one.
+  protected="$(protected_image_ids)"
   idx=0
+  for id in ${protected}; do
+    idx=$((idx + 1))
+    echo "KEEP  ${id} (running or newest rollback)"
+  done
   while IFS=$'\t' read -r id ref; do
     [ -z "${id}" ] && continue
+    case " ${protected} " in *" ${id} "*) continue ;; esac
     idx=$((idx + 1))
     if [ "${idx}" -le 2 ]; then
       echo "KEEP  ${id} ${ref}"
