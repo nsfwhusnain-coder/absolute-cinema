@@ -2,6 +2,50 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.5.3] - 2026-10-10
+
+### Fixed
+- **On iPads and other devices that cannot decode AV1, playback started on a
+  file they could not play, then fell back to a slow web stream.** Files from
+  AllDebrid and TorBox carried their codec only when it was H.264 or HEVC,
+  and not at all once read back from the link cache, so an AV1 release looked
+  like any unlabelled file. It was tried first, failed on its first frame, and
+  the title then played from a web source that buffered. The codec is now
+  kept, AV1 included, stored with the cached link, and read from the release
+  name for links cached before this.
+- **One file that would not play took the next server down with it.** When a
+  source failed, the player began opening the next one, which takes a few
+  seconds for a file that is repackaged, and for those seconds the failed
+  source was still attached and still raising errors. They were counted
+  against the source being opened, which was dropped before it had loaded, so
+  a 4K title could land on a 1080p file or a web stream for the sake of one
+  bad release. A source being replaced is no longer listened to. Found in
+  Safari's engine, where a 4K AV1 file that failed to decode cost the 4K HEVC
+  file behind it; it now plays.
+- **A debrid file that needs repackaging lost the start to a web stream of
+  the same quality.** At equal height the ranking put anything that plays
+  as-is ahead of an MKV, wherever it came from. A debrid file now comes first:
+  repackaging costs a second or two at the start, on a CDN that holds its
+  speed, and web streams are the ones that stall mid-film.
+- **In Safari, an HEVC MP4 was tried before a file sure to play.** Apple's
+  player takes HEVC in an MP4 only under the `hvc1` tag, many releases use
+  `hev1`, and which one a file uses is not known until it is opened. Where the
+  browser refuses `hev1` files, such a file now comes after a remuxed one of
+  the same quality, which is always written as `hvc1`.
+- **The Phoenix server never played.** Its CDN began refusing any request
+  that carried a referrer or a browser's user agent, which is how every
+  request through the proxy went out. Every attempt failed, each costing a
+  failed start before the next server was tried. That CDN is now asked as a
+  plain client, by the proxy and by the checks that verify and measure a
+  source.
+
+### Changed
+- **A remuxed title opens up to a second sooner.** Opening one reads the
+  file's head and then its index at the end, and a debrid CDN takes about two
+  seconds to deliver any range, however small. The size of the file arrives
+  with the first response's headers, so the end is now requested then and the
+  two downloads overlap.
+
 ## [2.5.2] - 2026-10-10
 
 ### Fixed
