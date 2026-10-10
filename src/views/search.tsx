@@ -38,6 +38,8 @@ interface SearchPage {
   total_pages: number;
   total_results: number;
   results: Array<Record<string, unknown> & { id: number; media_type?: string }>;
+  /** Nothing (or next to nothing) matched as typed: these are the closest titles instead. */
+  closest?: boolean;
 }
 
 /** TMDB serves at most 500 pages of any list. */
@@ -96,6 +98,7 @@ export function SearchView({ initialQuery, initialGenre, initialType }: Props) {
   const { isLoading: genreLoading, isFetching: genreFetching, isError: genreError, refetch: refetchGenre } = genre;
   const active = initialGenre ? genre : search;
   const totalResults = active.data?.pages[0]?.total_results ?? 0;
+  const showingClosest = !initialGenre && search.data?.pages[0]?.closest === true;
   const pagedResults = useMemo(() => {
     const seen = new Set<string>();
     const rows: SearchPage["results"] = [];
@@ -358,6 +361,11 @@ export function SearchView({ initialQuery, initialGenre, initialType }: Props) {
 
         {!showSkeletons && results.length > 0 && (
           <>
+            {showingClosest ? (
+              <p className="mb-2 text-sm font-medium" aria-live="polite">
+                No exact match for “{initialQuery}”. These are the closest titles.
+              </p>
+            ) : null}
             <p className="mb-4 text-sm text-muted-foreground" aria-live="polite">
               {hasNextPage && initialType === "all" && totalResults > results.length
                 ? `${results.length} of ${totalResults.toLocaleString("en-US")} results`

@@ -2,6 +2,8 @@ import "server-only";
 import { tmdb } from "@/lib/tmdb";
 import { cachedFetch } from "@/lib/server-cache";
 import { rewriteSearchResults } from "@/lib/catalog/title-alias";
+import { closestSearch } from "@/lib/search-closest";
+import { FEW_RESULTS } from "@/lib/search-fuzzy";
 import { withoutAnimeTitles, type TmdbListTitle } from "@/lib/tmdb-anime";
 
 /**
@@ -95,13 +97,23 @@ async function loadTmdbRoute(path: string[], params: TmdbRouteParams): Promise<u
       };
     }
     if (a === "search" && b === "multi") {
-      const found = await tmdb.searchMulti(
-        params.query as string,
-        Number(params.page) || 1
-      );
+      const query = params.query as string;
+      const page = Number(params.page) || 1;
+      const found = await tmdb.searchMulti(query, page);
+      const exact = found.results ?? [];
+      if (page > 1 || exact.length >= FEW_RESULTS) {
+        return { ...found, results: rewriteSearchResults(exact) };
+      }
+      // Little or nothing as typed: add the titles closest to it.
+      const taken = new Set(exact.map((row) => `${row.media_type}-${row.id}`));
+      const close = (await closestSearch(query)).filter((row) => !taken.has(`${row.media_type}-${row.id}`));
+      const results = [...exact, ...close] as typeof exact;
       return {
         ...found,
-        results: rewriteSearchResults(found.results ?? []),
+        results: rewriteSearchResults(results),
+        total_results: results.length,
+        total_pages: Math.max(found.total_pages ?? 1, 1),
+        ...(close.length > 0 ? { closest: true } : {}),
       };
     }
     if (a === "genre" && (b === "movie" || b === "tv")) {
