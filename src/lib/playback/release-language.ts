@@ -80,8 +80,10 @@ const RUSSIAN_SOURCES = /rutracker|rutor|lostfilm|newstudio|hdrezka|jaskier|alex
 const CYRILLIC = /[Ѐ-ӿ]/;
 
 /**
- * Flags a torrent index adds beneath a release name for the languages it found
- * in it (two regional-indicator letters each), by country code.
+ * Flags a torrent index adds beneath a release name (two regional-indicator
+ * letters each), by country code. One or two flags are the audio: "🇪🇸" under
+ * a Spanish release, "🇬🇧 / 🇮🇹" under an ITA.ENG one. A longer row is the
+ * subtitles: an ordinary English WEB-DL carries twenty of them.
  */
 const FLAG_LANGUAGES: Readonly<Record<string, string>> = {
   gb: "en", us: "en", fr: "fr", de: "de", at: "de", it: "it", es: "es", mx: "es", ar: "es", br: "pt", pt: "pt",
@@ -91,6 +93,8 @@ const FLAG_LANGUAGES: Readonly<Record<string, string>> = {
 };
 const FLAG = /[\u{1F1E6}-\u{1F1FF}]{2}/gu;
 const REGIONAL_INDICATOR_A = 0x1f1e6;
+/** More flags than this beneath a name list its subtitles, not its audio. */
+const MAX_AUDIO_FLAGS = 2;
 
 /** "🇫🇷" → "fr": each regional indicator is a letter, offset from A. */
 function flagCountry(flag: string): string {
@@ -171,7 +175,8 @@ export function parseReleaseAudio(title: string): ReleaseAudio {
     if (code && !languages.includes(code)) languages.push(code);
   };
   tags.forEach((_token, index) => add(languageOf(tags, index, span)));
-  for (const flag of title.match(FLAG) ?? []) add(FLAG_LANGUAGES[flagCountry(flag)]);
+  const flags = title.match(FLAG) ?? [];
+  if (flags.length <= MAX_AUDIO_FLAGS) for (const flag of flags) add(FLAG_LANGUAGES[flagCountry(flag)]);
   const lower = title.toLowerCase();
   if (RUSSIAN_SOURCES.test(lower) || CYRILLIC.test(title)) add("ru");
   return {

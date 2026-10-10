@@ -31,6 +31,13 @@ describe("what a release name says about its audio", () => {
     expect(kind("Фонари S01E08 1080p WEB-DL")).toBe("dub");
   });
 
+  it("takes a long row of flags for the subtitles it is, not for audio", () => {
+    const subtitles = "🇬🇧 / 🇯🇵 / 🇮🇹 / 🇵🇹 / 🇪🇸 / 🇫🇷 / 🇩🇪 / 🇳🇱 / 🇵🇱 / 🇨🇿 / 🇭🇺 / 🇧🇬";
+    expect(kind(`Lanterns S01E08 Dirt and Stars 2160p AMZN WEB-DL DDP5 1 Atmos DV HDR H 265-FLUX\n👤 748 💾 6.1 GB ⚙️ EXT\n${subtitles}`)).toBe("unstated");
+    expect(kind(`Lanterns.S01E08.2160p.HDR10Plus.DV.WEBRip.6CH.x265.HEVC-PSA\n👤 108 💾 898.8 MB\nMulti Subs / ${subtitles}`)).toBe("unstated");
+    expect(kind("Lanterns.S01E08.1080p.WEB.h264\n👤 12 💾 2 GB\nMulti Audio / 🇬🇧 / 🇵🇱")).toBe("multi");
+  });
+
   it("reads the language flags an index lists under the name", () => {
     expect(kind("Lanterns.S01E08.1080p.WEB.h264\n👤 12 💾 2 GB\n🇫🇷")).toBe("dub");
     expect(kind("Lanterns.S01E08.1080p.WEB.h264\n👤 12 💾 2 GB\nDual Audio / 🇬🇧 / 🇮🇹")).toBe("multi");
