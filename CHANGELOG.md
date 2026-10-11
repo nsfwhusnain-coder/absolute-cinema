@@ -2,6 +2,45 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.5.5] - 2026-10-11
+
+### Fixed
+- **A title that had not been opened before took seven to fifteen seconds to
+  start, and one with no 4K release more than twenty.** The search for files
+  answered only once all of it was done: every quality, every service, and the
+  web providers' slowest scrape, though what would start was known two or
+  three seconds in.
+  - Each file reaches the player the moment it is known, best first, not when
+    the whole group it belongs to has been tried.
+  - A viewer who wants 4K is answered as soon as a 4K file is found, or as
+    soon as none can be and a 1080p one is.
+  - The answer says what can still arrive. The player starts a 1080p file at
+    once when no 4K is coming, where it held out up to twenty seconds for one,
+    and starts the best web stream when the debrid services have nothing.
+  - The web providers' browser scrape, which runs up to twenty seconds, no
+    longer holds the answer back once the start is decided.
+  Measured on titles opened cold: the answer in 2 to 4 seconds where it took
+  6 to 14, and the first picture in Chrome in 6 to 9 seconds where it took 7
+  to 24. A title opened from its own page still starts in about a second.
+- **AllDebrid's file started where Real-Debrid had the same one.** Between two
+  files of the same height the larger started, or the one whose name sorted
+  first, and that was AllDebrid's: on a CDN measured at 2.6, 30 and 79 Mbit/s
+  within one hour, against a steady 220 to 300 for Real-Debrid.
+  - The file on the clearly faster CDN starts; when they are level, or were
+    never measured, Real-Debrid's does. A server chosen by hand still wins.
+  - For the first seconds of a search only AllDebrid's file could be read
+    back, and it went to the player alone and was started. It is now held
+    until Real-Debrid has answered.
+- **A file replaced while it was still loading was counted as having played.**
+  When a better file arrived before the first picture, the one being replaced
+  could show its frame first. That frame was credited to the new file, so a
+  failure to start it was handled as trouble mid-film, with retries, and its
+  record said it had played.
+
+### Added
+- The debrid search logs how long each service took and when its first 1080p
+  and 4K files were known.
+
 ## [2.5.4] - 2026-10-11
 
 ### Fixed
