@@ -31,6 +31,15 @@ All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](ht
   - For the first seconds of a search only AllDebrid's file could be read
     back, and it went to the player alone and was started. It is now held
     until Real-Debrid has answered.
+- **After a few titles tried one after another, or with two people watching,
+  the next one started slowly or fell to a web stream.** Nothing told the
+  server a viewer had left: it went on downloading the file they had been
+  watching, up to four minutes ahead, and kept one of the four places for
+  files being prepared. The next title started against that download, and
+  with the places taken it was refused one. The player now says when it is
+  done with a file, on switching, on closing and as the page goes away; the
+  download stops at once and the place is free. Someone else still watching
+  the same file is not affected.
 - **A file replaced while it was still loading was counted as having played.**
   When a better file arrived before the first picture, the one being replaced
   could show its frame first. That frame was credited to the new file, so a
