@@ -14,6 +14,7 @@ import {
   onStartFailed,
   onUserSelect,
   onAwaitRefresh,
+  RETRIES_FORGIVEN_AFTER_MS,
   type OrchestratorState,
   type Ranker,
 } from "./orchestrator";
@@ -118,11 +119,29 @@ describe("orchestrator", () => {
     expect(back.command).toMatchObject({ type: "attach", sourceId: "a" });
   });
 
-  it("a successful recovery resets the retry budget", () => {
+  it("a recovery that holds gives the retries back", () => {
     const recovering = onPlaybackError(playing(A), [A, B], "error", ranker, T0).state;
-    const recovered = onFirstFrame(recovering);
-    expect(recovered.retries).toBe(0);
-    expect(onPlaybackError(recovered, [A, B], "error", ranker, T0).command).toMatchObject({ sourceId: "a" });
+    const recovered = onFirstFrame(recovering, T0 + 1_000);
+    // Steady play for longer than RETRIES_FORGIVEN_AFTER_MS: the next error starts the count again.
+    const later = T0 + RETRIES_FORGIVEN_AFTER_MS + 2_000;
+    const next = onPlaybackError(recovered, [A, B], "error", ranker, later);
+    expect(next.command).toMatchObject({ sourceId: "a" });
+    expect(next.state.retries).toBe(1);
+  });
+
+  it("a source that fails again straight after each recovery is left for another", () => {
+    // Shows a frame, fails a second later, recovers, shows a frame, fails: a file the device cannot decode steadily.
+    let state = playing(A);
+    let now = T0;
+    const commands: string[] = [];
+    for (let round = 0; round < 3; round++) {
+      now += 2_000;
+      const failed = onPlaybackError(state, [A, B], "media:3", ranker, now);
+      commands.push((failed.command as { sourceId?: string }).sourceId ?? failed.command.type);
+      if (failed.state.activeId !== "a") break;
+      state = onFirstFrame(failed.state, now + 500);
+    }
+    expect(commands).toEqual(["a", "a", "b"]);
   });
 
   it("keeps retrying the only source rather than giving up after it worked", () => {

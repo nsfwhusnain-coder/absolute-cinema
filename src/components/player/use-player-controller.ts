@@ -408,7 +408,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       if ((phase === "starting" || phase === "recovering") && video.videoWidth > 0) {
         clearTimers();
         const source = sourceById(orchestrator.current.activeId);
-        orchestrator.current = onFirstFrame(orchestrator.current);
+        orchestrator.current = onFirstFrame(orchestrator.current, Date.now());
         s().set({ phase: "playing", decodedHeight: video.videoHeight, startNote: null });
         // A file played directly says nothing about its range: ask the picture itself.
         if (!isHdrLikeRange(s().dynamicRange)) {

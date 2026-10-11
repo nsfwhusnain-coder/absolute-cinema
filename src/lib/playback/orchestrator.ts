@@ -28,6 +28,14 @@ export type Phase = "resolving" | "starting" | "playing" | "recovering" | "faile
 export const START_FAIL_COOLDOWN_MS = 90_000;
 export const PLAYED_FAIL_COOLDOWN_MS = 30_000;
 export const SAME_SOURCE_RETRIES = 2;
+/**
+ * How long a source has to play after an error before its retries are given
+ * back. A file this device cannot decode steadily shows a frame after every
+ * recovery and fails again a second later: counted afresh each time, it was
+ * retried without end (seen: eighteen times in 35 seconds), which is what
+ * "plays a bit, then buffers" looks like from the sofa.
+ */
+export const RETRIES_FORGIVEN_AFTER_MS = 60_000;
 /** Longest a start waits for a better source than the ones found so far. */
 export const LOW_QUALITY_GRACE_MS = 5_000;
 /**
@@ -59,6 +67,8 @@ export interface OrchestratorState {
   upgradedBeforeStart: boolean;
   /** When the first playable source turned up (for the low-quality grace). */
   firstCandidateAt: number | null;
+  /** When the active source last failed while playing (for RETRIES_FORGIVEN_AFTER_MS). */
+  lastErrorAt?: number | null;
 }
 
 export type Command =
@@ -182,10 +192,12 @@ export function onRoster(
   return { state, command: { type: "none" } };
 }
 
-export function onFirstFrame(state: OrchestratorState): OrchestratorState {
+export function onFirstFrame(state: OrchestratorState, now: number = Date.now()): OrchestratorState {
   const health = { ...state.health };
   if (state.activeId) health[state.activeId] = { failures: 0, lastFailAt: 0, played: true };
-  return { ...state, phase: "playing", retries: 0, everPlayed: true, health, lastReason: null };
+  // A frame straight after a recovery proves only that the recovery ran.
+  const recovering = state.phase === "recovering" && now - (state.lastErrorAt ?? 0) < RETRIES_FORGIVEN_AFTER_MS;
+  return { ...state, phase: "playing", retries: recovering ? state.retries : 0, everPlayed: true, health, lastReason: null };
 }
 
 /** The active source never produced a frame (timeout or fatal error while starting). */
@@ -236,14 +248,16 @@ export function onPlaybackError(
   if (!id) return { state, command: { type: "none" } };
   const alternative = ranker.pick(eligible(state, sources, now, id));
   const retryFirst = kind === "error" || !alternative;
-  if (retryFirst && state.retries < SAME_SOURCE_RETRIES) {
+  // Retries used a while ago, with steady play since, are given back.
+  const used = now - (state.lastErrorAt ?? 0) < RETRIES_FORGIVEN_AFTER_MS ? state.retries : 0;
+  if (retryFirst && used < SAME_SOURCE_RETRIES) {
     return {
-      state: { ...state, phase: "recovering", retries: state.retries + 1, lastReason: reason },
+      state: { ...state, phase: "recovering", retries: used + 1, lastReason: reason, lastErrorAt: now },
       command: { type: "attach", sourceId: id, keepPosition: true, refresh: state.retries > 0 },
     };
   }
   const health = recordFailure(state, id, now);
-  const next: OrchestratorState = { ...state, health, retries: 0, pinned: false, lastReason: reason };
+  const next: OrchestratorState = { ...state, health, retries: 0, pinned: false, lastReason: reason, lastErrorAt: null };
   const current = sources.find((s) => s.id === id);
   const best = kind === "stall" ? alternative : ranker.pick(eligible(next, sources, now, id));
   if (best) {
