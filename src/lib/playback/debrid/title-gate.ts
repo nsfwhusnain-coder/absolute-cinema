@@ -9,7 +9,7 @@
 
 import { cachedFetch } from "@/lib/server-cache";
 import { tmdb, type TmdbNames } from "@/lib/tmdb";
-import { judgeRelease, type ReleaseVerdict, type TitleFacts } from "../release-identity";
+import { countedEpisode, judgeReleaseName, type ReleaseJudgement, type TitleFacts } from "../release-identity";
 import type { MediaType } from "../types";
 
 const FACTS_TTL_MS = 6 * 60 * 60 * 1000;
@@ -34,7 +34,12 @@ export function titleFactsFrom(names: TmdbNames): TitleFacts {
     ...(names.translations?.translations ?? []).map((entry) => entry.data?.title ?? entry.data?.name),
   ];
   const titles = [...new Set(all.map((title) => (title ?? "").trim()).filter(Boolean))];
-  return { titles, year: yearOf(names.release_date ?? names.first_air_date) };
+  const seasonYears: Record<number, number> = {};
+  for (const season of names.seasons ?? []) {
+    const year = yearOf(season.air_date);
+    if (season.season_number && year) seasonYears[season.season_number] = year;
+  }
+  return { titles, year: yearOf(names.release_date ?? names.first_air_date), ...(names.seasons?.length ? { seasonYears } : {}) };
 }
 
 /** Fetches (once per title) what a title is known as, and remembers it under its IMDb id. Null when the catalogue cannot be reached. */
@@ -86,18 +91,58 @@ export interface IdentityQuestion {
   episode?: number;
 }
 
+/** "verified" names the title outright; "unverified" was kept for want of anything against it. */
+export type Identity = "verified" | "unverified" | "wrong";
+
 /**
- * Whether a source is another title than the one asked for. The file's own
- * name is the better witness when it has one to read: a file named for the
- * film is the film, whatever collection it sits in, and a file named for
+ * Whether a film's file is the film, by its own name and its release's. The
+ * file is the better witness when it has a name to read: one named for the
+ * film is the film whatever collection it sits in, and one that says it is
  * another is not, whatever the release was called.
  */
-export function isWrongTitle(facts: TitleFacts | null, question: IdentityQuestion): boolean {
-  if (question.mediaType === "tv" && isOtherEpisode(question.fileName ?? "", question.season, question.episode)) return true;
-  if (!facts) return false;
-  const file: ReleaseVerdict = question.fileName ? judgeRelease(question.fileName, facts, question.mediaType) : "unknown";
-  if (file === "match") return false;
+function identifyFilm(file: ReleaseJudgement, release: ReleaseJudgement): Identity {
+  if (file.contradicts) return "wrong";
+  // Under a variation of the film's name, with its year: the film, out of a pack that names no one film.
+  if (file.related) return release.verdict === "match" ? "verified" : "unverified";
+  if (file.verdict !== "mismatch") return release.verdict === "mismatch" ? "wrong" : release.verdict === "match" ? "verified" : "unverified";
+  // Under a name not on the list ("gfp1-tcr-1080p.mkv"): only a release that names the film vouches for it.
+  return release.verdict === "match" || release.related ? "unverified" : "wrong";
+}
+
+/** A first season's episodes may be numbered on from a hundred: "Show.105" is its fifth. */
+const FIRST_SEASON_HUNDRED = 100;
+
+/**
+ * True when a file counts itself, with no season tag, as another episode
+ * ("One Piece 640" for the first). Only a first season is checked: later ones
+ * may count on from the seasons before, and how far is not known here.
+ */
+function countsAnotherEpisode(facts: TitleFacts, question: IdentityQuestion): boolean {
+  const episode = question.episode;
+  if (question.season !== 1 || !episode || !question.fileName) return false;
+  const counted = countedEpisode(question.fileName, facts);
+  if (!counted) return false;
+  const within = (number: number) => number >= counted.from && number <= counted.to;
+  return !within(episode) && !within(FIRST_SEASON_HUNDRED + episode);
+}
+
+/** Whether a source is the title asked for. */
+export function identify(facts: TitleFacts | null, question: IdentityQuestion): Identity {
+  if (question.mediaType === "tv" && isOtherEpisode(question.fileName ?? "", question.season, question.episode)) return "wrong";
+  if (!facts) return "unverified";
+  if (question.mediaType === "tv" && countsAnotherEpisode(facts, question)) return "wrong";
+  const asked = { season: question.season };
+  const file = question.fileName ? judgeReleaseName(question.fileName, facts, question.mediaType, asked) : null;
+  // A file of the right name is the show; a release that states it is a later show of that name still decides.
+  const release = judgeReleaseName(question.release, facts, question.mediaType, asked);
+  if (question.mediaType === "tv" && (file?.anotherYear || release.anotherYear)) return "wrong";
+  if (file?.verdict === "match") return "verified";
   // An episode's file is often named for the episode alone ("01 - Pilot"), which says nothing about the show.
-  if (file === "mismatch" && question.mediaType === "movie") return true;
-  return judgeRelease(question.release, facts, question.mediaType) === "mismatch";
+  if (file && question.mediaType === "movie") return identifyFilm(file, release);
+  if (release.verdict === "mismatch") return "wrong";
+  return release.verdict === "match" ? "verified" : "unverified";
+}
+
+export function isWrongTitle(facts: TitleFacts | null, question: IdentityQuestion): boolean {
+  return identify(facts, question) === "wrong";
 }

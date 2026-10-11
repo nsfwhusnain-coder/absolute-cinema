@@ -38,7 +38,7 @@
 import { tmdb } from "@/lib/tmdb";
 import { cachedFetch } from "@/lib/server-cache";
 import type { TitleFacts } from "../release-identity";
-import { isWrongTitle } from "./title-gate";
+import { identify } from "./title-gate";
 import type { MediaType } from "../types";
 import { isMoviePackRelease } from "../source-facts";
 import { isCaptureRelease, releaseQualityScore } from "../release-scorer";
@@ -114,6 +114,8 @@ export interface DebridCandidate extends ParsedRelease {
   infoHash?: string;
   /** 0-based file index within the torrent (Stremio addon protocol convention). */
   fileIdx?: number;
+  /** The name of that file, as the index gives it: a service that lists a torrent's files in its own order is asked for the file by this. */
+  fileName?: string;
   /** Already resolved to a direct-playable link by the RD-configured Torrentio index (path 2a). */
   url?: string;
   /** Parsed from Torrentio's "👤 N" seeders footer — 0 when absent. Real-world demand/health signal used for in-class ranking. */
@@ -124,6 +126,8 @@ export interface DebridCandidate extends ParsedRelease {
   unwantedAudio?: boolean;
   /** Several audio languages in one file: the original is in there, but only a remux can choose it. */
   severalAudio?: boolean;
+  /** Nothing in its name says outright that it is the title: kept, behind the releases that do say so. */
+  unverified?: boolean;
 }
 
 interface TorrentioStreamRaw {
@@ -567,6 +571,8 @@ function sortCandidates(
     const compatDiff = compatRank(a) - compatRank(b);
     if (compatDiff !== 0) return compatDiff;
     if (a.resolutionHeight !== b.resolutionHeight) return b.resolutionHeight - a.resolutionHeight;
+    const verifiedDiff = (a.unverified ? 1 : 0) - (b.unverified ? 1 : 0);
+    if (verifiedDiff !== 0) return verifiedDiff;
     const severalDiff = (a.severalAudio ? 1 : 0) - (b.severalAudio ? 1 : 0);
     if (severalDiff !== 0) return severalDiff;
     return candidateRankScore(b, mediaType) - candidateRankScore(a, mediaType);
@@ -645,6 +651,12 @@ function selectTopPerClass(
        * survival gate, and it matches `compareDelivery` on the client: at equal
        * class, direct beats remux. Same ordering, different reason.
        */
+      // A release that names the title comes before one kept only because
+      // nothing in its name says it is another: the second is a guess, and a
+      // wrong guess plays another film under this one's poster.
+      const aUnverified = a.unverified ? 1 : 0;
+      const bUnverified = b.unverified ? 1 : 0;
+      if (aUnverified !== bUnverified) return aUnverified - bUnverified;
       // A release in the original language alone comes before one that only
       // contains it: played directly, a multi-language file starts on
       // whichever track its maker put first, which is usually the dub.
@@ -789,16 +801,16 @@ function parseTorrentioStreams(
     const rawTitle = (s.title ?? s.name ?? "Unknown release").split("\n")[0]?.trim();
     // The index files releases under an id by their names, and gets some
     // wrong: a namesake, a sequel, one film out of a collection of fifty.
-    if (
-      wanted &&
-      isWrongTitle(wanted.facts, {
-        mediaType,
-        release: rawTitle ?? "",
-        fileName: s.behaviorHints?.filename,
-        season: wanted.season,
-        episode: wanted.episode,
-      })
-    ) {
+    const identity = wanted
+      ? identify(wanted.facts, {
+          mediaType,
+          release: rawTitle ?? "",
+          fileName: s.behaviorHints?.filename,
+          season: wanted.season,
+          episode: wanted.episode,
+        })
+      : "verified";
+    if (identity === "wrong") {
       otherTitles.push(rawTitle ?? "");
       continue;
     }
@@ -808,11 +820,14 @@ function parseTorrentioStreams(
       title: rawTitle || "Unknown release",
       infoHash: s.infoHash ?? extractInfoHashFromResolveUrl(s.url),
       fileIdx: s.fileIdx,
+      ...(s.behaviorHints?.filename ? { fileName: s.behaviorHints.filename } : {}),
       url: s.url,
       seeders: parseSeeders(text),
       ...(sizeBytes != null ? { sizeBytes } : {}),
       ...(isUnwantedRelease(text, originalLanguage) ? { unwantedAudio: true } : {}),
       ...(releaseAudioKind(parseReleaseAudio(text), originalLanguage) === "multi" ? { severalAudio: true } : {}),
+      // With no names to check against, nothing is verified and nothing is ranked down for it.
+      ...(identity === "unverified" && wanted?.facts ? { unverified: true } : {}),
     });
   }
   if (otherTitles.length) {

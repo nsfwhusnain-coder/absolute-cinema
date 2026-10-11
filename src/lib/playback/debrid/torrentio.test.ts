@@ -818,3 +818,47 @@ describe("fetchTorrentioCandidates: the original language first", () => {
     expect((await find("fr")).map((c) => c.title)).toEqual(["Film.2019.FRENCH.1080p.BluRay.H264.mp4"]);
   });
 });
+
+describe("fetchTorrentioCandidates: the title that was asked for", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function answer(streams: { title: string; filename?: string }[]): void {
+    const body = streams.map((stream, i) => ({
+      title: `${stream.title}\n👤 ${900 - i} 💾 6 GB`,
+      infoHash: String(i).repeat(40).slice(0, 40),
+      ...(stream.filename ? { behaviorHints: { filename: stream.filename } } : {}),
+    }));
+    globalThis.fetch = (async () => new Response(JSON.stringify({ streams: body }), { status: 200 })) as unknown as typeof fetch;
+  }
+  const avengers = { titles: ["The Avengers"], year: 2012 };
+  const find = (facts?: typeof avengers | null) =>
+    fetchTorrentioCandidates({ imdbId: "tt0000011", mediaType: "movie", rdToken: "test-rd-token", facts });
+
+  it("drops another title's release and another film's file", async () => {
+    answer([
+      { title: "Avengers.Age.of.Ultron.2015.1080p.BluRay.H264.mp4" },
+      { title: "The.Avengers.2012.1080p.BluRay.H264.mp4", filename: "The.Avengers.1998.1080p.BluRay.H264.mp4" },
+      { title: "The.Avengers.2012.1080p.WEB-DL.H264.mp4" },
+    ]);
+    expect((await find(avengers)).map((c) => c.title)).toEqual(["The.Avengers.2012.1080p.WEB-DL.H264.mp4"]);
+  });
+
+  it("puts a release that names the title ahead of a better seeded one that only resembles it", async () => {
+    answer([{ title: "Marvels.The.Avengers.2012.1080p.BluRay.H264.mp4" }, { title: "The.Avengers.2012.1080p.BluRay.H264.mp4" }]);
+    const found = await find(avengers);
+    expect(found.map((c) => c.title)).toEqual(["The.Avengers.2012.1080p.BluRay.H264.mp4", "Marvels.The.Avengers.2012.1080p.BluRay.H264.mp4"]);
+    expect(found.map((c) => c.unverified ?? false)).toEqual([false, true]);
+  });
+
+  it("checks nothing, and ranks nothing down, without the title's names", async () => {
+    answer([{ title: "Avengers.Age.of.Ultron.2015.1080p.BluRay.H264.mp4" }, { title: "The.Avengers.2012.1080p.BluRay.H264.mp4" }]);
+    for (const facts of [undefined, null]) {
+      const found = await find(facts);
+      expect(found.length).toBe(2);
+      expect(found.some((c) => c.unverified)).toBe(false);
+    }
+  });
+});

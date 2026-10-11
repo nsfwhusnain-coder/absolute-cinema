@@ -166,6 +166,8 @@ export interface TmdbNames {
   /** Films list theirs under `titles`, series under `results`. */
   alternative_titles?: { titles?: { title: string }[]; results?: { title: string }[] };
   translations?: { translations?: { data?: { title?: string; name?: string } }[] };
+  /** A series' seasons, each with the date it first aired. */
+  seasons?: { season_number?: number; air_date?: string | null }[];
 }
 
 export interface TmdbMovie {
