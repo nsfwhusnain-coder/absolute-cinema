@@ -141,6 +141,29 @@ function startConfidence(source: PlaybackSource): number {
   return gamble ? MAY_NOT_START : STARTS_AS_IS;
 }
 
+/**
+ * A measured CDN rate as a step on a doubling scale, so that only a CDN
+ * about twice as fast as another counts as faster: such a one opens and
+ * seeks a file visibly sooner, where a few percent is the minute's noise.
+ * Zero when the rate was never measured.
+ */
+function cdnSpeedStep(source: PlaybackSource): number {
+  const rate = source.cdnBytesPerSec ?? 0;
+  return rate > 0 ? Math.floor(Math.log2(rate)) : 0;
+}
+
+/** The file on the clearly faster CDN first; no opinion unless both were measured. */
+function compareCdnSpeed(a: PlaybackSource, b: PlaybackSource): number {
+  const aStep = cdnSpeedStep(a);
+  const bStep = cdnSpeedStep(b);
+  return aStep > 0 && bStep > 0 ? bStep - aStep : 0;
+}
+
+/** Real-Debrid is the primary service; the others cover what it lacks. */
+function isPrimaryDebrid(source: PlaybackSource): boolean {
+  return source.origin === "debrid" && source.provider === "Debrid";
+}
+
 function heightTier(height: number): number {
   if (height >= STARTUP_UHD_HEIGHT) return 4;
   if (height >= HD_FLOOR_HEIGHT) return 3;
@@ -197,15 +220,21 @@ function compareForAutoStart(
   const bStart = startConfidence(b);
   if (aStart !== bStart) return bStart - aStart;
 
+  // Two services often hold the same title at the same height. Left to the
+  // tie-breaks below, the sibling started whenever its file was the larger or
+  // its name sorted first, on a CDN that has measured anything from a
+  // hundredth of the primary's speed to a third of it within the hour.
+  const cdn = compareCdnSpeed(a, b);
+  if (cdn !== 0) return cdn;
+  const pref = (options.preferredProvider || "").trim().toLowerCase();
+  const prefers = (source: PlaybackSource) => (pref && `${source.provider} ${source.label}`.toLowerCase().includes(pref) ? 1 : 0);
+  const preferred = prefers(b) - prefers(a);
+  const primary = Number(isPrimaryDebrid(b)) - Number(isPrimaryDebrid(a));
+  if (preferred === 0 && primary !== 0) return primary;
+
   const rate = normalizedBitrate(b) - normalizedBitrate(a);
   if (rate !== 0) return rate;
-
-  const pref = (options.preferredProvider || "").trim().toLowerCase();
-  if (pref) {
-    const aPref = `${a.provider} ${a.label}`.toLowerCase().includes(pref) ? 1 : 0;
-    const bPref = `${b.provider} ${b.label}`.toLowerCase().includes(pref) ? 1 : 0;
-    if (aPref !== bPref) return bPref - aPref;
-  }
+  if (preferred !== 0) return preferred;
   return a.id.localeCompare(b.id);
 }
 

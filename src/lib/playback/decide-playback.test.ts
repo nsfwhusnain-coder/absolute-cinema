@@ -316,6 +316,40 @@ describe("a debrid file on a CDN too slow to carry it", () => {
   });
 });
 
+describe("the same height on two services", () => {
+  const MBIT = 1_000_000 / 8;
+  const debrid = (id: string, maxHeight: number, cdnMbit?: number): PlaybackSource =>
+    src({ id, provider: "Debrid", origin: "debrid", compat: "native", container: "mp4", audioLanguage: "en", maxHeight, ...(cdnMbit ? { cdnBytesPerSec: cdnMbit * MBIT } : {}) });
+  const start = (...sources: PlaybackSource[]) => decidePlayback(sources).immediate?.id;
+
+  it("starts on the clearly faster CDN, whichever name sorts first", () => {
+    expect(start(debrid("alldebrid-4k", 2160, 30), debrid("debrid-4k", 2160, 303))).toBe("debrid-4k");
+    expect(start(debrid("alldebrid-4k", 2160, 303), debrid("debrid-4k", 2160, 30))).toBe("alldebrid-4k");
+  });
+
+  it("does not take a faster CDN over a higher picture", () => {
+    expect(start(debrid("alldebrid-4k", 2160, 30), debrid("debrid-1080", 1080, 303))).toBe("alldebrid-4k");
+  });
+
+  it("starts on the primary service when the CDNs are much the same, or were never measured", () => {
+    const sibling = (cdnMbit?: number) => ({ ...debrid("alldebrid-4k", 2160, cdnMbit), provider: "AllDebrid" });
+    expect(start(sibling(280), debrid("debrid-4k", 2160, 303))).toBe("debrid-4k");
+    expect(start(sibling(), debrid("debrid-4k", 2160, 303))).toBe("debrid-4k");
+    expect(start(sibling(), debrid("debrid-4k", 2160))).toBe("debrid-4k");
+  });
+
+  it("starts on the primary service even when the sibling's file is the larger", () => {
+    const sibling = { ...debrid("alldebrid-4k", 2160, 280), provider: "AllDebrid", bitrateBps: 60_000_000 };
+    expect(start(sibling, { ...debrid("debrid-4k", 2160, 303), bitrateBps: 20_000_000 })).toBe("debrid-4k");
+  });
+
+  it("leaves the sibling first for a viewer who chose it", () => {
+    const sibling = { ...debrid("alldebrid-4k", 2160, 280), provider: "AllDebrid", bitrateBps: 60_000_000 };
+    const primary = { ...debrid("debrid-4k", 2160, 303), bitrateBps: 20_000_000 };
+    expect(decidePlayback([sibling, primary], { preferredProvider: "alldebrid" }).immediate?.id).toBe("alldebrid-4k");
+  });
+});
+
 describe("a file of several languages that is remuxed", () => {
   const dualAudio = (id: string, maxHeight: number): PlaybackSource =>
     src({ id, provider: "Debrid", origin: "debrid", compat: "native", container: "mkv", audioLanguage: "xx", multiAudio: true, maxHeight });
