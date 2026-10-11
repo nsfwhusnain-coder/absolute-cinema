@@ -76,7 +76,14 @@ export interface AllDebridResolvedFile {
 export interface AllDebridTarget {
   infoHash: string;
   releaseTitle: string;
-  fileIdx?: number;
+  /**
+   * The name of the file the index means. Its number (`fileIdx`) is no use
+   * here: this service lists a torrent's files in an order of its own
+   * (measured 2026-10-11 on 20 cached packs: the index's number named another
+   * file in 8, a different film of the trilogy in one; the name found the
+   * right file in all 20).
+   */
+  fileName?: string;
 }
 
 export function isAllDebridConfigured(): boolean {
@@ -166,11 +173,15 @@ async function listFiles(id: number, key: string, deadline: number): Promise<All
   return flattenFiles(data?.magnets?.[0]?.files);
 }
 
+function baseName(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1).toLowerCase();
+}
+
 /**
- * The file Torrentio meant, via the same pack-safe picker RD uses (fileIdx,
- * then release-title tokens; never "largest in a pack"). A season pack's
- * title names no episode, so for episodes fall back to the file whose own
- * SxxEyy matches the request.
+ * The file Torrentio meant: the one of the name it gave, else via the same
+ * pack-safe picker RD uses (release-title tokens; never "largest in a
+ * pack"). A season pack's title names no episode, so for episodes fall back
+ * to the file whose own SxxEyy matches the request.
  */
 export function pickAllDebridFile(
   files: AllDebridLinkFile[],
@@ -179,6 +190,9 @@ export function pickAllDebridFile(
 ): AllDebridLinkFile | null {
   const playable = files.filter((f) => PLAYABLE_EXT_PATTERN.test(f.name));
   if (!playable.length) return null;
+  const wanted = target.fileName ? baseName(target.fileName) : "";
+  const named = wanted ? playable.filter((f) => baseName(f.name) === wanted) : [];
+  if (named.length === 1) return named[0] ?? null;
   const asTorrentFiles: DebridTorrentFile[] = playable.map((f, i) => ({
     id: i + 1,
     path: f.name,

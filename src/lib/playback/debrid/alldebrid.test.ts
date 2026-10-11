@@ -63,6 +63,23 @@ describe("pickAllDebridFile", () => {
     expect(file).toBeNull();
   });
 
+  it("takes the file the index named, wherever the listing puts it", () => {
+    const trilogy = [
+      { name: "Trilogy/The Godfather 3 (1990).mkv", bytes: 9_000 * MB, link: "g3" },
+      { name: "Trilogy/The Godfather 1 (1972).mkv", bytes: 8_000 * MB, link: "g1" },
+      { name: "Trilogy/The Godfather 2 (1974).mkv", bytes: 9_500 * MB, link: "g2" },
+    ];
+    const target = { infoHash: CACHED, releaseTitle: "The Godfather Trilogy 1972-1990 2160p" };
+    expect(pickAllDebridFile(trilogy, { ...target, fileName: "The Godfather 1 (1972).mkv" })?.link).toBe("g1");
+    // Without a name there is nothing to tell the three apart, and no file is a guess worth playing.
+    expect(pickAllDebridFile(trilogy, target)).toBeNull();
+  });
+
+  it("falls back to the episode asked for when the named file is not in the listing", () => {
+    const file = pickAllDebridFile(pack, { infoHash: CACHED, releaseTitle: "Show S02 1080p WEB", fileName: "Show.S02E02.720p.mkv" }, { season: 2, episode: 2 });
+    expect(file?.link).toBe("l2");
+  });
+
   it("takes the single feature of a movie torrent", () => {
     const file = pickAllDebridFile(
       [

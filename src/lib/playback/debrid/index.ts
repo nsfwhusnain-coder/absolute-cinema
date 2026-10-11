@@ -1846,7 +1846,7 @@ async function resolveAllDebridTier(
   for (const quality of missing) {
     const ranked = rankCachedTorboxForHeight(candidates, heightForQuality(quality));
     const resolved = await resolveAllDebridFirstCached(
-      ranked.map((c) => ({ infoHash: c.infoHash!, releaseTitle: c.title, fileIdx: c.fileIdx })),
+      ranked.map((c) => ({ infoHash: c.infoHash!, releaseTitle: c.title, fileName: c.fileName })),
       deadline,
       episodeTarget
     );
