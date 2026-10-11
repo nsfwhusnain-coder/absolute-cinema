@@ -2,6 +2,27 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.5.6] - 2026-10-11
+
+### Added
+- **A record of how well things are found and played, that outlives an
+  update.** What the service did was only in the container's log, which is
+  thrown away with the container on every update: the one time "was it like
+  this before?" is asked. Every search, start, failure, stall and jump is now
+  also one line under `db/events/`, kept for 30 days and never sent anywhere;
+  a viewer is written as a tag, not an account, and no link is kept.
+  - New in what is recorded: what each answer held (how many files, from
+    which service, how tall), how long opening a file took and how it ended,
+    each web provider's result, the remuxer's own lines, the title on every
+    player report, what the viewer waited from opening a title to its first
+    picture, and how long each jump took.
+  - `bun scripts/playback-report.ts` turns it into the numbers: how many
+    titles had a 4K file, a 1080p one or web streams only; how long searches,
+    starts and jumps took, by device and by service; what failed, and why.
+  - `EVENT_LOG=0` turns it off.
+- A release turned away as another title is logged with the file it was
+  judged by, not its name alone.
+
 ## [2.5.5] - 2026-10-11
 
 ### Fixed
