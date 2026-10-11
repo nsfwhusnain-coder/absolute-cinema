@@ -18,6 +18,23 @@ describe("assessMediaDuration", () => {
     expect(assessMediaDuration(11 * 60, 24 * 60, "tv").plausible).toBe(true);
   });
 
+  it("rejects an hour-long episode for a feature film, and keeps a short cut of one", () => {
+    expect(assessMediaDuration(45 * 60, 100 * 60, "movie").plausible).toBe(false);
+    expect(assessMediaDuration(139 * 60, 229 * 60, "movie").plausible).toBe(true);
+  });
+
+  it("rejects a film far longer than the title, and keeps an extended edition", () => {
+    expect(assessMediaDuration(200 * 60, 95 * 60, "movie").plausible).toBe(false);
+    expect(assessMediaDuration(263 * 60, 201 * 60, "movie").plausible).toBe(true);
+    expect(assessMediaDuration(194 * 60, 144 * 60, "movie").plausible).toBe(true);
+  });
+
+  it("rejects a film for an episode, and keeps a two-part episode shown as one", () => {
+    expect(assessMediaDuration(117 * 60, 24 * 60, "tv").plausible).toBe(false);
+    expect(assessMediaDuration(48 * 60, 24 * 60, "tv").plausible).toBe(true);
+    expect(assessMediaDuration(90 * 60, 60 * 60, "tv").plausible).toBe(true);
+  });
+
   it("does not guess when the expected runtime is unknown or short-form", () => {
     expect(assessMediaDuration(130, 0, "movie").plausible).toBe(true);
     expect(assessMediaDuration(130, 8 * 60, "movie").plausible).toBe(true);

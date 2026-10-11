@@ -1,12 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUserId } from "@/lib/auth";
+import { isRefusedLink, refuseSource } from "@/lib/playback/debrid/refused-releases";
+import { assessMediaDuration } from "@/lib/playback/media-duration";
 import { resolveRemuxSourceUrl } from "@/lib/playback/remux-source";
 import { REMUXER_URL } from "@/lib/playback/remuxer";
+import { titleRuntimeMinutes, type RuntimeQuestion } from "@/lib/playback/title-runtime";
 
 export const dynamic = "force-dynamic";
 
 const OPEN_TIMEOUT_MS = 30_000;
 const LANGUAGE = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/;
+
+const SECONDS_PER_MINUTE = 60;
+
+/**
+ * Whether an opened file runs nowhere near as long as the title it was offered
+ * as: an episode filed under a film of the same name, a film under an
+ * episode, a clip. Its name passed every check, or had nothing to check; its
+ * length is the last thing that can tell. The link is forgotten and the
+ * release remembered, so the next viewer is not offered it.
+ */
+async function isAnotherLength(title: RuntimeQuestion, sourceId: string, durationS: number | undefined): Promise<boolean> {
+  const runtime = durationS ? await titleRuntimeMinutes(title) : null;
+  if (!durationS || !runtime) return false;
+  const length = assessMediaDuration(durationS, runtime * SECONDS_PER_MINUTE, title.mediaType);
+  if (length.plausible) return false;
+  console.info(
+    JSON.stringify({ event: "vod_other_length_rejected", ...title, sourceId, durationS: Math.round(durationS), runtimeS: runtime * SECONDS_PER_MINUTE })
+  );
+  await refuseSource(sourceId, title);
+  return true;
+}
 
 /**
  * GET /api/vod/open?type=&id=&sourceId=&ticket=&season=&episode=&startAt=
@@ -33,16 +57,11 @@ export async function GET(req: NextRequest) {
     const value = Number(params.get(name));
     return params.get(name) && Number.isFinite(value) ? value : undefined;
   };
-  const url = await resolveRemuxSourceUrl({
-    userId,
-    sourceId,
-    mediaType: type,
-    tmdbId,
-    season: optionalInt("season"),
-    episode: optionalInt("episode"),
-    ticket: params.get("ticket"),
-  });
+  const title: RuntimeQuestion = { mediaType: type, tmdbId, season: optionalInt("season"), episode: optionalInt("episode") };
+  const url = await resolveRemuxSourceUrl({ ...title, userId, sourceId, ticket: params.get("ticket") });
   if (!url) return NextResponse.json({ error: "Source expired" }, { status: 409 });
+  // An answer given before the file was found out still offers it.
+  if (isRefusedLink(url)) return NextResponse.json({ error: "Source does not play" }, { status: 415 });
 
   const worker = new URLSearchParams({ u: url, startAt: String(Math.max(0, optionalInt("startAt") ?? 0)) });
   const pref = params.get("audioPreference");
@@ -75,6 +94,9 @@ export async function GET(req: NextRequest) {
   };
   if (!res.ok || !body.id) {
     return NextResponse.json({ error: body.error ?? `remuxer ${res.status}` }, { status: res.status === 415 ? 415 : 502 });
+  }
+  if (await isAnotherLength(title, sourceId, body.durationS)) {
+    return NextResponse.json({ error: "Not the length of the title asked for" }, { status: 415 });
   }
   return NextResponse.json(
     {

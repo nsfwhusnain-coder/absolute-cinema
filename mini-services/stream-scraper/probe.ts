@@ -643,7 +643,7 @@ function applyDurationExpectation(
     ...result,
     ok: false,
     speedScore: 0,
-    error: "implausibly_short_duration",
+    error: "implausible_duration",
   };
 }
 

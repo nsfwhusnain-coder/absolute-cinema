@@ -31,6 +31,12 @@ describe("isImplausibleEmbedDuration", () => {
     expect(isImplausibleEmbedDuration(12 * 60, 12 * 60, "tv")).toBe(false);
   });
 
+  it("rejects a film far longer than the title, and never an episode for running long", () => {
+    expect(isImplausibleEmbedDuration(200 * 60, 95 * 60, "movie")).toBe(true);
+    expect(isImplausibleEmbedDuration(150 * 60, 120 * 60, "movie")).toBe(false);
+    expect(isImplausibleEmbedDuration(120 * 60, 24 * 60, "tv")).toBe(false);
+  });
+
   it("fails open when observed or expected runtime is unknown", () => {
     expect(isImplausibleEmbedDuration(0, 120 * 60, "movie")).toBe(false);
     expect(isImplausibleEmbedDuration(180, 0, "movie")).toBe(false);

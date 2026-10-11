@@ -70,7 +70,7 @@ describe("HLS duration plausibility probe", () => {
     );
     expect(results.get(url)).toMatchObject({
       ok: false,
-      error: "implausibly_short_duration",
+      error: "implausible_duration",
       durationS: 132,
     });
     expect(isKnownTruncatedSource(url)).toBe(true);
@@ -84,7 +84,7 @@ describe("HLS duration plausibility probe", () => {
     );
     expect(results.get(url)).toMatchObject({
       ok: false,
-      error: "implausibly_short_duration",
+      error: "implausible_duration",
       durationS: 900,
     });
     expect(isKnownTruncatedSource(url)).toBe(true);

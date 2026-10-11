@@ -118,6 +118,18 @@ export function setCachedPlayback(key: string, value: unknown, ttlMs = PLAYBACK_
   remember(playbackStore, key, { value, until: Date.now() + ttlMs }, PLAYBACK_MAX_ENTRIES);
 }
 
+/**
+ * Drops every cached answer for one title, whoever asked for it: a source in
+ * them has turned out not to play, and three minutes of offering it again is
+ * three minutes of viewers waiting on it.
+ */
+export function forgetCachedPlayback(mediaType: string, tmdbId: number, season?: number, episode?: number): void {
+  const title = `:${mediaType}:${tmdbId}:${season ?? 0}:${episode ?? 0}:`;
+  for (const key of playbackStore.keys()) {
+    if (key.includes(title)) playbackStore.delete(key);
+  }
+}
+
 function contentClassSuffix(contentClass?: string): string {
   return contentClass === "anime" ? ":anime" : "";
 }

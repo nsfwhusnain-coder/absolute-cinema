@@ -6,6 +6,9 @@ import {
   playbackCacheKey,
   playbackResponseTtlMs,
   rawScrapeCacheKey,
+  forgetCachedPlayback,
+  getCachedPlayback,
+  setCachedPlayback,
 } from "./server-cache";
 
 describe("raw scraper cache quality identity", () => {
@@ -48,5 +51,21 @@ describe("playback cache key", () => {
     const base = playbackCacheKey("tv", 1429, 1, 1, false, "user-a", 2160);
     const anime = playbackCacheKey("tv", 1429, 1, 1, false, "user-a", 2160, "anime");
     expect(anime).not.toBe(base);
+  });
+});
+
+describe("forgetCachedPlayback", () => {
+  it("drops every answer for the title, and leaves the others", () => {
+    const film = (user: string, id: number, fast: boolean) => playbackCacheKey("movie", id, undefined, undefined, fast, user, 1080);
+    for (const key of [film("u1", 27205, true), film("u2", 27205, false), film("u1", 272050, false)]) setCachedPlayback(key, { sources: [] });
+    const episode = playbackCacheKey("tv", 27205, 1, 2, false, "u1");
+    setCachedPlayback(episode, { sources: [] });
+
+    forgetCachedPlayback("movie", 27205);
+
+    expect(getCachedPlayback(film("u1", 27205, true))).toBeNull();
+    expect(getCachedPlayback(film("u2", 27205, false))).toBeNull();
+    expect(getCachedPlayback(film("u1", 272050, false))).not.toBeNull();
+    expect(getCachedPlayback(episode)).not.toBeNull();
   });
 });

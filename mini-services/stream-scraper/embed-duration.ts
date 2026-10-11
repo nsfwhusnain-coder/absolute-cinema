@@ -35,5 +35,8 @@ export function isImplausibleEmbedDuration(
     return true;
   }
 
-  return !assessMediaDuration(observedS, expectedS, mediaType).plausible;
+  if (assessMediaDuration(observedS, expectedS, mediaType).plausible) return false;
+  // An episode is judged here against its series' usual length, too rough to
+  // call a long one another title: a finale can run several times it.
+  return mediaType === "movie" || observedS < expectedS;
 }

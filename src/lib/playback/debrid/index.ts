@@ -77,6 +77,7 @@ import { inferAudioLanguageFromText } from "../source-facts";
 import { tmdb } from "../../tmdb";
 import { resolveKitsuEpisode } from "./anime-mapping";
 import { orderForStreaming } from "./streamability";
+import { titleRuntimeMinutes } from "../title-runtime";
 import {
   fetchTorrentioCandidates,
   fetchTorrentioKitsuCandidates,
@@ -93,6 +94,7 @@ import {
   type ReleaseCompat,
   type ReleaseContainer,
 } from "./torrentio";
+import { isRefusedRelease } from "./refused-releases";
 import { isWrongTitle, linkFileName, loadTitleFacts, titleFactsFor } from "./title-gate";
 import {
   isRealDebridConfigured,
@@ -345,7 +347,14 @@ async function fetchTorrentioCandidatesForTitle(
     fetchRankedTorrentioCandidates(req, imdbId, rdToken),
     titleRuntimeMinutes(req),
   ]);
-  return orderForStreaming(candidates, runtime);
+  const offered = { imdbId, season: req.season ?? 0, episode: req.episode ?? 0 };
+  // Runtime turns file sizes into bitrates, so 4K that cannot stream smoothly ranks last.
+  return orderForStreaming(withoutRefused(offered, candidates), runtime);
+}
+
+/** Leaves out releases already opened as this title and found not to play as it (see refused-releases.ts). */
+function withoutRefused(offered: { imdbId: string; season: number; episode: number }, candidates: DebridCandidate[]): DebridCandidate[] {
+  return candidates.filter((candidate) => !isRefusedRelease(offered, candidate.title));
 }
 
 async function fetchRankedTorrentioCandidates(
@@ -370,21 +379,6 @@ async function fetchRankedTorrentioCandidates(
     originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
     facts,
   });
-}
-
-/** Runtime turns file sizes into bitrates, so 4K that cannot stream smoothly ranks last. */
-async function titleRuntimeMinutes(req: ResolveDebridSourcesRequest): Promise<number | null> {
-  try {
-    if (req.mediaType === "movie") {
-      const movie = (await tmdb.movieDetails(req.tmdbId)) as { runtime?: number | null } | null;
-      return movie?.runtime || null;
-    }
-    if (!req.season || !req.episode) return null;
-    const season = await tmdb.tvSeason(req.tmdbId, req.season);
-    return season?.episodes?.find((ep) => ep.episode_number === req.episode)?.runtime || null;
-  } catch {
-    return null;
-  }
 }
 
 interface KeyBase {
@@ -1730,14 +1724,17 @@ export async function resolveDebridSources(
         // Real-Debrid configured at all.
         const torboxSourceCandidates = rdCandidates.length
           ? rdCandidates
-          : await fetchTorrentioCandidatesNoDebrid({
-              imdbId,
-              mediaType: req.mediaType,
-              season: req.season,
-              episode: req.episode,
-              originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
-              facts: titleFactsFor(imdbId),
-            });
+          : withoutRefused(
+              keyBase,
+              await fetchTorrentioCandidatesNoDebrid({
+                imdbId,
+                mediaType: req.mediaType,
+                season: req.season,
+                episode: req.episode,
+                originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
+                facts: titleFactsFor(imdbId),
+              })
+            );
 
         // ONE absolute deadline for the ENTIRE TorBox resolve — checkCached
         // plus every createtorrent/poll/requestdl below share it (each
@@ -1835,7 +1832,7 @@ async function resolveAllDebridTier(
     }),
     titleRuntimeMinutes(req),
   ]);
-  const candidates = orderForStreaming(raw, runtime);
+  const candidates = orderForStreaming(withoutRefused(keyBase, raw), runtime);
   const episodeTarget =
     req.mediaType === "tv" && req.season && req.episode
       ? { season: req.season, episode: req.episode }

@@ -823,7 +823,7 @@ async function applyLatencyProbes(
 
   const truncatedUrls = new Set(
     [...probeMap.entries()]
-      .filter(([, probe]) => probe.error === "implausibly_short_duration")
+      .filter(([, probe]) => probe.error === "implausible_duration")
       .map(([url]) => url)
   );
   if (truncatedUrls.size > 0) {
