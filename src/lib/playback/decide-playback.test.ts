@@ -315,3 +315,19 @@ describe("a debrid file on a CDN too slow to carry it", () => {
     expect(decidePlayback([debrid("alldebrid-4k", 2160, 60), debrid("debrid-1080", 1080, 228)]).immediate?.id).toBe("alldebrid-4k");
   });
 });
+
+describe("a file of several languages that is remuxed", () => {
+  const dualAudio = (id: string, maxHeight: number): PlaybackSource =>
+    src({ id, provider: "Debrid", origin: "debrid", compat: "native", container: "mkv", audioLanguage: "xx", multiAudio: true, maxHeight });
+  const webEnglish = src({ id: "web-en", provider: "Vidrock", label: "Rock", type: "hls", audioLanguage: "en" });
+
+  it("starts ahead of a web stream labelled English, since the remux picks its language", () => {
+    expect(decidePlayback([webEnglish, dualAudio("debrid-1080", 1080)]).immediate?.id).toBe("debrid-1080");
+    expect(decidePlayback([webEnglish, dualAudio("debrid-4k", 2160), dualAudio("debrid-1080", 1080)]).immediate?.id).toBe("debrid-4k");
+  });
+
+  it("is still passed over when it would be played as it is, on its maker's first track", () => {
+    const direct = src({ id: "debrid-mp4", provider: "Debrid", origin: "debrid", compat: "native", container: "mp4", audioLanguage: "xx", multiAudio: true, maxHeight: 1080 });
+    expect(decidePlayback([webEnglish, direct]).immediate?.id).toBe("web-en");
+  });
+});

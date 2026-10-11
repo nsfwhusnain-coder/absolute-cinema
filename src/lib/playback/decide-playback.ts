@@ -55,6 +55,17 @@ export function isPackSource(source: PlaybackSource): boolean {
 }
 
 /**
+ * Several languages in one file, and a remux to choose among them: it starts
+ * in the one the viewer wants (the remuxer is told which), where the same
+ * file played as it is starts on whichever track its maker put first. Left
+ * out of the language pool, a 4K or 1080p debrid file of this kind lost the
+ * start to any web stream labelled English, whatever its quality.
+ */
+function choosesItsAudio(source: PlaybackSource): boolean {
+  return source.multiAudio === true && sourceDelivery(source) === "remux";
+}
+
+/**
  * Household language policy:
  * English preferred titles stay in the auto pool when stamped English;
  * unlabeled direct HD is allowed as a fallback so native sources can start.
@@ -64,7 +75,7 @@ export function autoLanguagePool(
   contentClass?: string | null
 ): PlaybackSource[] {
   const preferredEn = sources.filter((source) =>
-    isEnglishPreferredSource(source, contentClass)
+    isEnglishPreferredSource(source, contentClass) || choosesItsAudio(source)
   );
 
   // Preserve 4K / UHD and Direct HD streams with unlabeled (und) audio alongside English streams
@@ -259,7 +270,7 @@ export function decidePlayback(
         (source) =>
           sourceMaxHeight(source) >= STARTUP_UHD_HEIGHT &&
           sourceDelivery(source) === "remux" &&
-          isHouseholdStartLanguage(source)
+          (isHouseholdStartLanguage(source) || choosesItsAudio(source))
       ),
       options,
       STARTUP_UHD_HEIGHT
