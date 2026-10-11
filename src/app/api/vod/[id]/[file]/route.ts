@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUserId } from "@/lib/auth";
-import { REMUXER_URL } from "@/lib/playback/remuxer";
+import { refuseSource } from "@/lib/playback/debrid/refused-releases";
+import { remuxSessionOrigin } from "@/lib/playback/remux-sessions";
+import { REMUXER_URL, UNUSABLE_HEADER } from "@/lib/playback/remuxer";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +18,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
   const upstream = await fetch(`${REMUXER_URL}/vod/${id}/${file}`, { signal: req.signal }).catch(() => null);
   if (!upstream) return NextResponse.json({ error: "Remuxer unavailable" }, { status: 502 });
+  // A file the remuxer cannot start is the same file for the next viewer: it is not offered again.
+  const origin = upstream.headers.has(UNUSABLE_HEADER) ? remuxSessionOrigin(id) : null;
+  if (origin) await refuseSource(origin.sourceId, origin.title);
   return new Response(upstream.body, {
     status: upstream.status,
     headers: {

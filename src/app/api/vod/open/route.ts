@@ -3,7 +3,8 @@ import { getAuthenticatedUserId } from "@/lib/auth";
 import { isRefusedLink, refuseSource } from "@/lib/playback/debrid/refused-releases";
 import { assessMediaDuration } from "@/lib/playback/media-duration";
 import { resolveRemuxSourceUrl } from "@/lib/playback/remux-source";
-import { REMUXER_URL } from "@/lib/playback/remuxer";
+import { rememberRemuxSession } from "@/lib/playback/remux-sessions";
+import { REMUXER_URL, UNUSABLE_HEADER } from "@/lib/playback/remuxer";
 import { titleRuntimeMinutes, type RuntimeQuestion } from "@/lib/playback/title-runtime";
 
 export const dynamic = "force-dynamic";
@@ -93,11 +94,14 @@ export async function GET(req: NextRequest) {
     error?: string;
   };
   if (!res.ok || !body.id) {
+    // Found out since it was last opened (by a prewarm, or a player that had stopped waiting).
+    if (res.headers.has(UNUSABLE_HEADER)) await refuseSource(sourceId, title);
     return NextResponse.json({ error: body.error ?? `remuxer ${res.status}` }, { status: res.status === 415 ? 415 : 502 });
   }
   if (await isAnotherLength(title, sourceId, body.durationS)) {
     return NextResponse.json({ error: "Not the length of the title asked for" }, { status: 415 });
   }
+  rememberRemuxSession(body.id, { sourceId, title });
   return NextResponse.json(
     {
       playlistUrl: `/api/vod/${body.id}/index.m3u8`,

@@ -19,8 +19,10 @@
 import { createServer, type ServerResponse } from "node:http";
 import { mkdirSync } from "node:fs";
 import type { AudioPreference } from "../../src/lib/profile-preferences";
+import { UNUSABLE_HEADER } from "../../src/lib/playback/remuxer";
 import { onClientGone, serveRange } from "./source-proxy";
 import {
+  UNUSABLE_ENTRY,
   VodError,
   configureVod,
   openVodSession,
@@ -58,15 +60,16 @@ function parseAudio(url: URL): VodAudioRequest {
   };
 }
 
-function send(res: ServerResponse, status: number, body: string | Uint8Array, type: string): void {
-  res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store" });
+function send(res: ServerResponse, status: number, body: string | Uint8Array, type: string, headers: Record<string, string> = {}): void {
+  res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store", ...headers });
   res.end(body);
 }
 
 function sendError(res: ServerResponse, err: unknown): void {
   const status = err instanceof VodError ? err.status : 500;
   const message = err instanceof Error ? err.message : String(err);
-  send(res, status, JSON.stringify({ error: message }), "application/json");
+  // Said apart from the body, so the app can tell a file that will never play from a request that failed.
+  send(res, status, JSON.stringify({ error: message }), "application/json", message === UNUSABLE_ENTRY ? { [UNUSABLE_HEADER]: "1" } : {});
 }
 
 mkdirSync(CACHE_DIR, { recursive: true });

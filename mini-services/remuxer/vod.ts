@@ -85,6 +85,13 @@ const FFMPEG_PROBE_BYTES = 1_500_000;
 const FIRST_FRAGMENT_TIMEOUT_MS = 11_000;
 /** Its first fragment may begin this far past the keyframe it was started at before the keyframe is called unusable. */
 const ENTRY_TOLERANCE_S = 1;
+/**
+ * Fragments of sound alone a run may open with before its picture is given
+ * up for lost. Some files (an AV1 stream with no header a copy can carry
+ * over) yield their audio and never one frame of video: waiting out the
+ * first-fragment timeout on those cost every viewer eleven seconds.
+ */
+const PICTURELESS_FRAGMENTS_MAX = 6;
 /** Half a second: a slice (two seconds or so) then always holds several fragments, and never none. */
 const FRAGMENT_MAX_US = 500_000;
 const SEEK_POINT_DECIMALS = 3;
@@ -108,7 +115,7 @@ function freeBytes(dir: string): number {
   }
 }
 
-const UNUSABLE_ENTRY = "source cannot be started at this position";
+export const UNUSABLE_ENTRY = "source cannot be started at this position";
 
 export class VodError extends Error {
   constructor(
@@ -159,6 +166,8 @@ interface Session {
   wantedTime: number;
   /** A player has asked for it (false while it is only prewarmed). */
   demanded: boolean;
+  /** The file gives up no picture, wherever it is started: no run of it is worth starting or waiting on. */
+  pictureless: boolean;
   info: VodSessionInfo;
 }
 
@@ -319,6 +328,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
     lastRequestAt: Date.now(),
     wantedTime: 0,
     demanded: false,
+    pictureless: false,
     info: {
       id,
       durationS: index.durationS,
@@ -460,6 +470,7 @@ function demand(session: Session): void {
 }
 
 function startRun(session: Session, segment: number): Run {
+  if (session.pictureless) throw new VodError(UNUSABLE_ENTRY, 502);
   if (freeBytes(session.dir) < MIN_FREE_BYTES) {
     // A prewarm does not clear anyone's cache to make its own.
     if (!session.demanded) throw new VodError("not enough free disk space to remux", 507);
@@ -487,6 +498,7 @@ function startRun(session: Session, segment: number): Run {
   const splitter = new Fmp4StreamSplitter();
   let stderr = "";
   let seq = 0;
+  let pictureless = 0;
   proc.stdout!.on("data", (chunk: Buffer) => {
     let parts;
     try {
@@ -504,9 +516,16 @@ function startRun(session: Session, segment: number): Run {
         }
         continue;
       }
-      if (!session.video) continue;
-      const raw = firstVideoDecodeTime(part.bytes, session.video);
-      if (raw === null) continue;
+      const raw = session.video ? firstVideoDecodeTime(part.bytes, session.video) : null;
+      if (raw === null) {
+        if (run.fragments.length || ++pictureless < PICTURELESS_FRAGMENTS_MAX) continue;
+        clearTimeout(firstFragment);
+        // True of the file, not of where it was started: the runs beside this one end the same way.
+        session.pictureless = true;
+        for (const other of aliveRuns(session)) if (other !== run) stopRun(other, "sound and no picture");
+        giveUp("sound and no picture");
+        return;
+      }
       const time = snapToKeyframe(session.keyframes, raw);
       if (!run.fragments.length) {
         clearTimeout(firstFragment);
@@ -670,7 +689,7 @@ async function* windowFragments(session: Session, window: PlanWindow, segment: n
     if (run) break;
     if (gone()) return;
     // Waiting longer, or starting again, would end the same way.
-    if (session.runs.some((r) => r.unusable && r.startSegment === segment)) throw new VodError(UNUSABLE_ENTRY, 502);
+    if (session.pictureless || session.runs.some((r) => r.unusable && r.startSegment === segment)) throw new VodError(UNUSABLE_ENTRY, 502);
     if (Date.now() > deadline) throw new VodError("segment not ready", 504);
     if (!runReaching(session, window)) {
       const failed = session.runs.filter((r) => r.failed && r.startSegment === segment).length;
