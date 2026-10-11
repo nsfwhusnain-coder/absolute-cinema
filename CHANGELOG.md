@@ -2,6 +2,20 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.5.7] - 2026-10-11
+
+### Fixed
+- **A title's page left open kept asking for its film to be made ready, for as
+  long as it stayed open.** The page renewed the request every minute with no
+  end, in a tab nobody was looking at as much as in one somebody was: 36 times
+  in 35 minutes for one forgotten tab, holding a place and a paused download
+  for a film nobody was about to watch. It now renews only while the page is
+  on screen, and only for about four minutes; coming back to the tab makes it
+  ready again.
+- The playback report counted those requests as files opened by a player
+  ("36 of 36 opened, 0.0 s"). They are now a line of their own, and a report
+  over a period in which nothing was played says so.
+
 ## [2.5.6] - 2026-10-11
 
 ### Added
