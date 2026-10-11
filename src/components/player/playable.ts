@@ -1,6 +1,6 @@
 import type { PlaybackSource } from "@/lib/playback/types";
 import { decidePlayback } from "@/lib/playback/decide-playback";
-import { isSourcePlayableHere, sourceDelivery, sourceMaxHeight } from "@/lib/playback/source-quality";
+import { bitrateSustainabilityRank, isSourcePlayableHere, sourceDelivery, sourceMaxHeight } from "@/lib/playback/source-quality";
 import { preferNativeHls } from "@/lib/playback/player-engine";
 import { supportsDolbyVision } from "@/lib/playback/decode-capability";
 import type { Ranker } from "@/lib/playback/orchestrator";
@@ -38,9 +38,14 @@ export function playableHere(sources: readonly PlaybackSource[], remuxAvailable:
  * source; a height narrows to sources at that height (or the closest below)
  * before ranking, so choosing 1080p never quietly starts a 4K stream.
  */
-/** The server has seen this source fail recently: its probe failed or its provider is cooling down. */
+/**
+ * The server has reason to doubt this source: its probe failed, its provider
+ * is cooling down, or its CDN was measured too slow to carry it. The last
+ * matters most in the first answer for a title, which can hold nothing else:
+ * started then, the file is never left for the better one a moment behind it.
+ */
 export function isSuspect(source: PlaybackSource, now = Date.now()): boolean {
-  if (source.probe?.ok === false) return true;
+  if (source.probe?.ok === false || bitrateSustainabilityRank(source) < 0) return true;
   return (source.runtimeHealth?.cooldownUntil ?? 0) > now;
 }
 

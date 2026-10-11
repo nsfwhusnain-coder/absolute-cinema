@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 import { describe, expect, it } from "bun:test";
-import { normalizeHeight, qualityLabel } from "./playable";
+import type { PlaybackSource } from "@/lib/playback/types";
+import { createRanker, isSuspect, normalizeHeight, qualityLabel } from "./playable";
 
 describe("normalizeHeight", () => {
   it("calls an ordinary 1080-line picture 1080p, not 1440p", () => {
@@ -29,5 +30,38 @@ describe("normalizeHeight", () => {
 
   it("does not invent a rung for something far below the smallest", () => {
     expect(normalizeHeight(200)).toBe(200);
+  });
+});
+
+describe("isSuspect", () => {
+  const MBIT = 1_000_000 / 8;
+  const debrid = (id: string, maxHeight: number, cdnMbit?: number): PlaybackSource => ({
+    id,
+    url: `/${id}`,
+    provider: "Debrid",
+    quality: `${maxHeight}p`,
+    label: id,
+    type: "mp4",
+    origin: "debrid",
+    compat: "native",
+    container: "mp4",
+    codec: "h264",
+    audioLanguage: "en",
+    maxHeight,
+    ...(cdnMbit === undefined ? {} : { cdnBytesPerSec: cdnMbit * MBIT }),
+  });
+
+  it("doubts a file its CDN was measured too slow to carry, and no other", () => {
+    expect(isSuspect(debrid("alldebrid-4k", 2160, 2.5))).toBe(true);
+    expect(isSuspect(debrid("debrid-4k", 2160, 228))).toBe(false);
+    expect(isSuspect(debrid("debrid-4k", 2160))).toBe(false);
+  });
+
+  it("leaves such a file for one that will play, and still takes it when it is alone", () => {
+    const ranker = createRanker("auto", true, "");
+    const slow = debrid("alldebrid-4k", 2160, 2.5);
+    expect(ranker.pick([slow, debrid("debrid-1080", 1080, 228)])?.id).toBe("debrid-1080");
+    expect(ranker.pick([slow])?.id).toBe("alldebrid-4k");
+    expect(ranker.isSuspect?.(slow)).toBe(true);
   });
 });
