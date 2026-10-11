@@ -398,6 +398,9 @@ export function usePlayerController(options: PlayerControllerOptions) {
     let lastTick = performance.now();
 
     const onPlaying = () => {
+      // While another source is being opened, the element still plays the one
+      // it replaces. Its frame is not the new source's first.
+      if (attaching.current) return;
       s().set({ playing: true, buffering: false, autoplayBlocked: false });
       if (stallTimer.current) clearTimeout(stallTimer.current);
       // A first frame always settles the attach's start timer, whatever the
