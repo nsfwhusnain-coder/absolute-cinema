@@ -1,3 +1,4 @@
+import { logEvent } from "@/lib/event-log";
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUserId } from "@/lib/auth";
 import type { PlayerFeedbackEvent } from "@/lib/playback/types";
@@ -17,6 +18,8 @@ const feedbackLimiter = new RateLimiter({
   windowMs: FEEDBACK_WINDOW_MS,
 });
 
+/** Longest wait for a picture worth writing down as one. */
+const MAX_WAIT_MS = 600_000;
 const EVENTS = new Set<PlayerFeedbackEvent>([
   "first_frame",
   "decoded_resolution",
@@ -24,6 +27,7 @@ const EVENTS = new Set<PlayerFeedbackEvent>([
   "handoff_failed",
   "decode_error",
   "sustained_play",
+  "seek",
 ]);
 
 export async function POST(req: NextRequest) {
@@ -95,6 +99,8 @@ export async function POST(req: NextRequest) {
     attemptId: text(body.attemptId, 96),
     occurredAt: finite(body.occurredAt, Date.now() + 60_000) ?? Date.now(),
     timeToFirstFrameMs: finite(body.timeToFirstFrameMs, 180_000),
+    sinceOpenMs: finite(body.sinceOpenMs, MAX_WAIT_MS),
+    seekMs: finite(body.seekMs, MAX_WAIT_MS),
     decodedHeight: finite(body.decodedHeight, 4320),
     selectedHeight: finite(body.selectedHeight, 4320),
     audioCodec: text(body.audioCodec, 32),
@@ -103,15 +109,21 @@ export async function POST(req: NextRequest) {
     errorDetail: text(body.errorDetail, 180),
     reason: text(body.reason, 120),
   };
-  console.info(
-    JSON.stringify({
-      userId,
-      ...feedback,
-      ...(platform ? { platform } : {}),
-      event: "player_feedback",
-      feedbackEvent: feedback.event,
-    })
-  );
+  const tmdbId = text(body.tmdbId, 24);
+  const mediaType = body.mediaType === "tv" ? "tv" : "movie";
+  const season = finite(body.season, 100) ?? 0;
+  const episode = finite(body.episode, 10_000) ?? 0;
+  logEvent("player_feedback", {
+    userId,
+    ...feedback,
+    ...(platform ? { platform } : {}),
+    ...(tmdbId ? { tmdbId, mediaType, season, episode } : {}),
+    watchedMs: finite(body.watchedMs, MAX_WATCHED_MS_PER_EVENT),
+    event: "player_feedback",
+    feedbackEvent: feedback.event,
+  });
+  // A jump is for the record: it says nothing of a source's health.
+  if (feedback.event === "seek") return new NextResponse(null, { status: 204 });
   // A file this device could not decode says nothing about the server it came
   // from, and both histories below are read by every screen in the house.
   const viewerSide = isViewerSideFailure(feedback);
@@ -122,17 +134,10 @@ export async function POST(req: NextRequest) {
   // title so the next visit can lead with it. Awaited so a burst of events
   // folds in order (streaks and rolling averages are order-dependent), but it
   // can never fail the request — the store swallows its own errors.
-  const tmdbId = text(body.tmdbId, 24);
-  const mediaType = body.mediaType === "tv" ? "tv" : "movie";
   if (tmdbId && !viewerSide) {
     const watchedMs = finite(body.watchedMs, MAX_WATCHED_MS_PER_EVENT);
     await recordSourceFeedback(
-      sourceMemoryScope(
-        tmdbId,
-        mediaType,
-        finite(body.season, 100) ?? 0,
-        finite(body.episode, 10_000) ?? 0
-      ),
+      sourceMemoryScope(tmdbId, mediaType, season, episode),
       { ...feedback, watchedMs },
       text(body.label, 80) ?? provider
     );

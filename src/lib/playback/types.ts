@@ -296,7 +296,9 @@ export type PlayerFeedbackEvent =
    * what separates a good source from a corrupt or wrong-title file that also
    * renders one frame. Carries `watchedMs`. See `source-memory.ts`.
    */
-  | "sustained_play";
+  | "sustained_play"
+  /** A jump within the title, once the picture is moving again. Carries `seekMs`. Kept for the record only. */
+  | "seek";
 
 export interface PlayerFeedback {
   event: PlayerFeedbackEvent;
@@ -315,6 +317,10 @@ export interface PlayerFeedback {
   reason?: string;
   /** Milliseconds actually watched on this source. Only on `sustained_play`. */
   watchedMs?: number;
+  /** From the jump to the picture moving again. Only on `seek`. */
+  seekMs?: number;
+  /** From the player opening on the title to its first picture: what the viewer waited. Only on a title's first `first_frame`. */
+  sinceOpenMs?: number;
   /** Title this attempt belongs to, so memory can be scoped per-title. */
   tmdbId?: string;
   mediaType?: "movie" | "tv";

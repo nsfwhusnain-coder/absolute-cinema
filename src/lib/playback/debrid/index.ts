@@ -72,6 +72,7 @@
  * set (fast path only ever looks at RD) — the existing embed roster is
  * completely unaffected until the owner opts into at least one.
  */
+import { logEvent, recordEvent } from "@/lib/event-log";
 import type { MediaType, PlaybackSource } from "../types";
 import { inferAudioLanguageFromText } from "../source-facts";
 import { tmdb } from "../../tmdb";
@@ -93,6 +94,7 @@ import {
   type ReleaseCodec,
   type ReleaseCompat,
   type ReleaseContainer,
+  torrentioEvents,
 } from "./torrentio";
 import { noteCdnLink, withCdnRates } from "./cdn-rate";
 import { bitrateSustainabilityRank } from "../source-quality";
@@ -414,7 +416,7 @@ function isOtherTitle(keyBase: KeyBase, release: string, url: string): boolean {
     episode: keyBase.episode || undefined,
   });
   if (other) {
-    console.info(JSON.stringify({ event: "debrid_other_title_rejected", imdbId: keyBase.imdbId, release, file: linkFileName(url) }));
+    logEvent("debrid_other_title_rejected", { imdbId: keyBase.imdbId, release, file: linkFileName(url) });
   }
   return other;
 }
@@ -940,21 +942,20 @@ function logRejectedRdMedia(
   imdbId?: string,
   slot?: DebridSlot
 ): void {
-  console.warn(
-    JSON.stringify({
-      event: "debrid_media_rejected",
-      provider: "realdebrid",
-      path,
-      mediaType,
-      ...(imdbId ? { imdbId } : {}),
-      ...(slot ? { slot } : {}),
-      title: record.title,
-      reason: validation.reason,
-      totalBytes: validation.totalBytes,
-      status: validation.status,
-      validationMs: validation.elapsedMs,
-    })
-  );
+  const rejection = {
+    provider: "realdebrid",
+    path,
+    mediaType,
+    ...(imdbId ? { imdbId } : {}),
+    ...(slot ? { slot } : {}),
+    title: record.title,
+    reason: validation.reason,
+    totalBytes: validation.totalBytes,
+    status: validation.status,
+    validationMs: validation.elapsedMs,
+  };
+  console.warn(JSON.stringify({ event: "debrid_media_rejected", ...rejection }));
+  recordEvent("web", "debrid_media_rejected", rejection);
 }
 
 /** Cache-first read across the RD roster — unsafe, dead, or implausibly small rows are misses. */
@@ -1234,7 +1235,15 @@ const RD_GOOD_ENOUGH_HEIGHT = 1080;
 /** With a 4K preference, how long to hold out for a 4K pool that is still hunting. */
 export const RD_4K_SOFT_DEADLINE_MS = 18_000;
 
+torrentioEvents.onOtherTitleRejected = (rejection) => recordEvent("web", "debrid_other_title_rejected", rejection);
+
 const reaches = (sources: readonly PlaybackSource[], height: number) => sources.some((s) => (s.maxHeight ?? 0) >= height);
+/** The tallest file each service gave, for the record of a search. */
+function bestHeightByProvider(sources: readonly PlaybackSource[]): Record<string, number> {
+  const best: Record<string, number> = {};
+  for (const source of sources) best[source.provider] = Math.max(best[source.provider] ?? 0, source.maxHeight ?? 0);
+  return best;
+}
 /** The files a player would start: not those on a CDN measured too slow to carry them. */
 const startable = (sources: readonly PlaybackSource[]) => withCdnRates(sources).filter((s) => bitrateSustainabilityRank(s) >= 0);
 
@@ -1861,9 +1870,19 @@ export async function resolveDebridSources(
     const settled = rdComplete && (!allDebrid || allDebrid.done);
     if (!settled) incompleteRosters.add(sources);
     outlooks.set(sources, { fourKSettled: noFourKToCome(), settled });
-    console.info(
-      JSON.stringify({ event: "debrid_resolve_timing", mediaType: req.mediaType, tmdbId: req.tmdbId, season, episode, ...took, totalMs: Date.now() - started, sources: sources.length, settled })
-    );
+    logEvent("debrid_resolve_timing", {
+      mediaType: req.mediaType,
+      tmdbId: req.tmdbId,
+      season,
+      episode,
+      want4k: Boolean(req.want4k),
+      ...took,
+      totalMs: Date.now() - started,
+      sources: sources.length,
+      best: bestHeightByProvider(sources),
+      fourKSettled: noFourKToCome(),
+      settled,
+    });
 
     return sources;
   } catch {

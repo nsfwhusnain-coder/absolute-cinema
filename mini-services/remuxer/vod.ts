@@ -10,6 +10,7 @@
  * sessions are cleaned up.
  */
 
+import { recordEvent } from "../../src/lib/event-log";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, statSync, statfsSync, writeFileSync, readdirSync } from "node:fs";
@@ -214,6 +215,7 @@ const opening = new Map<string, Promise<Session>>();
 
 function log(message: string): void {
   console.log(`[vod] ${message}`);
+  recordEvent("remux", "vod", { message, ...vodStats() });
 }
 
 function sessionId(url: string, audio: VodAudioRequest, viewer: VodViewer): string {
@@ -460,6 +462,7 @@ function makeRoom(session: Session): void {
     for (const run of aliveRuns(other)) stopRun(run, "global run limit");
     if (totalAliveRuns() < MAX_RUNS_TOTAL) return;
   }
+  log(`refused ${session.id}: every run is taken by someone watching`);
   throw new VodError("remux capacity reached", 503);
 }
 

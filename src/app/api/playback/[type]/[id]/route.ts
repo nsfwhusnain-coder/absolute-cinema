@@ -11,6 +11,7 @@ import { withCdnRates } from "@/lib/playback/debrid/cdn-rate";
 import { remuxHasCapacity } from "@/lib/playback/remux-health";
 import { bitrateSustainabilityRank } from "@/lib/playback/source-quality";
 import { buildFastDebridResponse } from "@/lib/playback/fast-debrid";
+import { answerFacts } from "@/lib/playback/answer-facts";
 import { RateLimiter } from "@/lib/rate-limit";
 import { getUserPlaybackPreferences } from "@/lib/profile-preferences.server";
 import {
@@ -246,6 +247,7 @@ export async function GET(
       );
       rememberPlaybackRoster(sourceCacheIdentity, healthAware.sources);
       tracker.mark("cache_hit");
+      tracker.setAnswer({ userId, mode: fast ? "fast" : "full", cache: "hit", qualityHint, ...answerFacts(healthAware) });
       tracker.setSelectedSource({
         id: healthAware.streamUrl || "cached",
         quality: healthAware.sources?.[0]?.quality || "auto",
@@ -369,6 +371,7 @@ export async function GET(
   );
   rememberPlaybackRoster(sourceCacheIdentity, healthAwareResult.sources);
 
+  tracker.setAnswer({ userId, mode: fast ? "fast" : "full", cache: "miss", qualityHint, ...answerFacts(healthAwareResult) });
   tracker.setSelectedSource({
     id: healthAwareResult.streamUrl || "none",
     quality: healthAwareResult.sources?.[0]?.quality || "auto",

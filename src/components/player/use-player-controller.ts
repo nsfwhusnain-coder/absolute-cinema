@@ -59,6 +59,8 @@ const PROGRESS_REPORT_MS = 10_000;
 /** Watch time that proves a source works (feeds per-title source memory). */
 const SUSTAINED_PLAY_MS = 90_000;
 const TIME_UPDATE_MIN_MS = 250;
+/** The picture counts as moving again this far past where a jump landed. */
+const SEEK_MOVING_S = 0.25;
 /** Reported when a file is passed over for having no audio in the wanted language. */
 const WRONG_LANGUAGE_REASON = "no audio in the wanted language";
 
@@ -97,6 +99,10 @@ export function usePlayerController(options: PlayerControllerOptions) {
   const rebufferSwitches = useRef(0);
   const attachAbort = useRef<AbortController | null>(null);
   const attemptStartedAt = useRef(0);
+  /** When the player opened on this title, for what the viewer waited in all. */
+  const openedAt = useRef(0);
+  /** A jump still waiting for its picture: when it was made and where it landed. */
+  const pendingSeek = useRef<{ at: number; target: number } | null>(null);
   const playedOnSourceMs = useRef(0);
   const sustainedReported = useRef(false);
   const lastProgressAt = useRef(0);
@@ -274,6 +280,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       // track expects to stay paused at the same spot.
       const stayPaused = command.keepPosition && userPaused.current && orchestrator.current.everPlayed;
       attaching.current = true;
+      pendingSeek.current = null;
       s.set({ buffering: true, failureMessage: null, levels: [], audioTracks: [], currentLevel: -1 });
       attemptStartedAt.current = Date.now();
       sustainedReported.current = false;
@@ -359,6 +366,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
     window.addEventListener("pagehide", onPageHide);
     const { title } = optionsRef.current;
     setFeedbackTitleContext({ tmdbId: String(title.tmdbId), mediaType: title.mediaType, season: title.season, episode: title.episode });
+    openedAt.current = Date.now();
+    pendingSeek.current = null;
     // Mute and full screen carry over from the previous episode (the page stays
     // full screen across episodes); the new element starts from them.
     const carried = { muted: store.getState().muted };
@@ -417,6 +426,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       if ((phase === "starting" || phase === "recovering") && video.videoWidth > 0) {
         clearTimers();
         const source = sourceById(orchestrator.current.activeId);
+        const firstOfTitle = !orchestrator.current.everPlayed;
         orchestrator.current = onFirstFrame(orchestrator.current, Date.now());
         s().set({ phase: "playing", decodedHeight: video.videoHeight, startNote: null });
         // A file played directly says nothing about its range: ask the picture itself.
@@ -430,6 +440,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
             sourceId: source.id,
             provider: source.provider,
             timeToFirstFrameMs: Date.now() - attemptStartedAt.current,
+            ...(firstOfTitle ? { sinceOpenMs: Date.now() - openedAt.current } : {}),
             decodedHeight: video.videoHeight,
             engine: engineRef.current?.kind,
           });
@@ -447,6 +458,14 @@ export function usePlayerController(options: PlayerControllerOptions) {
         }
       }
       lastTick = now;
+      const jump = pendingSeek.current;
+      // Paused meanwhile: the wait from here on is the viewer's own.
+      if (jump && video.paused) pendingSeek.current = null;
+      else if (jump && !video.seeking && t > jump.target + SEEK_MOVING_S) {
+        pendingSeek.current = null;
+        const source = sourceById(orchestrator.current.activeId);
+        if (source) emitPlayerFeedback({ event: "seek", sourceId: source.id, provider: source.provider, seekMs: Math.round(now - jump.at), engine: engineRef.current?.kind });
+      }
       if (orchestrator.current.phase === "playing" || orchestrator.current.phase === "recovering") positionRef.current = t;
       if (stallTimer.current && !video.paused) {
         clearTimeout(stallTimer.current);
@@ -577,6 +596,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
       const duration = store.getState().duration || v.duration;
       const wanted = Math.max(0, Math.min(time, (duration || time) - 0.5));
       const target = engineRef.current?.seekTarget(wanted) ?? wanted;
+      // Timed only while playing: a jump made before the first picture is part of the start.
+      pendingSeek.current = orchestrator.current.phase === "playing" && !v.paused ? { at: performance.now(), target } : null;
       v.currentTime = target;
       positionRef.current = target;
       store.getState().set({ currentTime: target });

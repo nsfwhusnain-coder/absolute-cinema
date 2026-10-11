@@ -764,6 +764,15 @@ async function fetchTorrentioJson(url: string): Promise<TorrentioResponseRaw | n
  * `isSourcePlayableHere`) can present them honestly without auto-selecting
  * an incompatible release.
  */
+/**
+ * Where a rejection is also sent, when something is listening. This file is
+ * bundled for the browser too (the player reads release names with it), so it
+ * cannot reach the server's event log itself: the debrid resolver sets this.
+ */
+export const torrentioEvents: { onOtherTitleRejected: ((rejection: Record<string, unknown>) => void) | null } = {
+  onOtherTitleRejected: null,
+};
+
 function parseTorrentioStreams(
   data: TorrentioResponseRaw,
   configuredDebrid: boolean,
@@ -811,7 +820,8 @@ function parseTorrentioStreams(
         })
       : "verified";
     if (identity === "wrong") {
-      otherTitles.push(rawTitle ?? "");
+      // With the file it was judged by: the release name alone does not say why.
+      otherTitles.push(s.behaviorHints?.filename ? `${rawTitle ?? ""}  ||  ${s.behaviorHints.filename}` : (rawTitle ?? ""));
       continue;
     }
     candidates.push({
@@ -831,17 +841,16 @@ function parseTorrentioStreams(
     });
   }
   if (otherTitles.length) {
-    console.info(
-      JSON.stringify({
-        event: "debrid_other_title_rejected",
-        mediaType,
-        wanted: wanted?.facts?.titles[0],
-        year: wanted?.facts?.year,
-        rejected: otherTitles.length,
-        kept: candidates.length,
-        sample: otherTitles.slice(0, 3),
-      })
-    );
+    const rejection = {
+      mediaType,
+      wanted: wanted?.facts?.titles[0],
+      year: wanted?.facts?.year,
+      rejected: otherTitles.length,
+      kept: candidates.length,
+      sample: otherTitles.slice(0, 3),
+    };
+    console.info(JSON.stringify({ event: "debrid_other_title_rejected", ...rejection }));
+    torrentioEvents.onOtherTitleRejected?.(rejection);
   }
   return selectTopPerClass(
     filterLeanDebridCandidates(inOriginalLanguage(candidates), mediaType),

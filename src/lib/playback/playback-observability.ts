@@ -1,3 +1,4 @@
+import { recordEvent } from "@/lib/event-log";
 /**
  * Structured Playback Observability & Correlation Tracking.
  *
@@ -40,6 +41,7 @@ export class PlaybackTracker {
   private lastMarkTime: number;
   private readonly marks: PlaybackStageMark[] = [];
   private selectedSourceInfo?: PlaybackSessionSummary["selectedSource"];
+  private answer: Record<string, unknown> = {};
 
   constructor(args: {
     playbackId?: string;
@@ -115,6 +117,12 @@ export class PlaybackTracker {
     };
   }
 
+  /** What the answer held and who asked, for the durable record of it (see `logSummary`). */
+  public setAnswer(facts: Record<string, unknown>): this {
+    this.answer = facts;
+    return this;
+  }
+
   public logSummary(level: "info" | "debug" = "info"): void {
     const summary = this.getSummary();
     const payload = JSON.stringify({
@@ -126,6 +134,19 @@ export class PlaybackTracker {
     } else {
       console.debug(payload);
     }
+    // The line above carries the chosen link; the kept record has the times and counts only.
+    const stages: Record<string, number> = {};
+    for (const mark of summary.stages) stages[mark.stage] = Math.round(mark.elapsedMs);
+    recordEvent("web", "playback_answer", {
+      playbackId: summary.playbackId,
+      mediaType: summary.mediaType,
+      tmdbId: summary.tmdbId,
+      season: summary.season,
+      episode: summary.episode,
+      totalMs: Math.round(summary.totalDurationMs),
+      stages,
+      ...this.answer,
+    });
   }
 
   public getTimingHeaderValue(): string {

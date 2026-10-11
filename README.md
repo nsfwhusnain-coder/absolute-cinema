@@ -239,10 +239,24 @@ Everything is optional. Copy [`.env.example`](.env.example) to `.env` to overrid
 | `TORBOX_API_KEY` | – | Optional TorBox account as an extra debrid source |
 | `ALLDEBRID_API_KEY` | – | Optional AllDebrid premium account; covers releases Real-Debrid has taken down |
 | `PROVIDER_<NAME>=0` | on | Disable an individual web source |
+| `EVENT_LOG` | `1` | Keep the diagnostics log described below; `0` turns it off |
 
 **Data** lives in three folders next to `docker-compose.yml`: `db/` (profiles, history,
 settings), `data/source-memory/` (remembered servers) and `transcode-cache/` (remux
 output; bounded by the settings above and safe to delete).
+
+**Diagnostics.** Every search, start, failure, stall and jump is written as one line
+to `db/events/`, kept for 30 days and never sent anywhere; viewers appear as a tag, not
+an account. It is what answers "how long do starts take on the TV?" or "did this get
+worse last week?":
+
+```bash
+docker exec absolute-cinema bun scripts/playback-report.ts            # the last 7 days
+docker exec absolute-cinema bun scripts/playback-report.ts --days 1 --json
+```
+
+The report says how many titles had a 4K file, a 1080p one or web streams only; how long
+searches, starts and jumps took by device and by service; and what failed and why.
 
 **Reverse proxy.** Put Caddy, nginx or Traefik in front of port 3000 and set `NEXTAUTH_URL`
 to the public address. Disable response buffering for `/api/hls` and `/api/vod`.

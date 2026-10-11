@@ -4,6 +4,7 @@
  * Captures direct m3u8/mp4/mpd URLs plus auth context for the HLS proxy.
  */
 
+import { recordEvent } from "../../src/lib/event-log";
 import { chromium, type Browser } from "playwright";
 import { createServer } from "http";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -2605,6 +2606,7 @@ async function resolveFastApiSources(
       maxWaitMs: FAST_MAX_WAIT_MS,
       onLateEntries: (_provider, entries) => options.onLateSources?.(entries),
       onOutcome: (outcome) => {
+        recordEvent("scraper", "provider_result", { ...outcome, mode: "fast" });
         logAt(
           outcome.status === "error" ? "warn" : "info",
           `[provider] fast request provider=${outcome.provider} status=${outcome.status} count=${outcome.count} ms=${outcome.ms} late=${outcome.late}${outcome.error ? ` error=${outcome.error}` : ""}`
@@ -3536,6 +3538,7 @@ async function executeUnresolvedScrape(
         }
       },
       onOutcome: (outcome) => {
+        recordEvent("scraper", "provider_result", { ...outcome, mode: "full", request: key });
         logAt(
           outcome.status === "error" ? "warn" : "info",
           `[provider] request=${key} provider=${outcome.provider} status=${outcome.status} count=${outcome.count} ms=${outcome.ms} late=${outcome.late}${outcome.error ? ` error=${outcome.error}` : ""}`

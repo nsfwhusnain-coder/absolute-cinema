@@ -1,3 +1,4 @@
+import { logEvent, recordEvent } from "@/lib/event-log";
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUserId } from "@/lib/auth";
 import { isRefusedLink, refuseSource } from "@/lib/playback/debrid/refused-releases";
@@ -26,9 +27,7 @@ async function isAnotherLength(title: RuntimeQuestion, sourceId: string, duratio
   if (!durationS || !runtime) return false;
   const length = assessMediaDuration(durationS, runtime * SECONDS_PER_MINUTE, title.mediaType);
   if (length.plausible) return false;
-  console.info(
-    JSON.stringify({ event: "vod_other_length_rejected", ...title, sourceId, durationS: Math.round(durationS), runtimeS: runtime * SECONDS_PER_MINUTE })
-  );
+  logEvent("vod_other_length_rejected", { ...title, sourceId, durationS: Math.round(durationS), runtimeS: runtime * SECONDS_PER_MINUTE });
   await refuseSource(sourceId, title);
   return true;
 }
@@ -78,10 +77,17 @@ export async function GET(req: NextRequest) {
   // Asked for ahead of Play: made ready, but never at a viewer's expense.
   if (params.get("prewarm") === "1") worker.set("prewarm", "1");
 
+  const asked = Date.now();
+  /** How long the open took and how it ended: the largest part of a start that is not the search. */
+  const opened = (outcome: string, session?: string) =>
+    recordEvent("web", "vod_open", { userId, ...title, sourceId, prewarm: worker.has("prewarm"), startAt: Number(worker.get("startAt")), tookMs: Date.now() - asked, outcome, session });
   const res = await fetch(`${REMUXER_URL}/vod/open?${worker}`, { signal: AbortSignal.timeout(OPEN_TIMEOUT_MS) }).catch(
     () => null
   );
-  if (!res) return NextResponse.json({ error: "Remuxer unavailable" }, { status: 502 });
+  if (!res) {
+    opened("remuxer unavailable");
+    return NextResponse.json({ error: "Remuxer unavailable" }, { status: 502 });
+  }
   const body = (await res.json().catch(() => ({}))) as {
     id?: string;
     durationS?: number;
@@ -96,11 +102,14 @@ export async function GET(req: NextRequest) {
   if (!res.ok || !body.id) {
     // Found out since it was last opened (by a prewarm, or a player that had stopped waiting).
     if (res.headers.has(UNUSABLE_HEADER)) await refuseSource(sourceId, title);
+    opened(body.error ?? `remuxer ${res.status}`);
     return NextResponse.json({ error: body.error ?? `remuxer ${res.status}` }, { status: res.status === 415 ? 415 : 502 });
   }
   if (await isAnotherLength(title, sourceId, body.durationS)) {
+    opened("another length");
     return NextResponse.json({ error: "Not the length of the title asked for" }, { status: 415 });
   }
+  opened("ok", body.id);
   rememberRemuxSession(body.id, { sourceId, title });
   return NextResponse.json(
     {
