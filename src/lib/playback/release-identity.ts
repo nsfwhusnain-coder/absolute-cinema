@@ -18,6 +18,10 @@ export interface TitleFacts {
   year: number | null;
   /** The year each season of a series first aired, by season number. */
   seasonYears?: Readonly<Record<number, number>>;
+  /** The name of each season that has one of its own ("Dressrosa", "Thousand-Year Blood War"), by season number. */
+  seasonNames?: Readonly<Record<number, string>>;
+  /** Anime: its run is cut into seasons differently from one catalogue to the next, so a season's number on a file is not this catalogue's. */
+  anime?: boolean;
 }
 
 /** "unknown" is a name with no title in it to judge (a bare hash), or the right year under a variation of the title's name. */
@@ -45,7 +49,7 @@ const TECHNICAL_UNMISTAKABLE =
   /(?<![\p{L}\p{N}])(?:2160p|1440p|1080[pi]|720p|576p|480p|\d{3,4}x\d{3,4}[pi]?|4k|uhd|bluray|blu ray|bdrip|brrip|bdremux|remux|webrip|webdl|web dl|web dlrip|hdtv|hdrip|dvdrip|hdcam|telesync|x264|x265|h264|h265|h 264|h 265|hevc|xvid|divx|10bit|10 bit|ddp|dts|aac|ac3|mkv|mp4|avi)(?![\p{L}\p{N}])/u;
 /** Where a series release starts counting seasons and episodes. */
 const SEASON =
-  /(?<![\p{L}\p{N}])(?:s\d{1,2}(?:\s?ep?\d{1,3}(?:v\d)?)?(?:\s?-\s?(?:s|e)?\d{1,3})?|(?:seasons?|saisons?|temporadas?|stagion[ei]|staffel|sezon)\s?\d{1,2}(?:\s?(?:-|to|and)\s?\d{1,2})?|complete series|\d{1,2}x\d{2,3})(?![\p{L}\p{N}])/u;
+  /(?<![\p{L}\p{N}])(?:s\d{1,2}(?:p\d{1,2})?(?:\s?ep?\d{1,3}(?:v\d)?)?(?:\s?-\s?(?:s|e)?\d{1,3})?|(?:seasons?|saisons?|temporadas?|stagion[ei]|staffel|sezon)\s?\d{1,2}(?:\s?(?:-|to|and)\s?\d{1,2})?|\d{1,2}(?:a|o|e|er|re|eme|st|nd|rd|th)\s(?:seasons?|saisons?|temporadas?|stagion[ei]|staffel)|complete series|\d{1,2}x\d{2,3})(?![\p{L}\p{N}])/u;
 const EPISODE_TAG = /(?<![\p{L}\p{N}])s\d{1,2}\s?ep?\d{1,3}(?:v\d)?(?![\p{L}\p{N}])/u;
 /** A site or group stamped in front of the name. */
 const LEADING_STAMP = /^(?:\s*(?:\[[^\]]*\]|www\.[a-z0-9.-]+|[a-z0-9-]+\.(?:org|com|net|to|cc|ws|me|is|eu|tv|bz)(?![a-z0-9.]))[\s_]*[-|:]*[\s_]*)+/i;
@@ -76,11 +80,19 @@ const EPISODE_THEN_TITLE = /(?<![\p{L}\p{N}])(?:(?:e|ep|episode|chapter) ?\d{1,4
 /** What may stand between a season tag and the year a series release is dated by: more of the tag. */
 const SEASON_TAG_WORD = /^(?:s\d{1,2}(?:ep?\d{1,3}(?:v\d)?)?|ep?\d{1,4}|\d{1,4}|seasons?|saisons?|temporadas?|stagion[ei]|staffel|sezon|to|and)$/;
 /** A year the name opens with, when it is the release's date and not the title's first word ("2010.Inception.1920x800"). */
-const LEADING_YEAR = /^(19\d{2}|20\d{2}) (.+)$/;
-/** A place in a list, in front of a name ("3. My Neighbor Totoro (1988)"). */
-const LEADING_INDEX = /^\d{1,3} (?=\D)/;
+const LEADING_YEAR = /^(19\d{2}|20\d{2})[a-z]? (.+)$/;
+/** A place in a list, in front of a name ("3. My Neighbor Totoro (1988)", "M22 Avengers Endgame (2019)"). */
+const LEADING_INDEX = /^[a-z]{0,4}\d{1,3}[a-z]? (?=\D)/;
+/** A genre one uploader files its films under, between the title and the year: "Vacation - Comedy 2015". */
+const GENRE_BEFORE_YEAR =
+  /\s+-\s+(?:(?:action|adventure|animation|anime|biography|comedy|crime|documentary|drama|family|fantasy|history|horror|musical|mystery|romance|sci-?fi|thriller|war|western)\s+){1,3}(?=\(?(?:19|20)\d{2}(?!\d))/i;
+/** A round bracket opens tags too, when what it holds is technical: "(BD 1080p HEVC)". One holding a name or a year is the title's. */
+const ROUND_BRACKET = /\(([^()]*)/g;
+const TRAILING_YEAR = /^(.+) (19\d{2}|20\d{2})$/;
 /** An episode counted through a whole run, the way anime is: "47", "0001", "EP12", "01v2". */
 const EPISODE_NUMBER = /^(?:e|ep|episode)?\d{1,4}(?:v\d)?$/;
+/** An episode's number written the way a counter is, not the way a title ends ("Area 51"): padded, prefixed, or in the hundreds. */
+const WRITTEN_AS_COUNTER = /^(?:(?:e|ep|episode)\d{1,4}|0\d{1,3}|\d{3,4})(?:v\d)?$/;
 /** Numbers that are a date or a picture height wherever they stand, never an episode. */
 const NOT_AN_EPISODE = /^(?:19\d{2}|20\d{2}|2160|1080|720|576|480)$/;
 const EPISODE_WORDS = new Set(["e", "ep", "episode", "episodio", "folge"]);
@@ -133,6 +145,8 @@ const LANGUAGE_WORDS = new Set([
 ]);
 /** A revision of the same release: "v2". */
 const REVISION = /^v\d$/;
+/** The part of a season a series release holds: "P01". */
+const SEASON_PART = /^p\d{1,2}$/;
 /** A release under another name is kept only if at least this share of a title's words are in it. */
 const RELATED_SHARE = 0.5;
 /** With no year to vouch for it, this share of the release's own words must be the title's as well. */
@@ -173,6 +187,8 @@ export interface ReleaseName {
   episodic: boolean;
   /** The name is of several seasons at once. */
   run: boolean;
+  /** What a film's name goes on to say between its year and its technical part: the rest of a title written round its year. */
+  after: string;
 }
 
 /** The years in a normalized name. One at the very start is part of the title ("2001 A Space Odyssey", "1917"). */
@@ -180,9 +196,12 @@ function yearsIn(text: string): RegExpMatchArray[] {
   return [...text.matchAll(YEAR)].filter((match) => (match.index ?? 0) > 0);
 }
 
-/** A name, and the tags that follow it in square brackets. */
+/** A name, and the tags that follow it in brackets. */
 function splitAtTags(name: string): { named: string; tags: string } {
-  const at = name.slice(1).search(TAG_BRACKET) + 1;
+  const square = name.slice(1).search(TAG_BRACKET) + 1;
+  const round = [...name.matchAll(ROUND_BRACKET)].find((group) => (group.index ?? 0) > 0 && TECHNICAL_UNMISTAKABLE.test(normalizeTitle(group[1] ?? "")));
+  const starts = [square, round?.index ?? 0].filter((index) => index > 0);
+  const at = starts.length ? Math.min(...starts) : 0;
   return at > 0 ? { named: name.slice(0, at), tags: name.slice(at) } : { named: name, tags: "" };
 }
 
@@ -201,7 +220,7 @@ function titleEnd(text: string, mediaType: MediaType): number {
 
 /** Reads the title and year out of one release name. */
 export function parseReleaseName(raw: string, mediaType: MediaType = "movie"): ReleaseName {
-  const { named, tags } = splitAtTags(raw.replace(LEADING_STAMP, "").replace(FILE_EXTENSION, ""));
+  const { named, tags } = splitAtTags(raw.replace(LEADING_STAMP, "").replace(FILE_EXTENSION, "").replace(GENRE_BEFORE_YEAR, " "));
   const text = normalizeTitle(named);
   const end = titleEnd(text, mediaType);
   const head = text.slice(0, end);
@@ -215,6 +234,7 @@ export function parseReleaseName(raw: string, mediaType: MediaType = "movie"): R
     year: last ? Number(last[1]) : later ? Number(later[1]) : null,
     episodic: SEASON.test(text) || SEASON.test(rest),
     run: RUN_OF_SEASONS.test(text) || RUN_OF_SEASONS.test(rest),
+    after: last && mediaType === "movie" ? head.slice((last.index ?? 0) + last[0].length).trim() : "",
   };
 }
 
@@ -252,14 +272,19 @@ interface NameReading extends ReleaseName {
 
 /**
  * Every way one name can be read: as written, with a year it opens with taken
- * as its date, and with a bracket it opens with taken as the start of its
- * title.
+ * as its date, with its title taken as written round its year ("Top Gun
+ * (2022) Maverick"), and with a bracket it opens with taken as the start of
+ * its title.
  */
 function readings(raw: string, mediaType: MediaType): NameReading[] {
   const written = parseReleaseName(raw, mediaType);
   const all: NameReading[] = [{ ...written, guess: false }];
   const led = written.year === null ? written.title.match(LEADING_YEAR) : null;
   if (led) all.push({ ...written, title: led[2] ?? "", year: Number(led[1]), guess: false });
+  if (written.after) all.push({ ...written, title: `${written.title} ${written.after}`, after: "", guess: false });
+  // The same with a year for the rest of the title: "Blade Runner (2017) 2049".
+  const turned = written.year !== null && mediaType === "movie" ? written.title.match(TRAILING_YEAR) : null;
+  if (turned) all.push({ ...written, title: `${turned[1]} ${written.year}`, year: Number(turned[2]), guess: true });
   if (OPENING_BRACKET.test(raw)) all.push({ ...parseReleaseName(raw.replace(OPENING_BRACKET, "$1 "), mediaType), guess: true });
   return all;
 }
@@ -274,7 +299,7 @@ function namesIn(line: string): string[] {
 /** A word that says which copy a release is, not which title. */
 function isCopyWord(word: string, mediaType: MediaType): boolean {
   if (EDITION_WORDS.has(word) || TAG_WORDS.has(word) || REVISION.test(word) || ORDINAL.test(word)) return true;
-  return (mediaType === "tv" ? SERIES_WORDS : FILM_WORDS).has(word);
+  return mediaType === "tv" ? SERIES_WORDS.has(word) || SEASON_PART.test(word) : FILM_WORDS.has(word);
 }
 
 /** A title's words without the ones any copy of it may add. */
@@ -400,6 +425,9 @@ function titleForms(name: ReleaseName, mediaType: MediaType): string[] {
   if (name.year !== null) forms.push(`${name.title} ${name.year}`);
   // A dated name out of a numbered list: "3. My Neighbor Totoro (1988)".
   if (name.year !== null && LEADING_INDEX.test(name.title)) forms.push(name.title.replace(LEADING_INDEX, ""));
+  // The year given twice, or the year made beside the year released: "Obsession 2025 2026".
+  const twice = name.year !== null ? name.title.match(TRAILING_YEAR) : null;
+  if (twice && Math.abs(Number(twice[2]) - (name.year ?? 0)) <= YEAR_TOLERANCE) forms.push(twice[1] ?? "");
   return mediaType === "tv" ? [...forms, ...countedEpisodes(name.title).map((counted) => counted.show)] : forms;
 }
 
@@ -540,4 +568,35 @@ export function countedEpisode(fileName: string, facts: TitleFacts): { from: num
     if (counted) return { from: counted.from, to: counted.to };
   }
   return null;
+}
+
+/** A show's name cut short has to keep at least this much of it to be known by it ("Boruto"). */
+const SHORT_NAME_MIN_LENGTH = 4;
+
+/** A name a show's files are numbered under: its own, with or without more (a season's, an arc's), cut short, or its initials. */
+function isNameOfShow(show: string, wanted: readonly string[]): boolean {
+  const compact = show.replace(/ /g, "");
+  return wanted.some((title) => {
+    const whole = title.replace(/ /g, "");
+    const initials = title.split(" ").map((word) => word[0]).join("");
+    if (compact.includes(whole) || (compact.length >= SHORT_NAME_MIN_LENGTH && whole.includes(compact))) return true;
+    return initials.length > 1 && compact === initials;
+  });
+}
+
+/**
+ * True when an anime file counts itself as an episode of something by another
+ * name: "Barto no Himitsu no Heya! - 01" out of a One Piece batch, "Dressrosa
+ * 02" out of a recut. A file named for the episode alone ("01 - Asteroid
+ * Blues", "Episode 1 A Peacetime Reward") counts nothing.
+ */
+export function countsAnotherShow(fileName: string, facts: TitleFacts): boolean {
+  const wanted = [...new Set(facts.titles.map(normalizeTitle).filter(Boolean))];
+  const words = parseReleaseName(fileName.split("\n")[0] ?? "", "tv").title.split(" ");
+  const first = words[0] ?? "";
+  if (/^\d+$/.test(first) || EPISODE_WORDS.has(first) || EPISODE_NUMBER.test(first)) return false;
+  const at = words.findIndex((word, index) => index > 0 && WRITTEN_AS_COUNTER.test(word) && !NOT_AN_EPISODE.test(word));
+  if (at < 0) return false;
+  const show = words.slice(0, EPISODE_WORDS.has(words[at - 1] ?? "") ? at - 1 : at).join(" ");
+  return Boolean(show) && !isNameOfShow(show, wanted) && !isRelated(show, wanted, "tv", "none");
 }

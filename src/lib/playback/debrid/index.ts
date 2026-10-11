@@ -95,7 +95,7 @@ import {
   type ReleaseContainer,
 } from "./torrentio";
 import { isRefusedRelease } from "./refused-releases";
-import { isWrongTitle, linkFileName, loadTitleFacts, titleFactsFor } from "./title-gate";
+import { addTitleNames, isWrongTitle, linkFileName, loadTitleFacts, titleFactsFor } from "./title-gate";
 import {
   isRealDebridConfigured,
   mapWithConcurrency,
@@ -357,28 +357,37 @@ function withoutRefused(offered: { imdbId: string; season: number; episode: numb
   return candidates.filter((candidate) => !isRefusedRelease(offered, candidate.title));
 }
 
+/**
+ * `rdToken` null asks the index unconfigured, for the tiers that take only
+ * its hashes. They need the anime lookup as much as Real-Debrid does: asked
+ * by IMDb season and episode, the index answered episode 23 of Bleach for
+ * the third episode of what the catalogue calls its second season.
+ */
 async function fetchRankedTorrentioCandidates(
   req: ResolveDebridSourcesRequest,
   imdbId: string,
-  rdToken: string
+  rdToken: string | null
 ): Promise<DebridCandidate[]> {
   const facts = titleFactsFor(imdbId) ?? (await loadTitleFacts(imdbId, req.tmdbId, req.mediaType));
   if (req.mediaType === "tv" && req.season && req.episode) {
     const kitsu = await resolveKitsuEpisode(req.tmdbId, req.season, req.episode);
     if (kitsu) {
-      const byKitsu = await fetchTorrentioKitsuCandidates({ ...kitsu, rdToken, facts });
+      // The entry's own names, for this lookup and for every check of the title after it.
+      const known = (facts && addTitleNames(imdbId, kitsu.titles ?? [])) ?? facts;
+      const entry = { kitsuId: kitsu.kitsuId, episode: kitsu.episode, facts: known };
+      const byKitsu = await fetchTorrentioKitsuCandidates(rdToken ? { ...entry, rdToken } : entry);
       if (byKitsu.length) return byKitsu;
     }
   }
-  return fetchTorrentioCandidates({
+  const title = {
     imdbId,
     mediaType: req.mediaType,
     season: req.season,
     episode: req.episode,
-    rdToken,
     originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
     facts,
-  });
+  };
+  return rdToken ? fetchTorrentioCandidates({ ...title, rdToken }) : fetchTorrentioCandidatesNoDebrid(title);
 }
 
 interface KeyBase {
@@ -1724,17 +1733,7 @@ export async function resolveDebridSources(
         // Real-Debrid configured at all.
         const torboxSourceCandidates = rdCandidates.length
           ? rdCandidates
-          : withoutRefused(
-              keyBase,
-              await fetchTorrentioCandidatesNoDebrid({
-                imdbId,
-                mediaType: req.mediaType,
-                season: req.season,
-                episode: req.episode,
-                originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
-                facts: titleFactsFor(imdbId),
-              })
-            );
+          : withoutRefused(keyBase, await fetchRankedTorrentioCandidates(req, imdbId, null));
 
         // ONE absolute deadline for the ENTIRE TorBox resolve — checkCached
         // plus every createtorrent/poll/requestdl below share it (each
@@ -1821,17 +1820,7 @@ async function resolveAllDebridTier(
   const { hits, missing } = await readCachedSources("alldebrid", keyBase, sanitize);
   if (!missing.length) return hits;
 
-  const [raw, runtime] = await Promise.all([
-    fetchTorrentioCandidatesNoDebrid({
-      imdbId: keyBase.imdbId,
-      mediaType: req.mediaType,
-      season: req.season,
-      episode: req.episode,
-      originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
-      facts: titleFactsFor(keyBase.imdbId) ?? (await loadTitleFacts(keyBase.imdbId, req.tmdbId, req.mediaType)),
-    }),
-    titleRuntimeMinutes(req),
-  ]);
+  const [raw, runtime] = await Promise.all([fetchRankedTorrentioCandidates(req, keyBase.imdbId, null), titleRuntimeMinutes(req)]);
   const candidates = orderForStreaming(withoutRefused(keyBase, raw), runtime);
   const episodeTarget =
     req.mediaType === "tv" && req.season && req.episode

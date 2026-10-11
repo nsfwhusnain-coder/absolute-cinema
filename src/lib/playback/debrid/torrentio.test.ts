@@ -17,6 +17,7 @@ import {
   isDirectPlayDebridRelease,
   isMoviePackRelease,
   isStereoscopicRelease,
+  fetchTorrentioKitsuCandidates,
 } from "./torrentio";
 
 describe("anime-sized releases", () => {
@@ -860,5 +861,37 @@ describe("fetchTorrentioCandidates: the title that was asked for", () => {
       expect(found.length).toBe(2);
       expect(found.some((c) => c.unverified)).toBe(false);
     }
+  });
+});
+
+describe("fetchTorrentioKitsuCandidates", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function answer(asked: string[]): void {
+    const streams = [{ title: "[Group] Show - 03 [1080p][HEVC].mkv\n👤 40 💾 1.4 GB", infoHash: "c".repeat(40) }];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      asked.push(String(input));
+      return new Response(JSON.stringify({ streams }), { status: 200 });
+    }) as unknown as typeof fetch;
+  }
+
+  it("asks the index by entry and episode, with the token when there is one", async () => {
+    const asked: string[] = [];
+    answer(asked);
+    const found = await fetchTorrentioKitsuCandidates({ kitsuId: 46474, episode: 3, rdToken: "test-rd-token" });
+    expect(asked[0]).toEndWith("/realdebrid=test-rd-token/stream/series/kitsu:46474:3.json");
+    expect(found.map((c) => c.infoHash)).toEqual(["c".repeat(40)]);
+  });
+
+  it("asks unconfigured when there is none, for the tiers that take only its hashes", async () => {
+    const asked: string[] = [];
+    answer(asked);
+    const found = await fetchTorrentioKitsuCandidates({ kitsuId: 46474, episode: 3 });
+    expect(asked[0]).toEndWith("/stream/series/kitsu:46474:3.json");
+    expect(asked[0]).not.toContain("realdebrid");
+    expect(found.length).toBe(1);
   });
 });

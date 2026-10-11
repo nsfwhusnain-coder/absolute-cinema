@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 import { describe, expect, it } from "bun:test";
-import { identify, isOtherEpisode, isWrongTitle, linkFileName, titleFactsFrom } from "./title-gate";
+import { addTitleNames, identify, isOtherEpisode, isWrongTitle, linkFileName, rememberTitleFacts, titleFactsFor, titleFactsFrom } from "./title-gate";
 
 const inception = { titles: ["Inception", "A Origem", "Origen"], year: 2010 };
 const godfather = { titles: ["The Godfather", "Il padrino", "O Poderoso Chefão"], year: 1972 };
@@ -28,6 +28,25 @@ describe("titleFactsFrom", () => {
     expect(facts.seasonYears).toEqual({ 1: 1999 });
   });
 
+  it("marks anime, whose seasons other catalogues number their own way", () => {
+    const anime = titleFactsFrom({ name: "Bleach", first_air_date: "2004-10-05", original_language: "ja", genres: [{ id: 16 }, { id: 10759 }] });
+    expect(anime.anime).toBe(true);
+    const cartoon = titleFactsFrom({ name: "Rick and Morty", first_air_date: "2013-12-02", original_language: "en", origin_country: ["US"], genres: [{ id: 16 }] });
+    expect(cartoon.anime).toBeUndefined();
+  });
+
+  it("knows a season by its own name after the show's, and not by its number", () => {
+    const facts = titleFactsFrom({
+      name: "Bleach",
+      first_air_date: "2004-10-05",
+      seasons: [{ season_number: 0, name: "Specials" }, { season_number: 1, name: "Bleach" }, { season_number: 2, name: "Thousand-Year Blood War" }, { season_number: 3, name: "Season 3" }],
+    });
+    expect(facts.titles).toEqual(["Bleach", "Bleach Thousand-Year Blood War"]);
+    expect(facts.seasonNames).toEqual({ 2: "Thousand-Year Blood War" });
+    const onePiece = titleFactsFrom({ name: "One Piece", seasons: [{ season_number: 16, name: "Dressrosa" }, { season_number: 17, name: "Dressrosa (2)" }] });
+    expect(onePiece.seasonNames).toEqual({ 16: "Dressrosa", 17: "Dressrosa" });
+  });
+
   it("reads a series' names and first year", () => {
     const facts = titleFactsFrom({ name: "Dark Matter", first_air_date: "2024-05-07", alternative_titles: { results: [{ title: "Materia oscura" }] } });
     expect(facts).toEqual({ titles: ["Dark Matter", "Materia oscura"], year: 2024 });
@@ -49,6 +68,19 @@ describe("isOtherEpisode", () => {
     expect(isOtherEpisode("Rick.and.Morty.S01E08.1080p.mkv", 2, 8)).toBe(true);
     expect(isOtherEpisode("08 - Interdimensional Cable 2.mkv", 2, 8)).toBe(false);
     expect(isOtherEpisode("Rick.and.Morty.S02E09.mkv", undefined, undefined)).toBe(false);
+  });
+});
+
+describe("isOtherEpisode, anime", () => {
+  it("does not hold another catalogue's season number against the episode", () => {
+    expect(isOtherEpisode("[Judas] Bleach - S17E03.mkv", 2, 3, true)).toBe(false);
+    expect(isOtherEpisode("Bleach.S18E01.1080p.mkv", 2, 14, true)).toBe(false);
+    expect(isOtherEpisode("[Judas] Bleach - S17E03.mkv", 2, 3)).toBe(true);
+  });
+
+  it("still knows a first season is not a later one, and one episode of a season is not another", () => {
+    expect(isOtherEpisode("Bleach.S17E01.1080p.BluRay.Remux.mkv", 1, 1, true)).toBe(true);
+    expect(isOtherEpisode("Bleach.S02E05.1080p.mkv", 2, 3, true)).toBe(true);
   });
 });
 
@@ -151,5 +183,67 @@ describe("identify, a later show of the same name", () => {
 
   it("drops it by its file's year, in a release that does not give one", () => {
     expect(identify(onePiece, { ...question, release: "One Piece S01 1080p WEB-DL", fileName: "One.Piece.2023.S01E01.1080p.NF.WEB-DL.mkv" })).toBe("wrong");
+  });
+});
+
+describe("identify, an anime season numbered another way", () => {
+  const bleach = { titles: ["Bleach"], year: 2004, seasonYears: { 1: 2004, 2: 2022 }, anime: true };
+
+  it("keeps the episode under the number another catalogue gives its season", () => {
+    const question = { mediaType: "tv" as const, release: "[Judas] Bleach (Season 17) [1080p][HEVC x265 10bit][Dual-Audio][Multi-Subs]", season: 2, episode: 3 };
+    expect(identify(bleach, { ...question, fileName: "[Judas] Bleach - S17E03.mkv" })).toBe("verified");
+  });
+
+  it("drops a later season's episode offered as the first season's", () => {
+    const question = { mediaType: "tv" as const, release: "[LGH] Bleach Season 17 (S17) E01-E13 (BD Remux 1080p FLAC H.264) [Dual Audio]", season: 1, episode: 1 };
+    expect(identify(bleach, { ...question, fileName: "Bleach.S17E01.1080p.BluRay.Remux.Dual-Audio.FLAC2.0.H.264-LGH.mkv" })).toBe("wrong");
+  });
+});
+
+describe("addTitleNames", () => {
+  it("widens what is remembered of a title, for every check after", () => {
+    rememberTitleFacts("tt0000041", { titles: ["Bleach"], year: 2004, anime: true });
+    const question = { mediaType: "tv" as const, release: "[Sakurato] Bleach: Sennen Kessen-hen - Soukoku-tan [07][AVC-8bit 1080P AAC]", season: 2, episode: 33 };
+    expect(identify(titleFactsFor("tt0000041"), question)).toBe("wrong");
+
+    addTitleNames("tt0000041", ["Bleach: Sennen Kessen-hen - Soukoku-tan", "Bleach"]);
+
+    expect(titleFactsFor("tt0000041")?.titles).toEqual(["Bleach", "Bleach: Sennen Kessen-hen - Soukoku-tan"]);
+    expect(identify(titleFactsFor("tt0000041"), question)).toBe("verified");
+  });
+
+  it("does nothing for a title nothing is remembered of", () => {
+    expect(addTitleNames("tt0000042", ["Some Name"])).toBeNull();
+  });
+});
+
+describe("identify, a side series out of an anime batch", () => {
+  const onePiece = { titles: ["One Piece"], year: 1999, anime: true };
+  const batch = { mediaType: "tv" as const, release: "[Erai-raws] One Piece - 0892 ~ 1089 [1080p][HEVC][BATCH][Multiple Subtitle]", season: 22, episode: 1 };
+
+  it("drops a file that counts an episode of something else", () => {
+    expect(identify(onePiece, { ...batch, fileName: "[Erai-raws] Barto no Himitsu no Heya! - 01 [1080p][HEVC][548D348E].mkv" })).toBe("wrong");
+    expect(identify(onePiece, { ...batch, fileName: "[Erai-raws] One Piece - 1089 [1080p][HEVC].mkv" })).toBe("verified");
+  });
+
+  it("leaves a show that is not anime to its episode titles", () => {
+    const question = { mediaType: "tv" as const, release: "Rick and Morty S02 1080p BluRay x265", season: 2, episode: 8, fileName: "Interdimensional Cable - 02.mkv" };
+    expect(identify({ titles: ["Rick and Morty"], year: 2013 }, question)).toBe("verified");
+  });
+});
+
+describe("identify, a file named for another season", () => {
+  const onePiece = { titles: ["One Piece", "One Piece East Blue", "One Piece Dressrosa"], year: 1999, anime: true, seasonNames: { 1: "East Blue", 16: "Dressrosa", 17: "Dressrosa" } };
+  const recut = "[Muhn Pace] One Piece - 628-745 (Dressrosa) [1080p WEB x264]";
+
+  it("drops it for the season it is not, and keeps it for its own", () => {
+    const question = { mediaType: "tv" as const, release: recut, fileName: "[Muhn Pace] Dressrosa 02 [1080p][24F67B6B].mp4" };
+    expect(identify(onePiece, { ...question, season: 1, episode: 2 })).toBe("wrong");
+    expect(identify(onePiece, { ...question, season: 17, episode: 2 })).not.toBe("wrong");
+  });
+
+  it("does not read a pack's name for the seasons it lists", () => {
+    const question = { mediaType: "tv" as const, release: "One Piece (East Blue + Dressrosa) [1080p]", fileName: "One Piece - 002.mkv", season: 1, episode: 2 };
+    expect(identify(onePiece, question)).toBe("verified");
   });
 });

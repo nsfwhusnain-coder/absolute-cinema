@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { absoluteEpisode, locateInChain, type KitsuEntry } from "./anime-mapping";
+import { absoluteEpisode, locateInChain, type KitsuEntry, entryTitles } from "./anime-mapping";
 
 const chain: Record<number, KitsuEntry> = {
   1: { id: 1, subtype: "TV", episodeCount: 24, sequelIds: [2] },
@@ -44,5 +44,27 @@ describe("locateInChain", () => {
   it("gives up when the chain runs out", async () => {
     const short: Record<number, KitsuEntry> = { 9: { id: 9, subtype: "TV", episodeCount: 12, sequelIds: [] } };
     expect(await locateInChain(9, 13, async (id) => short[id] ?? null)).toBeNull();
+  });
+});
+
+describe("entryTitles", () => {
+  it("gathers every name an entry has, once", () => {
+    const titles = entryTitles({
+      canonicalTitle: "Bleach: Sennen Kessen-hen",
+      titles: { en: "Bleach: Thousand-Year Blood War", en_jp: "Bleach: Sennen Kessen-hen", ja_jp: "BLEACH 千年血戦篇", fr_fr: null },
+      abbreviatedTitles: ["Bleach TYBW", null],
+    });
+    expect(titles).toEqual(["Bleach: Sennen Kessen-hen", "Bleach: Thousand-Year Blood War", "BLEACH 千年血戦篇", "Bleach TYBW"]);
+    expect(entryTitles({})).toEqual([]);
+  });
+});
+
+describe("locateInChain, the entry's names", () => {
+  it("hands back the names of the entry the episode falls in", async () => {
+    const entries: Record<number, KitsuEntry> = {
+      1: { id: 1, subtype: "TV", episodeCount: 366, sequelIds: [2], titles: ["Bleach"] },
+      2: { id: 2, subtype: "TV", episodeCount: 13, sequelIds: [], titles: ["Bleach: Sennen Kessen-hen"] },
+    };
+    expect(await locateInChain(1, 369, async (id) => entries[id] ?? null)).toEqual({ kitsuId: 2, episode: 3, titles: ["Bleach: Sennen Kessen-hen"] });
   });
 });

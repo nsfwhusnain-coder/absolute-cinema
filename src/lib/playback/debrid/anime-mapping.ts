@@ -23,6 +23,8 @@ const TV_SUBTYPES = new Set(["TV", "ONA"]);
 export interface KitsuEpisode {
   kitsuId: number;
   episode: number;
+  /** What that entry is called: the names of one season or part, which the catalogue's names for the whole show do not include. */
+  titles?: string[];
 }
 
 export interface KitsuEntry {
@@ -31,6 +33,7 @@ export interface KitsuEntry {
   /** Null while the show is still airing. */
   episodeCount: number | null;
   sequelIds: number[];
+  titles?: string[];
 }
 
 interface SeasonCount {
@@ -77,7 +80,7 @@ export async function locateInChain(
       continue;
     }
     if (entry.episodeCount == null || remaining <= entry.episodeCount) {
-      return { kitsuId: entry.id, episode: remaining };
+      return { kitsuId: entry.id, episode: remaining, ...(entry.titles?.length ? { titles: entry.titles } : {}) };
     }
     remaining -= entry.episodeCount;
     queue = [...entry.sequelIds];
@@ -104,7 +107,16 @@ async function firstKitsuId(tmdbId: number): Promise<number | null> {
 }
 
 interface KitsuResponse {
-  data?: { id: string; attributes?: { subtype?: string; episodeCount?: number | null } };
+  data?: {
+    id: string;
+    attributes?: {
+      subtype?: string;
+      episodeCount?: number | null;
+      titles?: Record<string, string | null>;
+      canonicalTitle?: string | null;
+      abbreviatedTitles?: (string | null)[] | null;
+    };
+  };
   included?: Array<{
     type: string;
     attributes?: { role?: string };
@@ -112,12 +124,18 @@ interface KitsuResponse {
   }>;
 }
 
+/** Every name Kitsu has for an entry, once each. */
+export function entryTitles(attributes: NonNullable<NonNullable<KitsuResponse["data"]>["attributes"]>): string[] {
+  const all = [attributes.canonicalTitle, ...Object.values(attributes.titles ?? {}), ...(attributes.abbreviatedTitles ?? [])];
+  return [...new Set(all.map((title) => (title ?? "").trim()).filter(Boolean))];
+}
+
 async function loadKitsuEntry(id: number): Promise<KitsuEntry | null> {
   return cachedFetch(
     `kitsu-entry:${id}`,
     async () => {
       const data = await getJson<KitsuResponse>(
-        `${KITSU_URL}/${id}?fields[anime]=subtype,episodeCount&include=mediaRelationships.destination`
+        `${KITSU_URL}/${id}?fields[anime]=subtype,episodeCount,titles,canonicalTitle,abbreviatedTitles&include=mediaRelationships.destination`
       );
       if (!data?.data) return null;
       const sequelIds = (data.included ?? [])
@@ -131,6 +149,7 @@ async function loadKitsuEntry(id: number): Promise<KitsuEntry | null> {
         subtype: data.data.attributes?.subtype ?? "TV",
         episodeCount: data.data.attributes?.episodeCount ?? null,
         sequelIds,
+        titles: entryTitles(data.data.attributes ?? {}),
       };
     },
     MAPPING_TTL_MS

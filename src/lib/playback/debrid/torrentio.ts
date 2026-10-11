@@ -899,22 +899,25 @@ export async function fetchTorrentioCandidates(
 
 /**
  * Same as `fetchTorrentioCandidates`, keyed by a Kitsu entry and its own
- * episode number (how most anime is indexed). Never throws.
+ * episode number (how most anime is indexed). With no Real-Debrid token the
+ * index is asked unconfigured, as `fetchTorrentioCandidatesNoDebrid` asks it.
+ * Never throws.
  */
 export async function fetchTorrentioKitsuCandidates(params: {
   kitsuId: number;
   episode: number;
-  rdToken: string;
+  rdToken?: string;
   facts?: TitleFacts | null;
 }): Promise<DebridCandidate[]> {
   try {
-    const configSegment = `realdebrid=${encodeURIComponent(params.rdToken)}`;
-    const url = `${TORRENTIO_BASE}/${configSegment}/stream/series/kitsu:${params.kitsuId}:${params.episode}.json`;
+    const configSegment = params.rdToken ? `/realdebrid=${encodeURIComponent(params.rdToken)}` : "";
+    const url = `${TORRENTIO_BASE}${configSegment}/stream/series/kitsu:${params.kitsuId}:${params.episode}.json`;
     const data = await fetchTorrentioJson(url);
     if (!data) return [];
     // Kitsu indexes anime, whose original language is Japanese. Its episodes
     // are numbered through the whole run, so only the show is checked.
-    return parseTorrentioStreams(data, true, "tv", ANIME_ORIGINAL_LANGUAGE, params.facts === undefined ? undefined : { facts: params.facts });
+    const wanted = params.facts === undefined ? undefined : { facts: params.facts };
+    return parseTorrentioStreams(data, Boolean(params.rdToken), "tv", ANIME_ORIGINAL_LANGUAGE, wanted);
   } catch {
     return [];
   }

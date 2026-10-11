@@ -9,7 +9,8 @@
 
 import { cachedFetch } from "@/lib/server-cache";
 import { tmdb, type TmdbNames } from "@/lib/tmdb";
-import { countedEpisode, judgeReleaseName, type ReleaseJudgement, type TitleFacts } from "../release-identity";
+import { isTmdbAnimeTitle } from "@/lib/tmdb-anime";
+import { countedEpisode, countsAnotherShow, judgeReleaseName, normalizeTitle, type ReleaseJudgement, type TitleFacts } from "../release-identity";
 import type { MediaType } from "../types";
 
 const FACTS_TTL_MS = 6 * 60 * 60 * 1000;
@@ -17,6 +18,11 @@ const FACTS_TTL_MS = 6 * 60 * 60 * 1000;
 const REMEMBERED = 400;
 
 const byImdbId = new Map<string, TitleFacts>();
+
+/** The count after the name of a season that shares its name with the one before it. */
+const SEASON_COUNT = /\s*\(\d+\)$/;
+/** A season called by its number alone, which is no name to know it by. */
+const GENERIC_SEASON = /^(?:season|series|saison|staffel|temporada|specials?|extras?)(?:\s+\d+)?$/i;
 
 function yearOf(date: string | null | undefined): number | null {
   const year = Number((date ?? "").slice(0, 4));
@@ -33,13 +39,37 @@ export function titleFactsFrom(names: TmdbNames): TitleFacts {
     ...(names.alternative_titles?.titles ?? names.alternative_titles?.results ?? []).map((entry) => entry.title),
     ...(names.translations?.translations ?? []).map((entry) => entry.data?.title ?? entry.data?.name),
   ];
+  // A season with a name of its own is released under the show's name and then its own: "Bleach: Thousand-Year Blood War".
+  const show = names.name ?? names.title ?? "";
+  const seasonNames: Record<number, string> = {};
+  for (const season of names.seasons ?? []) {
+    // "Dressrosa (2)" is the second season of that name; a season called what the show is called has no name of its own.
+    const name = (season.name ?? "").replace(SEASON_COUNT, "").trim();
+    const own = name && !GENERIC_SEASON.test(name) && normalizeTitle(name) !== normalizeTitle(show);
+    if (season.season_number && own) seasonNames[season.season_number] = name;
+  }
+  all.push(...Object.values(seasonNames).map((season) => `${show} ${season}`));
   const titles = [...new Set(all.map((title) => (title ?? "").trim()).filter(Boolean))];
   const seasonYears: Record<number, number> = {};
   for (const season of names.seasons ?? []) {
     const year = yearOf(season.air_date);
     if (season.season_number && year) seasonYears[season.season_number] = year;
   }
-  return { titles, year: yearOf(names.release_date ?? names.first_air_date), ...(names.seasons?.length ? { seasonYears } : {}) };
+  const anime = isTmdbAnimeTitle({ genres: names.genres, originalLanguage: names.original_language, originCountry: names.origin_country });
+  return {
+    titles,
+    year: yearOf(names.release_date ?? names.first_air_date),
+    ...(names.seasons?.length ? { seasonYears } : {}),
+    ...(Object.keys(seasonNames).length ? { seasonNames } : {}),
+    ...(anime ? { anime } : {}),
+  };
+}
+
+/** Keeps a title's facts under its IMDb id, the newest few hundred titles. */
+export function rememberTitleFacts(imdbId: string, facts: TitleFacts): void {
+  byImdbId.delete(imdbId);
+  byImdbId.set(imdbId, facts);
+  while (byImdbId.size > REMEMBERED) byImdbId.delete(byImdbId.keys().next().value as string);
 }
 
 /** Fetches (once per title) what a title is known as, and remembers it under its IMDb id. Null when the catalogue cannot be reached. */
@@ -48,9 +78,7 @@ export async function loadTitleFacts(imdbId: string, tmdbId: number, mediaType: 
     const names = await cachedFetch(`tmdb-names:${mediaType}:${tmdbId}`, () => tmdb.names(tmdbId, mediaType), FACTS_TTL_MS);
     const facts = titleFactsFrom(names);
     if (!facts.titles.length) return null;
-    byImdbId.delete(imdbId);
-    byImdbId.set(imdbId, facts);
-    while (byImdbId.size > REMEMBERED) byImdbId.delete(byImdbId.keys().next().value as string);
+    rememberTitleFacts(imdbId, facts);
     return facts;
   } catch {
     return null;
@@ -59,6 +87,22 @@ export async function loadTitleFacts(imdbId: string, tmdbId: number, mediaType: 
 
 export function titleFactsFor(imdbId: string): TitleFacts | null {
   return byImdbId.get(imdbId) ?? null;
+}
+
+/**
+ * Adds names a title turned out to go by to what is remembered of it: a
+ * season or part of an anime is released under a name of its own ("Bleach:
+ * Sennen Kessen-hen"), which only the anime's own catalogue lists. Every
+ * later check of that title knows them.
+ */
+export function addTitleNames(imdbId: string, names: readonly string[]): TitleFacts | null {
+  const facts = byImdbId.get(imdbId);
+  if (!facts) return null;
+  const titles = [...new Set([...facts.titles, ...names.map((name) => name.trim()).filter(Boolean)])];
+  if (titles.length === facts.titles.length) return facts;
+  const wider = { ...facts, titles };
+  byImdbId.set(imdbId, wider);
+  return wider;
 }
 
 /** The name of the file a link points at. */
@@ -74,11 +118,19 @@ export function linkFileName(url: string | null | undefined): string {
 
 const EPISODE_TAG = /(?<![a-z0-9])s(\d{1,2})[ ._-]?e(\d{1,3})(?![0-9])/i;
 
-/** True when a file name states an episode, and it is not the one asked for. */
-export function isOtherEpisode(fileName: string, season: number | undefined, episode: number | undefined): boolean {
+/**
+ * True when a file name states an episode, and it is not the one asked for.
+ * Anime is cut into seasons differently from one catalogue to the next
+ * ("S17E03" is the third episode of what this one calls the second season),
+ * so for anime another season's number says nothing, except that a first
+ * season is never a later one.
+ */
+export function isOtherEpisode(fileName: string, season: number | undefined, episode: number | undefined, anime = false): boolean {
   if (!season || !episode) return false;
   const tag = fileName.match(EPISODE_TAG);
-  return tag !== null && (Number(tag[1]) !== season || Number(tag[2]) !== episode);
+  if (!tag) return false;
+  if (Number(tag[1]) === season) return Number(tag[2]) !== episode;
+  return !anime || season === 1;
 }
 
 export interface IdentityQuestion {
@@ -126,11 +178,34 @@ function countsAnotherEpisode(facts: TitleFacts, question: IdentityQuestion): bo
   return !within(episode) && !within(FIRST_SEASON_HUNDRED + episode);
 }
 
+/** A season's name shorter than this is too ordinary a word to find in a file's name ("Fire"). */
+const SEASON_NAME_MIN_LENGTH = 6;
+
+/**
+ * True when a file is named for another season of the show than the one
+ * asked for: "Dressrosa 02" is the second episode of that season, not of the
+ * first. A release's name is not read this way: a pack lists every season it
+ * holds.
+ */
+function namesAnotherSeason(facts: TitleFacts, question: IdentityQuestion): boolean {
+  if (!question.season || !question.fileName) return false;
+  const file = ` ${normalizeTitle(question.fileName)} `;
+  const named = (season: string) => {
+    const name = normalizeTitle(season);
+    return name.length >= SEASON_NAME_MIN_LENGTH && file.includes(` ${name} `);
+  };
+  const seasons = Object.entries(facts.seasonNames ?? {});
+  if (seasons.some(([number, name]) => Number(number) === question.season && named(name))) return false;
+  return seasons.some(([number, name]) => Number(number) !== question.season && named(name));
+}
+
 /** Whether a source is the title asked for. */
 export function identify(facts: TitleFacts | null, question: IdentityQuestion): Identity {
-  if (question.mediaType === "tv" && isOtherEpisode(question.fileName ?? "", question.season, question.episode)) return "wrong";
+  if (question.mediaType === "tv" && isOtherEpisode(question.fileName ?? "", question.season, question.episode, facts?.anime)) return "wrong";
   if (!facts) return "unverified";
-  if (question.mediaType === "tv" && countsAnotherEpisode(facts, question)) return "wrong";
+  if (question.mediaType === "tv" && (countsAnotherEpisode(facts, question) || namesAnotherSeason(facts, question))) return "wrong";
+  // Anime batches carry specials and side series, each numbered from one like the show itself.
+  if (question.mediaType === "tv" && facts.anime && question.fileName && countsAnotherShow(question.fileName, facts)) return "wrong";
   const asked = { season: question.season };
   const file = question.fileName ? judgeReleaseName(question.fileName, facts, question.mediaType, asked) : null;
   // A file of the right name is the show; a release that states it is a later show of that name still decides.

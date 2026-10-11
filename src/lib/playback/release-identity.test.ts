@@ -1,12 +1,12 @@
 /// <reference types="bun-types" />
 import { describe, expect, it } from "bun:test";
-import { countedEpisode, judgeRelease, judgeReleaseName, parseReleaseName, type TitleFacts } from "./release-identity";
+import { countedEpisode, countsAnotherShow, judgeRelease, judgeReleaseName, parseReleaseName, type TitleFacts } from "./release-identity";
 
 const film = (title: string, year: number, ...others: string[]): TitleFacts => ({ titles: [title, ...others], year });
 
 describe("parseReleaseName", () => {
   it("reads the title and the year before the technical part", () => {
-    expect(parseReleaseName("Project.Hail.Mary.2026.2160p.UHD.BluRay.x265-GRP")).toEqual({ title: "project hail mary", year: 2026, episodic: false, run: false });
+    expect(parseReleaseName("Project.Hail.Mary.2026.2160p.UHD.BluRay.x265-GRP")).toEqual({ title: "project hail mary", year: 2026, episodic: false, run: false, after: "" });
     expect(parseReleaseName("Michael (2026) (1080p BluRay x265 10bit EAC3 Atmos 7.1 Celdra) [QxR]").title).toBe("michael");
   });
 
@@ -432,5 +432,88 @@ describe("judgeRelease, several of a title's names in a row", () => {
   it("does not take another title beside one of its names for more of its names", () => {
     const yourName: TitleFacts = { titles: ["Your Name.", "Kimi no Na wa."], year: 2016 };
     expect(judgeRelease("Your Name Weathering With You 2016 1080p BluRay", yourName, "movie")).toBe("mismatch");
+  });
+});
+
+describe("judgeRelease, names out of collections", () => {
+  const facts = (year: number, ...titles: string[]): TitleFacts => ({ titles, year });
+
+  it("reads a title written round its year", () => {
+    expect(judgeRelease("Top Gun (2022) Maverick 1080p Surround.mp4", facts(2022, "Top Gun: Maverick"), "movie")).toBe("match");
+    expect(judgeRelease("Blade Runner (2017) 2049 1080p Surround.mp4", facts(2017, "Blade Runner 2049"), "movie")).toBe("match");
+    expect(judgeRelease("06 Doctor Strange (2022) In The Multiverse Of Madness 1080p.mp4", facts(2022, "Doctor Strange in the Multiverse of Madness"), "movie")).toBe("match");
+    expect(judgeRelease("Top Gun (1986) 1080p Surround.mp4", facts(2022, "Top Gun: Maverick"), "movie")).toBe("mismatch");
+  });
+
+  it("passes over the code a collection numbers its films by, when the year vouches for the name", () => {
+    expect(judgeRelease("M22 Avengers Endgame (2019) 1080p.mp4", facts(2019, "Avengers: Endgame"), "movie")).toBe("match");
+    expect(judgeRelease("G1 The Godfather (1972) 1080p Surround.mp4", facts(1972, "The Godfather"), "movie")).toBe("match");
+    expect(judgeRelease("2016c) Arrival 1080p Surround.mp4", facts(2016, "Arrival"), "movie")).toBe("match");
+    expect(judgeRelease("G2 The Godfather Part II (1974) 1080p Surround.mp4", facts(1972, "The Godfather"), "movie")).toBe("mismatch");
+  });
+
+  it("passes over a genre filed between the title and its year", () => {
+    expect(judgeRelease("05 Vacation - Comedy 2015 Eng Subs 720p [H264-mp4].mp4", facts(2015, "Vacation"), "movie")).toBe("match");
+    expect(judgeRelease("Life Is Beautiful - Comedy Drama 1997 Eng Ita Spa Multi-Subs 720p", facts(1997, "Life Is Beautiful"), "movie")).toBe("match");
+    expect(judgeRelease("True Romance 1993 1080p BluRay", facts(1993, "True"), "movie")).toBe("mismatch");
+  });
+
+  it("takes a year given twice, or the year made beside the year released, as one date", () => {
+    expect(judgeRelease("Barbarian.2022.2022.iTA-ENG.WEBDL.2160p.HEVC.HDR.x265-CYBER.mkv", facts(2022, "Barbarian"), "movie")).toBe("match");
+    expect(judgeRelease("Obsession.2025.2026.2160p.UHD.BluRay.DV.HDR.ENG.LATINO.DDP5.1.H265.MP4-BTM", facts(2026, "Obsession"), "movie")).toBe("match");
+  });
+
+  it("ends a title at a round bracket of tags, and not at one holding its other name", () => {
+    const asakusa = facts(2022, "Demon Slayer: Kimetsu no Yaiba - Asakusa Arc");
+    expect(judgeRelease("[GJ.Y] Demon Slayer (Kimetsu no Yaiba) - Asakusa Arc (B-Global 1920x1080 HEVC AAC MultiSub).mkv", asakusa, "movie")).toBe("match");
+  });
+
+  it("reads a season counted before the word, and a part of a season", () => {
+    expect(judgeRelease("Game Of Thrones: 1ª Temporada (2011) 720p Dual Audio", { titles: ["Game of Thrones"], year: 2011 }, "tv")).toBe("match");
+    const mushoku: TitleFacts = { titles: ["Mushoku Tensei: Jobless Reincarnation"], year: 2021 };
+    expect(judgeRelease("Mushoku Tensei: Jobless Reincarnation S01P01 (2021) (1080p x265 10bit BD Dual Track)", mushoku, "tv")).toBe("match");
+    expect(judgeRelease("24 Season 1 1080p BluRay x265", { titles: ["24"], year: 2001 }, "tv")).toBe("match");
+  });
+});
+
+describe("judgeRelease, a season released under its own name", () => {
+  it("is the show, with the part of the season it holds", () => {
+    const bleach: TitleFacts = { titles: ["Bleach", "Bleach Thousand-Year Blood War"], year: 2004, seasonYears: { 1: 2004, 2: 2022 }, anime: true };
+    const release = "Bleach: Thousand-Year Blood War P01 (2022) (1080p x265 10bit BD Dual Audio DTS-HD MA)";
+    expect(judgeRelease(release, bleach, "tv", { season: 2 })).toBe("match");
+    expect(judgeRelease(release, { ...bleach, titles: ["Bleach"] }, "tv", { season: 2 })).toBe("mismatch");
+  });
+});
+
+describe("countsAnotherShow", () => {
+  const onePiece: TitleFacts = { titles: ["One Piece"], year: 1999, anime: true };
+  const bleach: TitleFacts = { titles: ["Bleach", "Bleach Thousand-Year Blood War"], year: 2004, anime: true };
+
+  it("is true of a side series or a recut numbered like the show", () => {
+    expect(countsAnotherShow("[Erai-raws] Barto no Himitsu no Heya! - 01 [1080p][HEVC][548D348E].mkv", onePiece)).toBe(true);
+    expect(countsAnotherShow("[Muhn Pace] Dressrosa 02 [1080p][24F67B6B].mp4", onePiece)).toBe(true);
+  });
+
+  it("is false of the show, under its own name or a season's", () => {
+    expect(countsAnotherShow("[Judas] One Piece - 001.mkv", onePiece)).toBe(false);
+    expect(countsAnotherShow("[Anime Time] Bleach - Thousand-Year Blood War - 03.mkv", bleach)).toBe(false);
+    expect(countsAnotherShow("[Group] Bleach - Sennen Kessen-hen - Soukoku-tan - 07 [1080p].mkv", bleach)).toBe(false);
+  });
+
+  it("is false of the show cut short, or by its initials", () => {
+    const boruto: TitleFacts = { titles: ["Boruto: Naruto Next Generations"], year: 2017, anime: true };
+    expect(countsAnotherShow("[Judas] Boruto - 01.mkv", boruto)).toBe(false);
+    expect(countsAnotherShow("D-B-Z 001 - Aparece Un Mini-Goku, Su Nombre Es Gohan.mkv", { titles: ["Dragon Ball Z"], year: 1989, anime: true })).toBe(false);
+    expect(countsAnotherShow("UBT-L.Attaque.Des.Titans.VOL01.ep01.avi", { titles: ["Attack on Titan", "L'Attaque des Titans"], year: 2013, anime: true })).toBe(false);
+  });
+
+  it("is false of a file named for the episode alone, or by season and episode", () => {
+    const dragonBallSuper: TitleFacts = { titles: ["Dragon Ball Super"], year: 2015, anime: true };
+    expect(countsAnotherShow("Episode 1 A Peacetime Reward Who Gets the 100,000,000 Zeni!.mp4", dragonBallSuper)).toBe(false);
+    expect(countsAnotherShow("001 Une récompense pour la paix. À Qui reviennent les 100 Millions de Zenis..mkv", dragonBallSuper)).toBe(false);
+    expect(countsAnotherShow("01 - Asteroid Blues.mkv", { titles: ["Cowboy Bebop"], year: 1998, anime: true })).toBe(false);
+    expect(countsAnotherShow("S17E03 - March of the Starcross.mkv", bleach)).toBe(false);
+    expect(countsAnotherShow("Interdimensional Cable 2.mkv", { titles: ["Rick and Morty"], year: 2013 })).toBe(false);
+    expect(countsAnotherShow("Area 51.mkv", onePiece)).toBe(false);
   });
 });
