@@ -23,6 +23,13 @@ All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](ht
 - A release turned away as another title is logged with the file it was
   judged by, not its name alone.
 
+### Fixed
+- **The remux cache grew past its limit with every restart.** The folders of
+  files being prepared were only counted, and only cleaned, while the process
+  that made them was running; after an update nothing could reach them and
+  nothing removed them. One install held 100 GB in 74 folders, the oldest
+  weeks old, under a 50 GB limit. They are now removed when the remuxer starts.
+
 ## [2.5.5] - 2026-10-11
 
 ### Fixed
