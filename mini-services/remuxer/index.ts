@@ -21,10 +21,12 @@ import { mkdirSync } from "node:fs";
 import type { AudioPreference } from "../../src/lib/profile-preferences";
 import { UNUSABLE_HEADER } from "../../src/lib/playback/remuxer";
 import { onClientGone, serveRange } from "./source-proxy";
+import { removeCacheLeftovers } from "./cache-leftovers";
 import {
   UNUSABLE_ENTRY,
   VodError,
   configureVod,
+  isLiveVodDir,
   leaveVodSession,
   openVodSession,
   readFragment,
@@ -75,6 +77,10 @@ function sendError(res: ServerResponse, err: unknown): void {
 
 mkdirSync(CACHE_DIR, { recursive: true });
 configureVod({ proxyBase: `http://127.0.0.1:${PORT}` });
+// Nothing can reach what the process before this one made.
+void removeCacheLeftovers(CACHE_DIR, isLiveVodDir).then((removed) => {
+  if (removed) console.log(`[vod] removed ${removed} folder(s) left in the cache by an earlier run`);
+});
 startVodJanitor();
 
 const server = createServer(async (req, res) => {

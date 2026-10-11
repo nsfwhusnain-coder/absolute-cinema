@@ -815,6 +815,12 @@ export function leaveVodSession(id: string): void {
   log(`left ${id}`);
 }
 
+/** True for the cache folder of a session that is open now. */
+export function isLiveVodDir(name: string): boolean {
+  for (const session of sessions.values()) if (session.dir.endsWith(`/${name}`)) return true;
+  return false;
+}
+
 export function vodStats(): { sessions: number; runs: number } {
   return { sessions: sessions.size, runs: totalAliveRuns() };
 }
