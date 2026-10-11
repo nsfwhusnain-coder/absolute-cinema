@@ -2,6 +2,104 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.5.4] - 2026-10-11
+
+### Fixed
+- **Now and then a different film played than the one on the poster, or
+  another episode, or another show of the same name.** Releases are looked up
+  by the title's IMDb id, and what the index files under an id is not always
+  that title: one film out of "Amazing Films 7", The Godfather Part III under
+  The Godfather, Dragon Ball Z under House of the Dragon, the 2023 One Piece
+  under the 1999 one, episode 640 of a show for its first. Nothing checked,
+  so whichever ranked best on size and seeders was played. A release now has
+  to be the title that was asked for, judged on its name and year against
+  every name the title goes by:
+  - another year's film, a sequel, another film of the same series, a
+    collection, or an episode filed under a film is dropped;
+  - a series release dated after the season asked for first aired is a later
+    show of the same name, and is dropped;
+  - a file that numbers itself as another episode, or is named for another
+    season of the show, or for a side series out of the same batch, is
+    dropped;
+  - the file's own name outranks the release's: a file named for the film is
+    the film whatever collection it sits in, and a file that says it is
+    another is not;
+  - a file is refused when it is opened if it runs nowhere near as long as
+    the title (an episode under a film of the same name, a film under an
+    episode, a making-of), on web streams and Phoenix as well.
+
+  Releases that name the title are tried before ones kept only because
+  nothing in their name says otherwise, and a link stored before any of this
+  is checked when it is read back. With AllDebrid, a file inside a pack is
+  now asked for by the name the index gave it: that service lists a
+  torrent's files in an order of its own, and the index's file number picked
+  the wrong one in two packs out of five.
+- **With AllDebrid or TorBox, an anime episode could be one from another
+  season.** Anime is cut into seasons differently from one catalogue to the
+  next, and those two services asked the index by IMDb season and episode:
+  for the third episode of what TMDB calls Bleach's second season, the answer
+  was episode 23 of the first. They now look anime up by its own entry, as
+  Real-Debrid already did. A season or part released under a name of its own
+  ("Bleach: Thousand-Year Blood War") is known as the show.
+- **A file could be started on a CDN too slow to carry it.** The debrid
+  services' CDNs are not equal: measured side by side on one evening,
+  Real-Debrid delivered 43 to 49 Mbit/s and AllDebrid 2.5 to 8.7. Nothing
+  told the player, and at equal height the AllDebrid file was often the one
+  chosen: it took 8 to 20 seconds to open, then stalled. Each service in use
+  is now measured every ten minutes, and a file whose CDN delivers less than
+  its height needs is not started while anything else will play. It is still
+  played when it is all there is, and comes back by itself when its CDN does.
+- **Anime episodes started on a web stream, as low as 480p, with 1080p and 4K
+  debrid files in the list.** A file that holds several languages was left
+  out of the start whenever a web stream was labelled English. For a file
+  that is remuxed that is wrong, since the remuxer picks the language the
+  viewer wants, and most anime releases are of this kind. Such a file now
+  counts as being in the viewer's language.
+- **Episodes started on a 720p or 1080p web stream with 4K debrid files in
+  the list.** A debrid source whose name looked like a collection never
+  started on its own, a rule written for film trilogies that also matched
+  "S02" and "Season 2", which is how nearly every episode is released. It
+  now applies to films only.
+- **One file that would not play could cost half a minute at the start of a
+  title, every time.** Some files give a stream copy their sound and never a
+  frame of video, and some AV1 files mark frames as starting points that a
+  decoder cannot start from. The player waited out a 25-second timeout on
+  them, and the next viewer was sent to the same file. Such a file is now
+  given up in a few seconds, and remembered: it is not offered again, to
+  anyone, and the same goes for a file refused for its length.
+- **A file a device could not decode steadily played a bit, then buffered,
+  over and over.** A source that fails while playing is tried again twice
+  before the player moves on, and every recovery that showed a frame gave
+  both tries back: a file that fails again a second after each recovery was
+  never left. The tries now come back only after a minute of play without an
+  error, so three failures in a minute move the player to the next source.
+- **A file one device could not decode was marked down for every device.**
+  What plays well is remembered per title for the whole household, and a
+  start that failed because the device had no decoder for the file (an iPad
+  without AV1), or no Dolby Vision, counted against the file for the
+  television that plays it. Those failures are no longer held against it.
+- **A browser with no HEVC decoder tried every HEVC file in turn.** Chromium
+  without a hardware decoder (a remote session, a virtual machine, some
+  graphics cards) still says it plays HEVC, and each file failed on its first
+  frame: 46 seconds to the first picture on one machine. The decoder is now
+  asked directly, and a codec it says no to is given up on that device after
+  one failed start.
+- **In Safari, Phoenix's files failed on the first frame.** Most are HEVC
+  stored under the `hev1` name, which Apple's player will not open as a plain
+  file, and nothing in their address says so. Their codec is now read off
+  the start of each file, and Safari skips the ones it cannot open.
+
+### Changed
+- **Remuxed titles start and jump sooner.** A remuxed file was sent one
+  keyframe interval at a time, up to 45 MB of 4K to receive before a frame
+  showed. Players that can take it now get the same film in two-second
+  slices: a jump lands in about four seconds where it took six to nine.
+- **A title is made ready before Play is pressed.** A title's page, once
+  stayed on, finds its sources and opens the one Play would start; the next
+  episode gets the same as the current one nears its end. Pressing Play then
+  shows a picture in about a second. This never takes anything from someone
+  who is watching.
+
 ## [2.5.3] - 2026-10-10
 
 ### Fixed

@@ -1,6 +1,6 @@
 {
   "name": "absolute-cinema",
-  "version": "2.5.3",
+  "version": "2.5.4",
   "private": true,
   "description": "A self-hosted, Netflix-style streaming front end for your own Real-Debrid account.",
   "license": "MIT",
