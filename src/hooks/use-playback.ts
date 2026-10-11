@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import type { MediaType, PlaybackResponse, PlaybackSource } from "@/lib/playback/types";
 import { mergeProgressivePlaybackSources } from "@/lib/playback/merge-sources";
+import { keepsWarm } from "@/lib/playback/prewarm-renewal";
 import type { Outlook } from "@/lib/playback/orchestrator";
 import {
   getPlaybackDiscoveryPreferenceKey,
@@ -137,9 +138,25 @@ export function usePrewarmStart(args: Args & { startAt: number; originalLanguage
         quality,
         startAt,
       });
-    warm();
-    const timer = setInterval(warm, PREWARM_RENEW_MS);
-    return () => clearInterval(timer);
+    const hidden = () => document.visibilityState === "hidden";
+    let renewals = 0;
+    if (!hidden()) warm();
+    const timer = setInterval(() => {
+      if (!keepsWarm(renewals, hidden())) return;
+      renewals++;
+      warm();
+    }, PREWARM_RENEW_MS);
+    // Back on the page after being away: ready again, and the count starts over.
+    const onVisibility = () => {
+      if (hidden()) return;
+      renewals = 0;
+      warm();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [active, sources, remuxAvailable, audioPreference, audioLanguage, quality, tmdbId, mediaType, season, episode, originalLanguage, startAt]);
 }
 

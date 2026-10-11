@@ -38,7 +38,10 @@ export interface PlaybackReport {
   failures: { failedStarts: number; byReason: Counted; byProvider: Counted; stalls: number; stallsByReason: Counted; failedStartsPerHundred: number };
   titles: { asked: number; with4k: number; withDebrid1080: number; webOnly: number; nothing: number; firstAnswerMs: Quantiles };
   search: { searches: number; totalMs: Quantiles; first1080Ms: Quantiles; first2160Ms: Quantiles };
+  /** Files opened by a player. One made ready beforehand opens at once, and counts as that. */
   opens: { total: number; ok: number; okMs: Quantiles; byOutcome: Counted };
+  /** Asks made ahead of Play from a title's page; `freshMs` times the ones that had to open the file. */
+  readied: { asks: number; fresh: number; freshMs: Quantiles };
   remux: { runsStarted: number; viewersLeft: number; refusedForCapacity: number };
   webProviders: Record<string, { asked: number; found: number; medianMs: number }>;
   rejected: { otherTitle: number; otherLength: number; unusableLinks: number };
@@ -49,6 +52,8 @@ const HD_MIN_LINES = 780;
 const HD_READY_MIN_LINES = 520;
 /** A debrid search this short only read its cache. */
 const REAL_SEARCH_MIN_MS = 100;
+/** An open this short found the file already open. */
+const FRESH_OPEN_MIN_MS = 200;
 
 const text = (value: unknown, fallback = "unknown") => (typeof value === "string" && value ? value : fallback);
 const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
@@ -169,8 +174,14 @@ function searchOf(rows: readonly EventRow[]): PlaybackReport["search"] {
   return { searches: real.length, totalMs: of("totalMs"), first1080Ms: of("first1080Ms"), first2160Ms: of("first2160Ms") };
 }
 
+function readiedOf(rows: readonly EventRow[]): PlaybackReport["readied"] {
+  const asks = rows.filter((r) => r.event === "vod_open" && r.prewarm === true);
+  const fresh = asks.flatMap((r) => ((number(r.tookMs) ?? 0) >= FRESH_OPEN_MIN_MS && r.outcome === "ok" ? [number(r.tookMs)!] : []));
+  return { asks: asks.length, fresh: fresh.length, freshMs: quantiles(fresh) };
+}
+
 function opensOf(rows: readonly EventRow[]): PlaybackReport["opens"] {
-  const opens = rows.filter((r) => r.event === "vod_open");
+  const opens = rows.filter((r) => r.event === "vod_open" && r.prewarm !== true);
   const byOutcome: Counted = {};
   for (const row of opens) count(byOutcome, text(row.outcome));
   const ok = opens.filter((r) => r.outcome === "ok");
@@ -214,6 +225,7 @@ export function buildPlaybackReport(rows: readonly EventRow[], from: number, to:
     titles: titlesOf(within),
     search: searchOf(within),
     opens: opensOf(within),
+    readied: readiedOf(within),
     remux: remuxOf(within),
     webProviders: webProvidersOf(within),
     rejected: { otherTitle: events("debrid_other_title_rejected"), otherLength: events("vod_other_length_rejected"), unusableLinks: events("debrid_media_rejected") },

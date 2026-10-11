@@ -77,9 +77,22 @@ describe("buildPlaybackReport", () => {
       { at: T, event: "debrid_resolve_timing", totalMs: 9 },
       { at: T, event: "vod_open", outcome: "ok", tookMs: 2500 },
       { at: T, event: "vod_open", outcome: "remux capacity reached", tookMs: 40 },
+      { at: T, event: "vod_open", outcome: "ok", tookMs: 9300, prewarm: true },
+      { at: T, event: "vod_open", outcome: "ok", tookMs: 3, prewarm: true },
+      { at: T, event: "vod_open", outcome: "ok", tookMs: 2, prewarm: true },
     ]);
     expect(search).toMatchObject({ searches: 1, totalMs: { n: 1, p50: 2400, p90: 2400 }, first1080Ms: { n: 0 } });
     expect(opens).toEqual({ total: 2, ok: 1, okMs: { n: 1, p50: 2500, p90: 2500 }, byOutcome: { ok: 1, "remux capacity reached": 1 } });
+  });
+
+  it("keeps asks made ahead of Play apart from a player's opens, and times only the ones that opened the file", () => {
+    const { opens, readied } = report([
+      { at: T, event: "vod_open", outcome: "ok", tookMs: 9300, prewarm: true },
+      { at: T, event: "vod_open", outcome: "ok", tookMs: 3, prewarm: true },
+      { at: T, event: "vod_open", outcome: "ok", tookMs: 2, prewarm: true },
+    ]);
+    expect(opens.total).toBe(0);
+    expect(readied).toEqual({ asks: 3, fresh: 1, freshMs: { n: 1, p50: 9300, p90: 9300 } });
   });
 
   it("reads the remuxer's lines, the web providers' results and what was turned away", () => {

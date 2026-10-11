@@ -51,6 +51,7 @@ function render(r: PlaybackReport): string {
     `  file chosen to first picture: ${seconds(r.starts.startMs)}`,
     each("starts", r.starts.startMsByProvider),
     `  opening a file to remux: ${r.opens.ok} of ${r.opens.total} opened, ${seconds(r.opens.okMs)}; ${counted(r.opens.byOutcome)}`,
+    `  made ready before Play: ${r.readied.asks} asks from title pages, ${r.readied.fresh} opened a file, ${seconds(r.readied.freshMs)}`,
     `  failed starts by reason: ${counted(r.failures.byReason)}`,
     `  failed starts by service: ${counted(r.failures.byProvider)}`,
     "",
@@ -70,4 +71,6 @@ const days = Number(option("days")) || DEFAULT_DAYS;
 const to = Date.now();
 const from = to - days * DAY_MS;
 const report = buildPlaybackReport(readRows(option("dir") ?? eventLogDir(), from), from, to);
+const nothingPlayed = report.starts.total + report.failures.failedStarts + report.titles.asked === 0;
+if (nothingPlayed && !process.argv.includes("--json")) process.stdout.write("Nothing has been played in this period: the numbers below are empty, not zero.\n\n");
 process.stdout.write(`${process.argv.includes("--json") ? JSON.stringify(report, null, 2) : render(report)}\n`);
