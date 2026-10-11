@@ -489,17 +489,57 @@ export function parseMp4SampleEntry(bytes: Uint8Array): Mp4SampleEntry | undefin
   return undefined;
 }
 
+/** A movie header is 108 bytes, or 120 with 64-bit times. */
+const MVHD_MIN_BYTES = 100;
+const MVHD_MAX_BYTES = 128;
+const UINT32_SPAN = 4_294_967_296;
+/** A 32-bit duration of all ones means "not known". */
+const MVHD_DURATION_UNKNOWN = 0xffffffff;
+
 /**
- * Reads the sample entry of a progressive MP4 from the start of the file,
- * where a file made for streaming keeps it. Undefined when it is not there or
- * the request fails: unknown, never a guess.
+ * Pure ISO-BMFF parser: how long the file runs, in seconds, from its movie
+ * header (`mvhd`). Undefined when the header is not in these bytes or does not
+ * say.
  */
-export async function probeMp4SampleEntry(url: string, session: QualitySession): Promise<Mp4SampleEntry | undefined> {
+export function parseMp4DurationS(bytes: Uint8Array): number | undefined {
+  for (let offset = 4; offset + 4 <= bytes.byteLength; offset++) {
+    if (!matchesFourcc(bytes, offset, "mvhd")) continue;
+    const span = isoBoxSpan(bytes, offset - 4);
+    if (!span || span.size < MVHD_MIN_BYTES || span.size > MVHD_MAX_BYTES) continue;
+    const wide = bytes[offset + 4] === 1;
+    // Past the version and flags, then the creation and modification times.
+    const fields = offset + 8 + (wide ? 16 : 8);
+    if (fields + (wide ? 12 : 8) > bytes.byteLength) return undefined;
+    const timescale = readUint32(bytes, fields);
+    const low = readUint32(bytes, fields + (wide ? 8 : 4));
+    const duration = wide ? readUint32(bytes, fields + 4) * UINT32_SPAN + low : low;
+    if (!timescale || !duration || (!wide && duration === MVHD_DURATION_UNKNOWN)) return undefined;
+    return duration / timescale;
+  }
+  return undefined;
+}
+
+/** What the start of a progressive MP4 says of it. */
+export interface Mp4Header {
+  entry?: Mp4SampleEntry;
+  durationS?: number;
+}
+
+/**
+ * Reads the sample entry and the running time of a progressive MP4 from the
+ * start of the file, where a file made for streaming keeps them. Each is left
+ * out when it is not there, and all of it when the request fails: unknown,
+ * never a guess.
+ */
+export async function probeMp4Header(url: string, session: QualitySession): Promise<Mp4Header | undefined> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), MP4_PROBE_TIMEOUT_MS);
   try {
     const head = await fetchMp4Range(url, buildHeaders(session, url), `bytes=0-${MP4_RANGE_BYTE_CAP - 1}`, controller.signal);
-    return head ? parseMp4SampleEntry(head.bytes) : undefined;
+    if (!head) return undefined;
+    const entry = parseMp4SampleEntry(head.bytes);
+    const durationS = parseMp4DurationS(head.bytes);
+    return { ...(entry ? { entry } : {}), ...(durationS ? { durationS } : {}) };
   } catch {
     return undefined;
   } finally {

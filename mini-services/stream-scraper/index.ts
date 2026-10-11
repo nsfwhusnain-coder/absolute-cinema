@@ -14,6 +14,7 @@ import { plainClientHeaders, wantsPlainClient } from "../../src/lib/playback/cdn
 import { resolveVixsrc } from "./providers/vixsrc";
 import { resolveNotorrent } from "./providers/notorrent";
 import { lookupTmdb } from "./providers/tmdb-lookup";
+import { isImplausibleEmbedDuration } from "./embed-duration";
 import {
   resolveCinepro,
   isCineproConfigured,
@@ -51,7 +52,7 @@ import {
   type ProbeResult,
 } from "./probe";
 import {
-  probeMp4SampleEntry,
+  probeMp4Header,
   probeSourceQuality,
   isHlsMasterManifest,
   inferHeightFromUrl,
@@ -2214,12 +2215,21 @@ async function resolveVidlinkEntries(
   // These files say nothing about their codec in the URL, and most are HEVC
   // under the `hev1` name, which Safari will not open as a plain file. Read
   // off the file, the player can skip one it cannot play instead of trying it.
-  const entries = await Promise.all(
-    picked.map((stream) => (stream.type === "mp4" ? probeMp4SampleEntry(stream.url, vidlink.session) : undefined))
-  );
+  const [headers, lookup] = await Promise.all([
+    Promise.all(picked.map((stream) => (stream.type === "mp4" ? probeMp4Header(stream.url, vidlink.session) : undefined))),
+    lookupTmdb(tmdbId, mediaType),
+  ]);
+  // The provider maps a title to a file by its own search, and the file's
+  // length is the one thing here that says whether it found the right one.
+  const otherLength = (index: number) =>
+    isImplausibleEmbedDuration(headers[index]?.durationS ?? 0, lookup?.runtimeSeconds ?? 0, mediaType);
+  const kept = picked.map((stream, index) => ({ stream, index })).filter(({ index }) => !otherLength(index));
+  if (kept.length < picked.length) {
+    logAt("warn", `[vidlink-api] dropped ${picked.length - kept.length} file(s) of another length than the title`);
+  }
 
-  return picked.map((stream, index) => {
-    const sampleEntry = entries[index];
+  return kept.map(({ stream, index }, position) => {
+    const sampleEntry = headers[index]?.entry;
     const rungs = stream.qualityRungs?.filter((rung) => rung.height > 0 && rung.url);
     const ladder = stream.ladder?.length
       ? stream.ladder
@@ -2228,7 +2238,7 @@ async function resolveVidlinkEntries(
     return {
       url: stream.url,
       quality: stream.quality || "auto",
-      label: vidlinkSourceLabel(index),
+      label: vidlinkSourceLabel(position),
       provider: "VidLink",
       ...(stream.type ? { type: stream.type } : {}),
       ...(maxHeight ? { maxHeight, qualitySource: "label" as const } : {}),

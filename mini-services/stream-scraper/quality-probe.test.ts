@@ -14,6 +14,7 @@ import {
   type QualityInfo,
   type QualitySession,
   type QualitySource,
+  parseMp4DurationS,
   parseMp4SampleEntry,
   parseMp4VideoCodec,
   parseTsVideoCodec,
@@ -677,6 +678,36 @@ describe("video codec detection", () => {
     expect(parseMp4SampleEntry(mp4WithSampleEntry("hev1"))).toEqual({ codec: "hevc", tag: "hev1" });
     expect(parseMp4SampleEntry(mp4WithSampleEntry("hvc1"))).toEqual({ codec: "hevc", tag: "hvc1" });
     expect(parseMp4SampleEntry(new Uint8Array(64))).toBeUndefined();
+  });
+
+  /** A leading `ftyp`, then a movie header of the given version, timescale and duration. */
+  function mp4WithMovieHeader(version: 0 | 1, timescale: number, duration: number): Uint8Array {
+    const times = version === 1 ? 16 : 8;
+    const size = version === 1 ? 120 : 108;
+    const bytes = new Uint8Array(8 + size);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, 8);
+    bytes.set(new TextEncoder().encode("ftyp"), 4);
+    view.setUint32(8, size);
+    bytes.set(new TextEncoder().encode("mvhd"), 12);
+    bytes[16] = version;
+    view.setUint32(20 + times, timescale);
+    if (version === 1) view.setUint32(28 + times, duration);
+    else view.setUint32(24 + times, duration);
+    return bytes;
+  }
+
+  it("reads how long an MP4 runs from its movie header, in either width", () => {
+    expect(parseMp4DurationS(mp4WithMovieHeader(0, 1000, 7_265_000))).toBe(7265);
+    expect(parseMp4DurationS(mp4WithMovieHeader(1, 90_000, 90_000 * 5400))).toBe(5400);
+  });
+
+  it("has no running time for a header that does not give one, or is not there", () => {
+    expect(parseMp4DurationS(mp4WithMovieHeader(0, 1000, 0xffffffff))).toBeUndefined();
+    expect(parseMp4DurationS(mp4WithMovieHeader(0, 0, 5000))).toBeUndefined();
+    expect(parseMp4DurationS(mp4WithSampleEntry("avc1"))).toBeUndefined();
+    // Not a movie header: the letters alone, with no box around them.
+    expect(parseMp4DurationS(new TextEncoder().encode("xxxxmvhdxxxxxxxxxxxxxxxxxxxxxxxx"))).toBeUndefined();
   });
 
   it("returns undefined rather than guessing when nothing identifies a codec", () => {
