@@ -298,3 +298,20 @@ describe("HEVC in a plain MP4", () => {
     expect(decision.immediate?.id).toBe("a-mp4");
   });
 });
+
+describe("a debrid file on a CDN too slow to carry it", () => {
+  const MBIT = 1_000_000 / 8;
+  const debrid = (id: string, maxHeight: number, cdnMbit: number): PlaybackSource =>
+    src({ id, provider: "Debrid", origin: "debrid", compat: "native", container: "mp4", audioLanguage: "en", maxHeight, cdnBytesPerSec: cdnMbit * MBIT });
+
+  it("is not started while a file that will play is there, at its height or under it", () => {
+    const slow4k = debrid("alldebrid-4k", 2160, 2.5);
+    expect(decidePlayback([slow4k, debrid("debrid-4k", 2160, 228)]).immediate?.id).toBe("debrid-4k");
+    expect(decidePlayback([slow4k, debrid("debrid-1080", 1080, 228)]).immediate?.id).toBe("debrid-1080");
+  });
+
+  it("is started when it is all there is, and once its CDN can carry it again", () => {
+    expect(decidePlayback([debrid("alldebrid-4k", 2160, 2.5)]).immediate?.id).toBe("alldebrid-4k");
+    expect(decidePlayback([debrid("alldebrid-4k", 2160, 60), debrid("debrid-1080", 1080, 228)]).immediate?.id).toBe("alldebrid-4k");
+  });
+});

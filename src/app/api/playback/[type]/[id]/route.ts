@@ -7,7 +7,9 @@ import {
   decideImmediateSource,
   type DecidePlaybackOptions,
 } from "@/lib/playback/decide-playback";
+import { withCdnRates } from "@/lib/playback/debrid/cdn-rate";
 import { remuxHasCapacity } from "@/lib/playback/remux-health";
+import { bitrateSustainabilityRank } from "@/lib/playback/source-quality";
 import { buildFastDebridResponse } from "@/lib/playback/fast-debrid";
 import { RateLimiter } from "@/lib/rate-limit";
 import { getUserPlaybackPreferences } from "@/lib/profile-preferences.server";
@@ -390,7 +392,7 @@ function withRuntimeProviderHealth(
 ): PlaybackResponse {
   if (!result.sources?.length) return result;
   const healthy = sourcesWithProviderHealth(
-    result.sources,
+    withCdnRates(result.sources),
     providerHealthRegistry,
     { contentClass, viewerId }
   );
@@ -405,9 +407,11 @@ function withRuntimeProviderHealth(
   // decideImmediateSource re-sorts for start, so without this pick the
   // remembered source never actually plays. Proven 4K starts immediately;
   // a proven 1080 is ignored when any 4K is in the roster.
-  const proven = memory.size
+  const remembered = memory.size
     ? pickProvenSource(sources, memory, memorySourceKey)
     : null;
+  // A file that played once is not proven on a CDN that has since slowed past carrying it.
+  const proven = remembered && bitrateSustainabilityRank(remembered) >= 0 ? remembered : null;
   const best = proven ?? decideImmediateSource(sources, decideOptions);
   const ticketed = stampSourceUrlTickets(sources, viewerId);
   return {

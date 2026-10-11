@@ -563,8 +563,21 @@ function unknownRateSwitchFloor(height: number): number {
   );
 }
 
+/**
+ * True when a debrid file's CDN has been measured too slow to carry it. The
+ * file's own rate is rarely known, so the ordinary rate of its height stands
+ * in for it: a CDN delivering 5 Mbit/s plays no 4K file, whatever its size.
+ */
+function isBeyondItsCdn(source: PlaybackSource): boolean {
+  const delivered = (source.cdnBytesPerSec ?? 0) * 8;
+  if (delivered <= 0) return false;
+  const needed = (source.bitrateBps ?? 0) > 0 ? source.bitrateBps! : unknownRateSwitchFloor(sourceMaxHeight(source));
+  return delivered < needed * BITRATE_STARTUP_HEADROOM_RATIO;
+}
+
 /** -1 = measured link cannot sustain the encode, 0 = unknown, 1 = enough headroom. */
 export function bitrateSustainabilityRank(source: PlaybackSource): -1 | 0 | 1 {
+  if (isBeyondItsCdn(source)) return -1;
   const bitrate = source.bitrateBps ?? 0;
   const throughput = source.probe?.bytesPerSec ?? 0;
   if (bitrate <= 0 || source.probe?.ok !== true || throughput <= 0) return 0;

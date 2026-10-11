@@ -76,6 +76,12 @@ export interface PlaybackSource {
    * `normalizedBitrate` in source-quality.ts.
    */
   bitrateBps?: number;
+  /**
+   * What the CDN this debrid file sits on was last measured to deliver, in
+   * bytes per second. A file its CDN cannot carry is ranked behind the ones
+   * that play: see `bitrateSustainabilityRank` in source-quality.ts.
+   */
+  cdnBytesPerSec?: number;
   /** Detected from upstream URL before proxy rewrite (proxy URL hides codec path). */
   codec?: "h264" | "hevc" | "av1" | "unknown";
   /**

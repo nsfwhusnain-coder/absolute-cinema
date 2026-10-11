@@ -94,6 +94,7 @@ import {
   type ReleaseCompat,
   type ReleaseContainer,
 } from "./torrentio";
+import { noteCdnLink } from "./cdn-rate";
 import { isRefusedRelease } from "./refused-releases";
 import { addTitleNames, isWrongTitle, linkFileName, loadTitleFacts, titleFactsFor } from "./title-gate";
 import {
@@ -523,6 +524,7 @@ function toPlaybackSource(
   const release = parseReleaseTitle(record.title);
   const inferredLang = inferAudioLanguageFromText(record.title);
   const sizeBytes = parseSizeBytes(record.title);
+  noteCdnLink(provider, record.url);
   return {
     id: buildSourceId(provider, imdbId, mediaType, season, episode, quality),
     url: record.url,
@@ -584,6 +586,7 @@ function toRdPlaybackSource(
   const release = parseReleaseTitle(record.title);
   const inferredLang = inferAudioLanguageFromText(record.title);
   const sizeBytes = parseSizeBytes(record.title);
+  noteCdnLink("realdebrid", record.url);
   return {
     id: buildSourceId("realdebrid", imdbId, mediaType, season, episode, slot),
     url: record.url,

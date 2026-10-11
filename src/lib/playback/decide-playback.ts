@@ -6,7 +6,7 @@ import {
   sourceAudioLanguageCode,
   sourceAudioLanguageRank,
 } from "./source-facts";
-import { isSourcePlayableHere, sourceDelivery, normalizedBitrate } from "./source-quality";
+import { bitrateSustainabilityRank, isSourcePlayableHere, sourceDelivery, normalizedBitrate } from "./source-quality";
 import { supportsHev1Files } from "./decode-capability";
 import { isNeverAutoDefaultUrl } from "./poison-url";
 import { isMoviePackRelease } from "./debrid/torrentio";
@@ -220,9 +220,13 @@ export function decidePlayback(
 ): PlaybackDecision {
   const live = sources.filter((source) => !failedSet(options.failedIds).has(source.id));
   const remuxAllowed = options.remuxAvailable !== false;
-  const playableLive = remuxAllowed
+  const deliverable = remuxAllowed
     ? live
     : live.filter((s) => sourceDelivery(s) !== "remux");
+  // A file on a CDN measured too slow to carry it opens late and then stalls:
+  // it is not started while anything else will play, a shorter file included.
+  const carried = deliverable.filter((source) => bitrateSustainabilityRank(source) >= 0);
+  const playableLive = carried.length ? carried : deliverable;
 
   const roster = autoLanguagePool(
     autoIdentityPool(playableLive),

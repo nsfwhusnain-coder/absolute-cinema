@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 import { describe, expect, it } from "bun:test";
 import {
+  bitrateSustainabilityRank,
   isRuntimeSourceUnhealthy,
   isSourcePlayableHere,
   sourceDelivery,
@@ -1068,5 +1069,48 @@ describe("sourceDelivery - audio safety", () => {
         })
       )
     ).toBe("direct");
+  });
+});
+
+describe("a debrid file on a CDN too slow to carry it", () => {
+  const MBIT = 1_000_000 / 8;
+  const debrid = (id: string, maxHeight: number, cdnMbit?: number): PlaybackSource =>
+    makeSource({
+      id,
+      provider: id.startsWith("alldebrid") ? "AllDebrid" : "Debrid",
+      label: `${maxHeight}p`,
+      type: "mp4",
+      origin: "debrid",
+      compat: "native",
+      container: "mp4",
+      codec: "h264",
+      maxHeight,
+      ...(cdnMbit === undefined ? {} : { cdnBytesPerSec: cdnMbit * MBIT }),
+    });
+
+  it("is told by its height's ordinary rate when its own is not known", () => {
+    expect(bitrateSustainabilityRank(debrid("alldebrid-4k", 2160, 8.7))).toBe(-1);
+    expect(bitrateSustainabilityRank(debrid("alldebrid-1080", 1080, 8.7))).toBe(0);
+    expect(bitrateSustainabilityRank(debrid("alldebrid-1080", 1080, 2.5))).toBe(-1);
+    expect(bitrateSustainabilityRank(debrid("debrid-4k", 2160, 45))).toBe(0);
+  });
+
+  it("says nothing of a CDN that has not been measured", () => {
+    expect(bitrateSustainabilityRank(debrid("alldebrid-4k", 2160))).toBe(0);
+  });
+
+  it("goes by the file's own rate when that is known", () => {
+    const heavy = { ...debrid("debrid-4k", 2160, 45), bitrateBps: 60_000_000 };
+    expect(bitrateSustainabilityRank(heavy)).toBe(-1);
+  });
+
+  it("is passed over for a file that will play, even a shorter one", () => {
+    const slow4k = debrid("alldebrid-4k", 2160, 8.7);
+    expect(pickDefaultSource([slow4k, debrid("debrid-4k", 2160, 45)])?.id).toBe("debrid-4k");
+    expect(pickDefaultSource([slow4k, debrid("debrid-1080", 1080, 45)])?.id).toBe("debrid-1080");
+  });
+
+  it("is still played when it is all there is", () => {
+    expect(pickDefaultSource([debrid("alldebrid-4k", 2160, 8.7)])?.id).toBe("alldebrid-4k");
   });
 });
