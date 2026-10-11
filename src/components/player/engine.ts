@@ -12,6 +12,7 @@
  * orchestrator decides between retrying and switching sources.
  */
 
+import { leaveRemuxSession, remuxSessionIdOf } from "@/lib/playback/remux-leave";
 import type HlsType from "hls.js";
 import type { ErrorData, Level, MediaPlaylist } from "hls.js";
 import { activeBufferProfile } from "@/lib/playback/device-profile";
@@ -90,6 +91,8 @@ export class MediaEngine {
   private networkRecoveries = 0;
   private mediaRecoveries = 0;
   private abandoned = false;
+  /** The remux session behind what is loaded, so the server can be told when it is done with. */
+  private remuxId: string | null = null;
   /** Set while a sliced stream is attached: jumps then land on these times. */
   private seekPoints: readonly number[] | null = null;
   kind: EngineKind = "native_file";
@@ -107,6 +110,7 @@ export class MediaEngine {
   async load(playable: Playable, startAt: number, options: LoadOptions = {}): Promise<void> {
     const startHeight = options.startHeight ?? DEFAULT_START_HEIGHT;
     this.teardown();
+    this.moveTo(remuxSessionIdOf(playable.url));
     const generation = ++this.generation;
     this.abandoned = false;
     this.seekPoints = null;
@@ -278,6 +282,18 @@ export class MediaEngine {
   destroy(): void {
     this.generation++;
     this.teardown();
+    this.moveTo(null);
+  }
+
+  /** The page is going away with a remux session still loaded. */
+  leave(): void {
+    if (this.remuxId) leaveRemuxSession(this.remuxId);
+  }
+
+  /** Lets go of the remux session that was loaded, unless `next` is the same one loaded again. */
+  private moveTo(next: string | null): void {
+    if (this.remuxId && this.remuxId !== next) leaveRemuxSession(this.remuxId);
+    this.remuxId = next;
   }
 
   private teardown(): void {

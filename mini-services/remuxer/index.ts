@@ -25,6 +25,7 @@ import {
   UNUSABLE_ENTRY,
   VodError,
   configureVod,
+  leaveVodSession,
   openVodSession,
   readFragment,
   startVodJanitor,
@@ -96,6 +97,11 @@ const server = createServer(async (req, res) => {
       const source = vodSource(src[1]!);
       if (!source) return send(res, 404, "not found", "text/plain");
       return await serveRange(req, res, source);
+    }
+    const left = url.pathname.match(/^\/vod\/([a-f0-9]{24})\/leave$/);
+    if (left) {
+      leaveVodSession(left[1]!);
+      return send(res, 204, "", "text/plain");
     }
     const subs = url.pathname.match(/^\/vod\/([a-f0-9]{24})\/sub-(\d{1,2})\.json$/);
     if (subs) return send(res, 200, JSON.stringify({ cues: vodSubtitleCues(subs[1]!, Number(subs[2])) }), "application/json");

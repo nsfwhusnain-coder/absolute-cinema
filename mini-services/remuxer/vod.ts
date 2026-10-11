@@ -594,10 +594,16 @@ function throttle(session: Session, run: Run): void {
   if (!run.paused && lead > pauseAt) {
     run.paused = true;
     run.proc.kill("SIGSTOP");
-  } else if (run.paused && session.demanded && lead < AHEAD_RESUME_S) {
-    run.paused = false;
-    run.proc.kill("SIGCONT");
+  } else if (session.demanded && lead < AHEAD_RESUME_S) {
+    wake(run);
   }
+}
+
+/** Sets a paused run going again. A viewer waiting on one is never left waiting on a run that sleeps. */
+function wake(run: Run): void {
+  if (!run.paused) return;
+  run.paused = false;
+  run.proc.kill("SIGCONT");
 }
 
 function sessionOrThrow(id: string): Session {
@@ -691,7 +697,9 @@ async function* windowFragments(session: Session, window: PlanWindow, segment: n
     // Waiting longer, or starting again, would end the same way.
     if (session.pictureless || session.runs.some((r) => r.unusable && r.startSegment === segment)) throw new VodError(UNUSABLE_ENTRY, 502);
     if (Date.now() > deadline) throw new VodError("segment not ready", 504);
-    if (!runReaching(session, window)) {
+    const reaching = runReaching(session, window);
+    if (reaching) wake(reaching);
+    else {
       const failed = session.runs.filter((r) => r.failed && r.startSegment === segment).length;
       if (failed >= MAX_FAILED_RUNS_PER_SEGMENT) throw new VodError("source failed to remux", 502);
       startRun(session, segment);
@@ -710,6 +718,7 @@ async function* windowFragments(session: Session, window: PlanWindow, segment: n
     if (run.failed) throw new VodError("remux run failed mid-segment", 502);
     if (Date.now() > deadline) throw new VodError("segment stalled", 504);
     session.lastRequestAt = Date.now();
+    wake(run);
     await sleep(POLL_MS);
   }
 }
@@ -779,6 +788,28 @@ export function startVodJanitor(): void {
 
 export function stopAllVodRuns(): void {
   for (const session of sessions.values()) for (const run of session.runs) stopRun(run, "shutdown");
+}
+
+/**
+ * The viewer is done with a session: closed the player, or moved to another
+ * source. Its runs stop reading at once and count as idle, so the next viewer
+ * can have their places. What was made is kept, and anyone still on the
+ * session (two screens on one file) wakes it with the next segment they ask
+ * for. A run that has made nothing yet is stopped outright: left paused, it
+ * would be taken for a file that cannot be started.
+ */
+export function leaveVodSession(id: string): void {
+  const session = sessions.get(id);
+  if (!session) return;
+  session.lastRequestAt = Math.min(session.lastRequestAt, Date.now() - ACTIVE_VIEWER_MS - 1);
+  for (const run of aliveRuns(session)) {
+    if (!run.fragments.length) stopRun(run, "viewer left");
+    else if (!run.paused) {
+      run.paused = true;
+      run.proc.kill("SIGSTOP");
+    }
+  }
+  log(`left ${id}`);
 }
 
 export function vodStats(): { sessions: number; runs: number } {

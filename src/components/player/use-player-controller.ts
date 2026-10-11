@@ -355,6 +355,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
       onFatal: (reason) => playbackFailed(reason),
     });
     engineRef.current = engine;
+    const onPageHide = () => engine.leave();
+    window.addEventListener("pagehide", onPageHide);
     const { title } = optionsRef.current;
     setFeedbackTitleContext({ tmdbId: String(title.tmdbId), mediaType: title.mediaType, season: title.season, episode: title.episode });
     // Mute and full screen carry over from the previous episode (the page stays
@@ -377,6 +379,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       if (orchestrator.current.everPlayed && duration > 0) optionsRef.current.onProgress(positionRef.current, duration);
       clearTimers();
       attachAbort.current?.abort();
+      window.removeEventListener("pagehide", onPageHide);
       engine.destroy();
       engineRef.current = null;
       clearFeedbackTitleContext();
