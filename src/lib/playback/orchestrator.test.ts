@@ -73,6 +73,42 @@ describe("orchestrator", () => {
     });
   });
 
+  describe("what the server says can still arrive", () => {
+    const best: Ranker = { pick: (c) => [...c].sort((x, y) => parseInt(y.quality) - parseInt(x.quality))[0] ?? null, targetHeight: 2160 };
+    const file: PlaybackSource = { ...src("file"), origin: "debrid" };
+    const web: PlaybackSource = { ...src("web"), origin: "embed" };
+    const lowWeb: PlaybackSource = { ...web, id: "low-web", quality: "720p" };
+    const noFourK = { fourKSettled: true, debridSettled: false };
+    const nothingMore = { fourKSettled: true, debridSettled: true };
+    const start = (sources: PlaybackSource[], outlook: typeof noFourK, ranker = best) =>
+      onRoster(initialOrchestratorState, sources, true, ranker, T0, outlook).command;
+
+    it("starts a 1080p debrid file at once when no 4K can come", () => {
+      expect(start([file], noFourK)).toMatchObject({ type: "attach", sourceId: "file" });
+    });
+
+    it("still holds a web stream back while debrid files may come", () => {
+      expect(start([web], noFourK)).toEqual({ type: "wait", recheckInMs: FOUR_K_GRACE_MS });
+    });
+
+    it("starts the best there is once debrid has nothing more to give", () => {
+      expect(start([web], nothingMore)).toMatchObject({ type: "attach", sourceId: "web" });
+    });
+
+    it("gives the web providers the short wait when only less than 1080p is in hand", () => {
+      expect(start([lowWeb], nothingMore)).toEqual({ type: "wait", recheckInMs: LOW_QUALITY_GRACE_MS });
+    });
+
+    it("waits no longer than the short wait on a doubted source once debrid has nothing more", () => {
+      const doubting: Ranker = { ...best, isSuspect: () => true };
+      expect(start([file], nothingMore, doubting)).toEqual({ type: "wait", recheckInMs: LOW_QUALITY_GRACE_MS });
+    });
+
+    it("changes nothing while the outlook is open", () => {
+      expect(onRoster(initialOrchestratorState, [file], true, best, T0).command).toEqual({ type: "wait", recheckInMs: FOUR_K_GRACE_MS });
+    });
+  });
+
   it("starts on the best source when the roster arrives", () => {
     const { state, command } = onRoster(initialOrchestratorState, [A, B], false, ranker, T0);
     expect(state.phase).toBe("starting");

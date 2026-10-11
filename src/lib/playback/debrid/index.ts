@@ -94,7 +94,8 @@ import {
   type ReleaseCompat,
   type ReleaseContainer,
 } from "./torrentio";
-import { noteCdnLink } from "./cdn-rate";
+import { noteCdnLink, withCdnRates } from "./cdn-rate";
+import { bitrateSustainabilityRank } from "../source-quality";
 import { isRefusedRelease } from "./refused-releases";
 import { addTitleNames, isWrongTitle, linkFileName, loadTitleFacts, titleFactsFor } from "./title-gate";
 import {
@@ -868,7 +869,9 @@ async function resolveRankedCandidatePool(
   deadline: number,
   mediaType: MediaType,
   occupiedIdentities: Set<string>,
-  hedge = POOL_HEDGE
+  hedge = POOL_HEDGE,
+  /** Told of each slot's file as soon as it is known, without waiting for the rest of the pool. */
+  onResolved?: (resolved: ResolvedCandidate, slotIndex: number) => void
 ): Promise<ResolvedCandidate[]> {
   const resolvedCandidates: ResolvedCandidate[] = [];
   const claimedIdentities = new Set(occupiedIdentities);
@@ -889,20 +892,15 @@ async function resolveRankedCandidatePool(
       cursor + Math.min(RESOLVE_CONCURRENCY, remainingNeeded + hedge)
     );
     cursor += batch.length;
-    const batchResults = await mapWithConcurrency(
-      batch,
-      RESOLVE_CONCURRENCY,
-      (candidate) =>
-        resolveSlotCandidate(
-          [candidate],
-          token,
-          deadline,
-          mediaType,
-          occupiedIdentities
-        )
+    // The whole batch resolves at once. Each result is taken in rank order,
+    // the moment it and every candidate ranked above it has finished, so the
+    // best file is known without waiting on a slow one further down.
+    const tasks = batch.map((candidate) =>
+      resolveSlotCandidate([candidate], token, deadline, mediaType, occupiedIdentities).catch(() => null)
     );
 
-    for (const resolved of batchResults) {
+    for (const task of tasks) {
+      const resolved = await task;
       if (!resolved || resolvedCandidates.length >= count) continue;
       const hashIdentity = candidateHashIdentity(resolved);
       const titleIdentity = releaseTitleIdentity(resolved.title);
@@ -927,6 +925,7 @@ async function resolveRankedCandidatePool(
         occupiedIdentities.add(identity);
       });
       resolvedCandidates.push(resolved);
+      onResolved?.(resolved, resolvedCandidates.length - 1);
     }
   }
 
@@ -1166,6 +1165,11 @@ interface RosterEntry {
   progress: PlaybackSource[];
   /** True while a 4K pool is still resolving candidates. */
   hunting4k?: boolean;
+  /** True once no 4K file can still come from this roster: its 4K pools are done, or it had none to run. */
+  fourKOver?: boolean;
+  startedAt: number;
+  /** Milliseconds from the start to the first source of each height, and to the end of the 4K hunt. */
+  marks: { first1080Ms?: number; first2160Ms?: number; fourKDoneMs?: number };
 }
 
 const inflightRosters = new Map<string, RosterEntry>();
@@ -1184,12 +1188,13 @@ function resolveRealDebridSlotsShared(
   const existing = inflightRosters.get(key);
   // An explicit "try again" must not be answered by the attempt that failed.
   if (existing && !req.forceRefresh) return existing;
-  const entry: RosterEntry = { run: Promise.resolve({ sources: [], candidates: [] }), progress: [] };
+  const entry: RosterEntry = { run: Promise.resolve({ sources: [], candidates: [] }), progress: [], startedAt: Date.now(), marks: {} };
   entry.run = resolveRealDebridSlots(keyBase, req, rdToken, preFetchedCandidates, entry);
   const run = entry.run;
   inflightRosters.set(key, entry);
   void run
     .finally(() => {
+      entry.fourKOver = true;
       if (inflightRosters.get(key) === entry) inflightRosters.delete(key);
     })
     .catch(() => {});
@@ -1207,27 +1212,49 @@ export function isIncompleteDebridRoster(sources: PlaybackSource[]): boolean {
   return incompleteRosters.has(sources);
 }
 
+/** What the debrid services can still add to an answer that has just gone out. */
+export interface DebridOutlook {
+  /** No 4K file can still arrive: every service's 4K search for the title is over. */
+  fourKSettled: boolean;
+  /** Nothing at all can still arrive from the debrid services. */
+  settled: boolean;
+}
+
+const outlooks = new WeakMap<PlaybackSource[], DebridOutlook>();
+
+/** The outlook for a list `resolveDebridSources` returned; null when no service is configured or the resolve failed. */
+export function debridOutlook(sources: PlaybackSource[]): DebridOutlook | null {
+  return outlooks.get(sources) ?? null;
+}
+
 /** How long the full path waits for the complete roster before settling for a good partial one. */
 const RD_SOFT_DEADLINE_MS = 5_000;
-const RD_SOFT_POLL_MS = 250;
+const RD_SOFT_POLL_MS = 100;
 const RD_GOOD_ENOUGH_HEIGHT = 1080;
 /** With a 4K preference, how long to hold out for a 4K pool that is still hunting. */
 export const RD_4K_SOFT_DEADLINE_MS = 18_000;
 
+const reaches = (sources: readonly PlaybackSource[], height: number) => sources.some((s) => (s.maxHeight ?? 0) >= height);
+/** The files a player would start: not those on a CDN measured too slow to carry them. */
+const startable = (sources: readonly PlaybackSource[]) => withCdnRates(sources).filter((s) => bitrateSustainabilityRank(s) >= 0);
+
 /**
  * Waits for the full roster, but answers as soon as the soft deadline has
- * passed and at least one ≥1080p source is in hand. Pools still hunting
- * (typically a scarce native-4K slot) keep running and fill the cache for
- * the next play; the player's roster refresh picks them up as well.
+ * passed and at least one ≥1080p source is in hand, or sooner still once the
+ * caller says the start is decided: nothing the rest of the roster brings
+ * would change what plays first. Pools still hunting keep running and fill
+ * the cache for the next play; the player's roster refresh picks them up.
  */
 export async function awaitRosterWithSoftDeadline(
-  entry: RosterEntry,
+  entry: Pick<RosterEntry, "run" | "progress" | "hunting4k">,
   softDeadlineMs = RD_SOFT_DEADLINE_MS,
-  fourKDeadlineMs = 0
+  fourKDeadlineMs = 0,
+  /** True once what the viewer starts on is known, whatever else is still to come. */
+  startDecided: () => boolean = () => false
 ): Promise<RosterResult & { complete: boolean }> {
   const started = Date.now();
   let settled: (RosterResult & { complete: boolean }) | null = null;
-  entry.run.then(
+  const done = entry.run.then(
     (result) => {
       settled = { ...result, complete: true };
     },
@@ -1237,18 +1264,16 @@ export async function awaitRosterWithSoftDeadline(
   );
   while (!settled) {
     const elapsed = Date.now() - started;
-    const has4k = entry.progress.some((s) => (s.maxHeight ?? 0) >= 2160);
+    const has4k = reaches(entry.progress, 2160);
     const still4k = entry.hunting4k === true && !has4k && elapsed < fourKDeadlineMs;
-    if (
-      elapsed >= softDeadlineMs &&
-      !still4k &&
-      entry.progress.some((s) => (s.maxHeight ?? 0) >= RD_GOOD_ENOUGH_HEIGHT)
-    ) {
+    const goodEnough = elapsed >= softDeadlineMs && reaches(entry.progress, RD_GOOD_ENOUGH_HEIGHT);
+    if (!still4k && (goodEnough || startDecided())) {
       const seen = new Set<string>();
       const sources = entry.progress.filter((s) => (seen.has(s.id) ? false : (seen.add(s.id), true)));
       return { sources, candidates: [], complete: false };
     }
-    await new Promise((resolve) => setTimeout(resolve, RD_SOFT_POLL_MS));
+    // Wakes when the roster settles, not a poll later.
+    await Promise.race([done, new Promise((resolve) => setTimeout(resolve, RD_SOFT_POLL_MS))]);
   }
   return settled;
 }
@@ -1263,14 +1288,13 @@ async function resolveRealDebridSlots(
   const progress = entry?.progress;
   const { hits, missing, occupiedIdentities } = await readCachedRdSlots(keyBase, rdToken);
   progress?.push(...hits);
-  // Publish each tier the moment its pool settles so a caller waiting with a
-  // soft deadline can answer before the slowest pool gives up.
-  const report = (slots: DebridSlot[], results: ResolvedCandidate[]) => {
-    if (!progress) return;
-    results.forEach((resolved, index) => {
-      const source = buildRdSource(slots[index]!, resolved, keyBase, rdToken)?.source;
-      if (source) progress.push(source);
-    });
+  // Publish each file the moment it is known, so a caller waiting with a soft
+  // deadline can answer before the rest of its pool, or the slowest pool, is done.
+  const publish = (slot: DebridSlot, resolved: ResolvedCandidate) => {
+    const source = entry ? buildRdSource(slot, resolved, keyBase, rdToken)?.source : null;
+    if (!source || !entry) return;
+    entry.progress.push(source);
+    entry.marks[(source.maxHeight ?? 0) >= 2160 ? "first2160Ms" : "first1080Ms"] ??= Date.now() - entry.startedAt;
   };
   if (req.forceRefresh) forgetUnfillableSlots(keyBase);
   const requiredMissing = missing.filter(
@@ -1313,11 +1337,9 @@ async function resolveRealDebridSlots(
           is4k ? deadline4k : deadline,
           req.mediaType,
           occupiedIdentities,
-          is4k ? RD_4K_POOL_HEDGE : POOL_HEDGE
-        ).then((results) => {
-          report(slots, results);
-          return results;
-        })
+          is4k ? RD_4K_POOL_HEDGE : POOL_HEDGE,
+          (resolved, index) => publish(slots[index]!, resolved)
+        )
       : Promise.resolve([] as ResolvedCandidate[]);
   };
   const otherMissingBase = missing.filter(
@@ -1328,10 +1350,12 @@ async function resolveRealDebridSlots(
       !slot.startsWith("safari-1080")
   );
   const fourKPools = Promise.all([resolvePool(native4kSlots), resolvePool(remux4kSlots)]);
-  if (entry && (native4kSlots.length || remux4kSlots.length)) {
-    entry.hunting4k = true;
+  if (entry) {
+    entry.hunting4k = native4kSlots.length + remux4kSlots.length > 0;
     void fourKPools.finally(() => {
       entry.hunting4k = false;
+      entry.fourKOver = true;
+      entry.marks.fourKDoneMs = Date.now() - entry.startedAt;
     }).catch(() => {});
   }
   const [[rankedNative4k, rankedRemux4k], rankedNative1080, rankedRemux1080, otherEntriesAll] = await Promise.all([
@@ -1566,17 +1590,33 @@ export async function resolveFastDebridSources(
   const realDebrid = isRealDebridConfigured();
   const allDebrid = isAllDebridConfigured();
   if (!realDebrid && !allDebrid) return [];
-  // Each tier gets the same deadline on its own, so a slow one never costs the
-  // other its answer.
+  // Each tier gets the same deadline on its own; null is a tier that ran out of it.
   const bounded = (part: Promise<PlaybackSource[]>) =>
     Promise.race([
       part.catch(() => [] as PlaybackSource[]),
-      new Promise<PlaybackSource[]>((resolve) => setTimeout(() => resolve([]), RD_FAST_DEADLINE_MS)),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), RD_FAST_DEADLINE_MS)),
     ]);
-  const parts: Promise<PlaybackSource[]>[] = [];
-  if (realDebrid) parts.push(bounded(resolveFastBestNativeFromCache(req)));
-  if (allDebrid) parts.push(bounded(resolveFastAllDebridFromCache(req)));
-  return (await Promise.all(parts)).flat();
+  const [primary, sibling] = await Promise.all([
+    realDebrid ? bounded(resolveFastBestNativeFromCache(req)) : [],
+    allDebrid ? bounded(resolveFastAllDebridFromCache(req)) : [],
+  ]);
+  // Real-Debrid out of time is not Real-Debrid out of files: its link may be a
+  // moment behind (a cold start checks it first), and AllDebrid's, which is
+  // read unchecked, went out alone and was started in its place. The same
+  // while its roster is still being resolved: AllDebrid stores each file as
+  // it finds it and Real-Debrid its roster at the end, so for those seconds
+  // only AllDebrid's is there to read. The full answer, already on its way,
+  // decides between the two.
+  if (primary === null) return [];
+  if (realDebrid && !primary.length && sibling?.length && (await isRosterInFlight(req))) return [];
+  return [...primary, ...(sibling ?? [])];
+}
+
+/** True while Real-Debrid's roster for the title is still being resolved. */
+async function isRosterInFlight(req: ResolveDebridSourcesRequest): Promise<boolean> {
+  const imdbId = await resolveImdbId(req.tmdbId, req.mediaType);
+  if (!imdbId) return false;
+  return inflightRosters.has(rosterKey({ imdbId, mediaType: req.mediaType, season: req.season ?? 0, episode: req.episode ?? 0 }));
 }
 
 /**
@@ -1686,13 +1726,28 @@ export async function resolveDebridSources(
     const season = req.season ?? 0;
     const episode = req.episode ?? 0;
     const keyBase: KeyBase = { imdbId, mediaType: req.mediaType, season, episode };
+    const started = Date.now();
+    const took: Record<string, number> = {};
+    const lap = (tier: string) => void (took[tier] = Date.now() - started);
     // Runs alongside RD rather than after it, so it never adds to the roster wait.
-    const allDebridSources = allDebridConfigured
-      ? resolveAllDebridTier(req, keyBase).catch(() => [] as PlaybackSource[])
-      : Promise.resolve([] as PlaybackSource[]);
+    const allDebrid = allDebridConfigured ? resolveAllDebridTierShared(req, keyBase) : null;
+    void allDebrid?.run.finally(() => lap("allDebridMs"));
 
     const sources: PlaybackSource[] = [];
     let rdCandidates: DebridCandidate[] = [];
+    let roster: RosterEntry | null = null;
+    let rdComplete = true;
+    const rdFourKOver = () => (roster ? roster.fourKOver === true : true);
+    const noFourKToCome = () => rdFourKOver() && (allDebrid ? allDebrid.fourKOver : true);
+    // What a 4K viewer starts on is known once a 4K file is in hand (AllDebrid's
+    // only when Real-Debrid has none to give: of two, Real-Debrid's is the one
+    // to start), or once none can come and a 1080p file is. A file on a CDN
+    // too slow to carry it decides nothing: the player will not start it.
+    const startDecided = (found: readonly PlaybackSource[]) =>
+      Boolean(req.want4k) &&
+      (reaches(startable(found), 2160) ||
+        (rdFourKOver() && reaches(startable(allDebrid?.progress ?? []), 2160)) ||
+        (noFourKToCome() && reaches(startable(found), RD_GOOD_ENOUGH_HEIGHT)));
 
     if (rdConfigured) {
       if (req.forceRefresh) {
@@ -1710,14 +1765,18 @@ export async function resolveDebridSources(
         );
       }
       const rdToken = process.env.REAL_DEBRID_API_TOKEN as string;
+      roster = resolveRealDebridSlotsShared(keyBase, req, rdToken);
       const { sources: rdSources, candidates, complete } = await awaitRosterWithSoftDeadline(
-        resolveRealDebridSlotsShared(keyBase, req, rdToken),
+        roster,
         undefined,
-        req.want4k ? RD_4K_SOFT_DEADLINE_MS : 0
+        req.want4k ? RD_4K_SOFT_DEADLINE_MS : 0,
+        () => startDecided(roster?.progress ?? [])
       );
-      if (!complete) incompleteRosters.add(sources);
+      rdComplete = complete;
       sources.push(...rdSources);
       rdCandidates = candidates;
+      lap(complete ? "realDebridMs" : "realDebridPartialMs");
+      Object.assign(took, roster.marks);
     }
 
     if (torboxConfigured) {
@@ -1795,7 +1854,16 @@ export async function resolveDebridSources(
       }
     }
 
-    sources.push(...(await allDebridSources));
+    if (torboxConfigured) lap("torboxMs");
+    // A viewer whose start is already decided is not kept waiting for the rest
+    // of AllDebrid's search: what it finds later joins on the player's next ask.
+    if (allDebrid) sources.push(...(startDecided(sources) ? allDebrid.progress : await allDebrid.run));
+    const settled = rdComplete && (!allDebrid || allDebrid.done);
+    if (!settled) incompleteRosters.add(sources);
+    outlooks.set(sources, { fourKSettled: noFourKToCome(), settled });
+    console.info(
+      JSON.stringify({ event: "debrid_resolve_timing", mediaType: req.mediaType, tmdbId: req.tmdbId, season, episode, ...took, totalMs: Date.now() - started, sources: sources.length, settled })
+    );
 
     return sources;
   } catch {
@@ -1814,14 +1882,61 @@ export async function resolveDebridSources(
  * the same streamability order as the RD roster, native before Safari-only
  * at each height. Never throws.
  */
+/** One AllDebrid resolve of a title, watchable while it runs. */
+interface AllDebridRun {
+  run: Promise<PlaybackSource[]>;
+  /** What it has found so far; everything it found, once done. */
+  progress: PlaybackSource[];
+  /** True once no 4K file can still come from it: any it has is already in `progress`. */
+  fourKOver: boolean;
+  done: boolean;
+}
+
+/** How long a finished run answers for its title: the player asks again every few seconds while an answer is partial. */
+const ALLDEBRID_RUN_REUSE_MS = 60_000;
+const ALLDEBRID_RUNS_MAX = 200;
+const allDebridRuns = new Map<string, AllDebridRun>();
+
+/**
+ * One AllDebrid resolve per title at a time, like the Real-Debrid roster: an
+ * answer that goes out before this tier finishes is followed by the player's
+ * next ask, which joins the run in flight, or takes what it has just found,
+ * instead of starting it over.
+ */
+function resolveAllDebridTierShared(req: ResolveDebridSourcesRequest, keyBase: KeyBase): AllDebridRun {
+  const key = rosterKey(keyBase);
+  const existing = allDebridRuns.get(key);
+  if (existing && !req.forceRefresh) return existing;
+  const tier: AllDebridRun = { run: Promise.resolve([]), progress: [], fourKOver: false, done: false };
+  tier.run = resolveAllDebridTier(req, keyBase, tier)
+    .catch(() => tier.progress)
+    .then((sources) => {
+      tier.progress = sources;
+      tier.fourKOver = true;
+      tier.done = true;
+      const forget = setTimeout(() => {
+        if (allDebridRuns.get(key) === tier) allDebridRuns.delete(key);
+      }, ALLDEBRID_RUN_REUSE_MS);
+      forget.unref?.();
+      return sources;
+    });
+  if (allDebridRuns.size >= ALLDEBRID_RUNS_MAX) allDebridRuns.delete(allDebridRuns.keys().next().value!);
+  allDebridRuns.set(key, tier);
+  return tier;
+}
+
 async function resolveAllDebridTier(
   req: ResolveDebridSourcesRequest,
-  keyBase: KeyBase
+  keyBase: KeyBase,
+  tier?: AllDebridRun
 ): Promise<PlaybackSource[]> {
   const apiKey = process.env.ALLDEBRID_API_KEY?.trim() ?? "";
   const sanitize = (url: string) => sanitizeAllDebridStreamUrl(url, apiKey);
   const { hits, missing } = await readCachedSources("alldebrid", keyBase, sanitize);
   if (!missing.length) return hits;
+  // Shared with whoever watches the run, so a file is theirs the moment it is found.
+  const sources = tier?.progress ?? [];
+  sources.push(...hits);
 
   const [raw, runtime] = await Promise.all([fetchRankedTorrentioCandidates(req, keyBase.imdbId, null), titleRuntimeMinutes(req)]);
   const candidates = orderForStreaming(withoutRefused(keyBase, raw), runtime);
@@ -1830,9 +1945,10 @@ async function resolveAllDebridTier(
       ? { season: req.season, episode: req.episode }
       : undefined;
   const deadline = allDebridDeadlineFromNow();
-  const sources = [...hits];
 
   for (const quality of missing) {
+    // Qualities are tried best first: past 4K, none is still to come.
+    if (tier && quality !== "2160p") tier.fourKOver = true;
     const ranked = rankCachedTorboxForHeight(candidates, heightForQuality(quality));
     const resolved = await resolveAllDebridFirstCached(
       ranked.map((c) => ({ infoHash: c.infoHash!, releaseTitle: c.title, fileName: c.fileName })),

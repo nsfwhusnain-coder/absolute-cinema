@@ -190,6 +190,10 @@ export interface PlaybackResponse {
   providerId?: string; // which provider resolved this
   /** True when background enrich may still add sources (soft-miss / progressive). */
   partial?: boolean;
+  /** No 4K file can still arrive from the debrid services: a start below 4K need not wait for one. */
+  fourKSettled?: boolean;
+  /** Nothing more can arrive from the debrid services at all. */
+  debridSettled?: boolean;
   /** Authenticated account defaults; attached outside the playback cache. */
   preferences?: {
     playbackQuality: import("@/lib/profile-preferences").PlaybackQualityPreference;

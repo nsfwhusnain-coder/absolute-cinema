@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import type { MediaType, PlaybackResponse, PlaybackSource } from "@/lib/playback/types";
 import { mergeProgressivePlaybackSources } from "@/lib/playback/merge-sources";
+import type { Outlook } from "@/lib/playback/orchestrator";
 import {
   getPlaybackDiscoveryPreferenceKey,
   getPreferredQualityHeight,
@@ -31,6 +32,8 @@ const FAST_TIMEOUT_MS = 8_000;
 const FULL_TIMEOUT_MS = 45_000;
 /** While the server says more sources are coming, ask again this often… */
 const POLL_INTERVAL_MS = 3_000;
+/** Once the debrid services have nothing more to add, only the web providers' slow tail is awaited: this often is enough. */
+const SETTLED_POLL_INTERVAL_MS = 10_000;
 /** …but stop after this long either way. */
 const POLL_WINDOW_MS = 30_000;
 /**
@@ -144,6 +147,8 @@ export interface Streams {
   sources: PlaybackSource[];
   /** More sources may still arrive (full resolve running or server reports partial). */
   discovering: boolean;
+  /** What the full answer says the debrid services can still add. */
+  outlook: Outlook;
   preferences: PlaybackResponse["preferences"];
   remuxAvailable: boolean;
   status: PlaybackResponse["status"] | null;
@@ -208,7 +213,8 @@ export function useStreams({ tmdbId, mediaType, season, episode, enabled = true 
       if (!query.state.data?.partial) return false;
       const starts = pollStarts.current;
       if (!starts.has(titleKey)) starts.set(titleKey, Date.now());
-      return Date.now() - starts.get(titleKey)! < POLL_WINDOW_MS ? POLL_INTERVAL_MS : false;
+      if (Date.now() - starts.get(titleKey)! >= POLL_WINDOW_MS) return false;
+      return query.state.data.debridSettled ? SETTLED_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
     },
   });
 
@@ -228,10 +234,15 @@ export function useStreams({ tmdbId, mediaType, season, episode, enabled = true 
     void qc.refetchQueries({ queryKey: playbackQueryKey(mediaType, tmdbId, season, episode, false) });
   }, [qc, mediaType, tmdbId, season, episode, titleKey]);
 
+  const fourKSettled = full.data?.fourKSettled === true;
+  const debridSettled = full.data?.debridSettled === true;
+  const outlook = useMemo(() => ({ fourKSettled, debridSettled }), [fourKSettled, debridSettled]);
+
   const response = full.data ?? fastData;
   return {
     sources,
     discovering: fullOpen || partial,
+    outlook,
     preferences: full.data?.preferences ?? fastData?.preferences,
     remuxAvailable: (full.data?.remuxAvailable ?? fastData?.remuxAvailable) !== false,
     status: response?.status ?? null,

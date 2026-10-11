@@ -14,6 +14,7 @@ import {
   onUserSelect,
   type Command,
   type OrchestratorState,
+  type Outlook,
   type Transition,
 } from "@/lib/playback/orchestrator";
 import { emitPlayerFeedback, setFeedbackTitleContext, clearFeedbackTitleContext } from "@/lib/playback/player-feedback";
@@ -65,6 +66,8 @@ export interface PlayerControllerOptions {
   videoRef: RefObject<HTMLVideoElement | null>;
   sources: PlaybackSource[];
   discovering: boolean;
+  /** What the server says can still arrive; ends the wait for a better source early. */
+  outlook: Outlook;
   remuxAvailable: boolean;
   title: TitleContext;
   initialTime: number;
@@ -234,8 +237,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
           if (recheckTimer.current) clearTimeout(recheckTimer.current);
           recheckTimer.current = setTimeout(() => {
             recheckTimer.current = null;
-            const { sources, discovering } = optionsRef.current;
-            apply(onRoster(orchestrator.current, sources, discovering, ranker(), Date.now()));
+            const { sources, discovering, outlook } = optionsRef.current;
+            apply(onRoster(orchestrator.current, sources, discovering, ranker(), Date.now(), outlook));
           }, command.recheckInMs);
         }
         return;
@@ -555,10 +558,10 @@ export function usePlayerController(options: PlayerControllerOptions) {
   }, [videoRef, store, armStall, clearTimers, playbackFailed, reportSustained, sourceById]);
 
   // Roster changes: start when nothing is running; never switch a running source.
-  const { sources, discovering } = options;
+  const { sources, discovering, outlook } = options;
   useEffect(() => {
-    apply(onRoster(orchestrator.current, sources, discovering, ranker(), Date.now()));
-  }, [sources, discovering, apply, ranker]);
+    apply(onRoster(orchestrator.current, sources, discovering, ranker(), Date.now(), outlook));
+  }, [sources, discovering, outlook, apply, ranker]);
 
   const actions = useMemo(() => {
     const video = () => videoRef.current;

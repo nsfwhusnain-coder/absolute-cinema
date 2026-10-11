@@ -39,8 +39,11 @@ import { resolvePlayableTitle } from "@/lib/catalog/title-alias.server";
 import { PlaybackTracker } from "@/lib/playback/playback-observability";
 import { parseRouteId } from "@/lib/route-params";
 
-const FULL_RESOLVE_PER_TITLE_LIMIT = 12;
-const FULL_RESOLVE_PER_USER_LIMIT = 90;
+// A title's full answer now goes out as soon as its start is decided and is
+// asked for again until the rest has come in: a handful of asks per title
+// where there were two or three. The limits allow for it.
+const FULL_RESOLVE_PER_TITLE_LIMIT = 24;
+const FULL_RESOLVE_PER_USER_LIMIT = 150;
 const FULL_RESOLVE_WINDOW_MS = 5 * 60 * 1000;
 const fullResolvePerTitleLimiter = new RateLimiter({
   limit: FULL_RESOLVE_PER_TITLE_LIMIT,
@@ -268,6 +271,7 @@ export async function GET(
   tracker.mark("cache_miss_dispatched");
   const provider = await getProvider();
 
+  const want4k = qualityHint === "auto" || (typeof qualityHint === "number" && qualityHint >= 2160);
   const debridPromise = fast
     ? resolveFastDebridSourcesSafely({
         tmdbId,
@@ -281,20 +285,11 @@ export async function GET(
         season,
         episode,
         forceRefresh: noCache,
-        want4k: qualityHint === "auto" || (typeof qualityHint === "number" && qualityHint >= 2160),
+        want4k,
       });
 
-  const providerPromise = provider.resolve({
-    tmdbId,
-    mediaType,
-    season,
-    episode,
-    userId,
-    fast,
-    noCache,
-    qualityHint,
-    contentClass,
-  });
+  const providerRequest = { tmdbId, mediaType, season, episode, userId, fast, noCache, qualityHint, contentClass };
+  const providerPromise = provider.resolve(providerRequest);
 
   let result: PlaybackResponse;
   if (fast) {
@@ -322,13 +317,25 @@ export async function GET(
       mergeDebridSources(result, debridSources, decideOptions);
     }
   } else {
-    const [providerResult, resolvedDebridSources] = await Promise.all([
-      providerPromise,
-      debridPromise,
-    ]);
+    const providers = { done: false };
+    void providerPromise.then(() => void (providers.done = true), () => undefined);
+    const resolvedDebridSources = await debridPromise;
+    const outlook = await debridOutlookSafely(resolvedDebridSources);
+    // Once the debrid services have decided what a 4K viewer starts on, the
+    // web providers' slow tail (a browser scrape can run 20 s) is not worth
+    // holding the answer for: what they have so far goes out, and the rest
+    // follows on the player's next ask.
+    const startDecided =
+      want4k && outlook !== null && (outlook.fourKSettled || resolvedDebridSources.some((s) => (s.maxHeight ?? 0) >= 2160));
+    const providerResult =
+      providers.done || !startDecided
+        ? await providerPromise
+        : await Promise.any([providerPromise, provider.resolve({ ...providerRequest, fast: true })]);
+    const providersPending = !providers.done;
     tracker.mark("full_resolvers_settled", {
       providerCount: providerResult.sources?.length ?? 0,
       debridCount: resolvedDebridSources.length,
+      providersPending,
     });
     const debridSources =
       refreshMode === "recovery" && refreshNonce != null
@@ -340,9 +347,11 @@ export async function GET(
         : resolvedDebridSources;
     result = providerResult;
     mergeDebridSources(result, debridSources, decideOptions);
-    if (await isIncompleteDebridRosterSafely(resolvedDebridSources)) {
-      // Real-Debrid answered early with good sources while slower slots keep
-      // resolving; keep the cache short so the player's next poll sees them.
+    if (outlook) result = { ...result, fourKSettled: outlook.fourKSettled, debridSettled: outlook.settled };
+    if (providersPending || (await isIncompleteDebridRosterSafely(resolvedDebridSources))) {
+      // The answer went out early with good sources while slower slots or
+      // providers keep resolving; keep the cache short so the player's next
+      // poll sees them.
       result = { ...result, partial: true };
     }
   }
@@ -434,6 +443,15 @@ async function resolveDebridSourcesSafely(req: {
     return await resolveDebridSources(req);
   } catch {
     return [];
+  }
+}
+
+async function debridOutlookSafely(sources: PlaybackSource[]): Promise<{ fourKSettled: boolean; settled: boolean } | null> {
+  try {
+    const { debridOutlook } = await import("@/lib/playback/debrid");
+    return debridOutlook(sources);
+  } catch {
+    return null;
   }
 }
 

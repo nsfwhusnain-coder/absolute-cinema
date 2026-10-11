@@ -719,6 +719,7 @@ export function WatchView({ mediaType, id, season, episode }: Props) {
             key={`${mediaType}-${id}-${tvSeason}-${tvEpisode}`}
             sources={streams.sources}
             discovering={streams.discovering}
+            outlook={streams.outlook}
             remuxAvailable={streams.remuxAvailable}
             title={{
               tmdbId: id,

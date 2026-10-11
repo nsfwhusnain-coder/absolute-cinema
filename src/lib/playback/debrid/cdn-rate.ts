@@ -69,6 +69,11 @@ export async function measureCdnRate(url: string, fetchImpl: typeof fetch = fetc
   }
 }
 
+/** Test seam — the readings are module state that would otherwise leak between cases. */
+export function __resetCdnRatesForTests(): void {
+  readings.clear();
+}
+
 /** Notes a reading for a service (and drops the ones too old to count). */
 export function recordCdnRate(provider: DebridProvider, bytesPerSec: number, now = Date.now()): void {
   const kept = (readings.get(provider) ?? []).filter((reading) => now - reading.at < BEST_OF_MS);

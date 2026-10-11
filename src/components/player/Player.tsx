@@ -19,6 +19,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import type { PlaybackSource } from "@/lib/playback/types";
+import type { Outlook } from "@/lib/playback/orchestrator";
 import type { PlaybackQualityPreference, SubtitlePreference } from "@/lib/profile-preferences";
 import { sourceDelivery, sourceMaxHeight } from "@/lib/playback/source-quality";
 import { useHoverPreview } from "@/hooks/use-hover-preview";
@@ -128,6 +129,7 @@ function remotePanel(target: RemotePanel, audioChoice: boolean, episodes: boolea
 export interface PlayerProps {
   sources: PlaybackSource[];
   discovering: boolean;
+  outlook: Outlook;
   remuxAvailable: boolean;
   title: TitleContext;
   displayTitle: string;
@@ -190,6 +192,7 @@ export function Player(props: PlayerProps) {
     videoRef,
     sources: props.sources,
     discovering: props.discovering,
+    outlook: props.outlook,
     remuxAvailable: props.remuxAvailable,
     title: props.title,
     initialTime: props.initialTime,

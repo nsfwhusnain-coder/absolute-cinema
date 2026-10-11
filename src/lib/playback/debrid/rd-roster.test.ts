@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { clearMediaValidationCache } from "./media-validation";
+import { __resetCdnRatesForTests, recordCdnRate } from "./cdn-rate";
 
 /**
  * Real-Debrid RICH ROSTER regression coverage (see index.ts): RD is the
@@ -41,8 +42,14 @@ function cacheKey(key: {
 mock.module("@/lib/tmdb", () => ({
   tmdb: { externalIds: async () => ({ id: 1, imdb_id: IMDB }) },
 }));
+/** Milliseconds a cached link takes to read, by `cacheKey`. */
+const readDelays = new Map<string, number>();
 mock.module("./cached-stream", () => ({
-  getFreshCachedStream: async (key: Parameters<typeof cacheKey>[0]) => cacheStore.get(cacheKey(key)) ?? null,
+  getFreshCachedStream: async (key: Parameters<typeof cacheKey>[0]) => {
+    const delay = readDelays.get(cacheKey(key));
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    return cacheStore.get(cacheKey(key)) ?? null;
+  },
   invalidateCachedStream: async (key: Parameters<typeof cacheKey>[0]) => {
     cacheStore.delete(cacheKey(key));
   },
@@ -53,6 +60,8 @@ mock.module("./cached-stream", () => ({
 
 type ResolveFn = typeof import("./index").resolveDebridSources;
 type ResolveFastFn = typeof import("./index").resolveFastDebridSources;
+type OutlookFn = typeof import("./index").debridOutlook;
+type IncompleteFn = typeof import("./index").isIncompleteDebridRoster;
 type ResetSlotMissesFn = typeof import("./index").__resetRdSlotMissCacheForTests;
 
 const NATIVE_2160_HASH = "a".repeat(40);
@@ -70,17 +79,23 @@ describe("Real-Debrid roster — full + fast paths", () => {
 
   let resolveDebridSources: ResolveFn;
   let resolveFastDebridSources: ResolveFastFn;
+  let debridOutlook: OutlookFn;
+  let isIncompleteDebridRoster: IncompleteFn;
   let resetSlotMisses: ResetSlotMissesFn;
   let server: ReturnType<typeof Bun.serve>;
+  /** Milliseconds a release takes to resolve, by hash: a slow one stands in for a slow Real-Debrid answer. */
+  const resolveDelays = new Map<string, number>();
 
   beforeAll(async () => {
     server = Bun.serve({
       port: 0,
-      fetch(req) {
+      async fetch(req) {
         const { pathname } = new URL(req.url);
         const m = pathname.match(/^\/resolve\/realdebrid\/[^/]+\/([^/]+)\/null\/\d+\/.*$/);
         if (m) {
           const hash = (m[1] ?? "").toLowerCase();
+          const delay = resolveDelays.get(hash);
+          if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
           const extension =
             hash === UNSUPPORTED_CONTAINER_HASH ? "m2ts" : "mp4";
           return new Response(null, {
@@ -111,6 +126,8 @@ describe("Real-Debrid roster — full + fast paths", () => {
     ({
       resolveDebridSources,
       resolveFastDebridSources,
+      debridOutlook,
+      isIncompleteDebridRoster,
       __resetRdSlotMissCacheForTests: resetSlotMisses,
     } = await import("./index"));
   });
@@ -124,6 +141,8 @@ describe("Real-Debrid roster — full + fast paths", () => {
     process.env.REAL_DEBRID_API_TOKEN = FAKE_TOKEN;
     delete process.env.TORBOX_API_KEY;
     cacheStore.clear();
+    readDelays.clear();
+    resolveDelays.clear();
     clearMediaValidationCache();
     resetSlotMisses();
   });
@@ -226,6 +245,128 @@ describe("Real-Debrid roster — full + fast paths", () => {
       expect(s.type).toBe("mp4");
       expect(s.provider).toBe("Debrid");
     }
+  });
+
+  const SLOW_MS = 1_200;
+  const SOON_MS = 800;
+  const AD_KEY = `${IMDB}|movie|0|0|2160p|alldebrid`;
+  /** A link nothing answers on, so the CDN speed check that follows every link finds nothing to record. */
+  const AD_FILE = { title: "Movie.2024.2160p.WEB-DL.H264-AD", source: "ad", url: "http://127.0.0.1:1/dl/ad-2160.mp4", compat: "native", codec: "h264" };
+  /** Lets a roster still running behind an early answer finish, so it cannot reach into the next test. */
+  const settle = () => resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+
+  it("full path: a 4K viewer is answered when the 4K file is known, not when the slowest 1080p one is", async () => {
+    mockTorrentioStreams(buildStreams());
+    for (const hash of [...NATIVE_1080_HASHES, MKV_1080_HASH]) resolveDelays.set(hash, SLOW_MS);
+    const started = Date.now();
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie", want4k: true });
+
+    expect(Date.now() - started).toBeLessThan(SOON_MS);
+    expect(sources.some((s) => s.maxHeight === 2160)).toBe(true);
+    expect(sources.some((s) => s.id.includes("native-1080"))).toBe(false);
+    expect(isIncompleteDebridRoster(sources)).toBe(true);
+    expect(debridOutlook(sources)?.settled).toBe(false);
+
+    const all = await settle();
+    expect(all.filter((s) => s.id.includes("native-1080")).length).toBe(3);
+    expect(debridOutlook(all)).toEqual({ fourKSettled: true, settled: true });
+  });
+
+  it("full path: with no 4K to come, a 4K viewer is answered on the best 1080p file", async () => {
+    mockTorrentioStreams(buildStreams().slice(2));
+    for (const hash of [...NATIVE_1080_HASHES.slice(1), MKV_1080_HASH]) resolveDelays.set(hash, SLOW_MS);
+    const started = Date.now();
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie", want4k: true });
+
+    expect(Date.now() - started).toBeLessThan(SOON_MS);
+    expect(sources.map((s) => s.url.includes(NATIVE_1080_HASHES[0]!))).toEqual([true]);
+    expect(debridOutlook(sources)).toEqual({ fourKSettled: true, settled: false });
+    await settle();
+  });
+
+  it("full path: a file is not handed over ahead of a better-ranked one still resolving", async () => {
+    mockTorrentioStreams(buildStreams().slice(2, 5));
+    resolveDelays.set(NATIVE_1080_HASHES[0]!, SOON_MS);
+    const started = Date.now();
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie", want4k: true });
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(SOON_MS - 50);
+    expect(sources[0]?.url.includes(NATIVE_1080_HASHES[0]!)).toBe(true);
+    await settle();
+  });
+
+  describe("full path with AllDebrid holding the only 4K file", () => {
+    const originalAd = process.env.ALLDEBRID_API_KEY;
+    const MBIT = 1_000_000 / 8;
+    beforeEach(() => {
+      process.env.ALLDEBRID_API_KEY = "test-ad-key";
+      cacheStore.set(AD_KEY, AD_FILE);
+      mockTorrentioStreams(buildStreams().slice(2, 5));
+      for (const hash of NATIVE_1080_HASHES) resolveDelays.set(hash, SLOW_MS);
+      // AllDebrid's own search for the 1080p file it lacks: answers late, with nothing.
+      const answer = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (!String(input instanceof Request ? input.url : input).includes("api.alldebrid.com")) return answer(input as never, init);
+        await new Promise((resolve) => setTimeout(resolve, SLOW_MS));
+        return new Response("{}", { status: 500 });
+      }) as unknown as typeof fetch;
+    });
+    afterEach(() => {
+      __resetCdnRatesForTests();
+      if (originalAd === undefined) delete process.env.ALLDEBRID_API_KEY;
+      else process.env.ALLDEBRID_API_KEY = originalAd;
+    });
+    const ask = async () => {
+      const started = Date.now();
+      const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie", want4k: true });
+      return { tookMs: Date.now() - started, providers: [...new Set(sources.map((s) => s.provider))] };
+    };
+
+    it("waits for Real-Debrid's file when AllDebrid's CDN cannot carry its own", async () => {
+      recordCdnRate("alldebrid", 2.6 * MBIT);
+      const { tookMs, providers } = await ask();
+      expect(tookMs).toBeGreaterThanOrEqual(SLOW_MS - 50);
+      expect(providers).toContain("Debrid");
+      await settle();
+    });
+
+    it("answers with it at once when its CDN can", async () => {
+      recordCdnRate("alldebrid", 120 * MBIT);
+      const { tookMs, providers } = await ask();
+      expect(tookMs).toBeLessThan(SOON_MS);
+      expect(providers).toEqual(["AllDebrid"]);
+      await settle();
+    });
+  });
+
+  it("full path: a cached 1080p file does not answer a 4K viewer while the 4K search is still to run", async () => {
+    cacheStore.set(`${IMDB}|movie|0|0|native-1080-1|realdebrid`, {
+      title: "Movie.2024.1080p.WEB-DL.H264-CACHED",
+      source: "cached",
+      url: `http://127.0.0.1:${server.port}/cdn/cached-1080.mp4`,
+      compat: "native",
+      codec: "h264",
+    });
+    mockTorrentioStreams(buildStreams().slice(0, 2));
+    // The index takes a moment to answer: until it has, the 4K search has not begun.
+    const answer = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input instanceof Request ? input.url : input).includes("/stream/")) await new Promise((resolve) => setTimeout(resolve, 300));
+      return answer(input as never, init);
+    }) as unknown as typeof fetch;
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie", want4k: true });
+
+    expect(sources.some((s) => s.maxHeight === 2160)).toBe(true);
+    await settle();
+  });
+
+  it("full path: a viewer who did not ask for 4K still gets the whole roster", async () => {
+    mockTorrentioStreams(buildStreams());
+    for (const hash of NATIVE_1080_HASHES) resolveDelays.set(hash, SOON_MS);
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+
+    expect(sources.filter((s) => s.id.includes("native-1080")).length).toBe(3);
+    expect(debridOutlook(sources)).toEqual({ fourKSettled: true, settled: true });
   });
 
   it("full path: duplicate Torrentio hashes cannot occupy separate cold-roster slots", async () => {
@@ -475,6 +616,50 @@ describe("Real-Debrid roster — full + fast paths", () => {
 
     expect(torrentioCalls).toBe(1);
     expect(refreshed.length).toBeGreaterThanOrEqual(6);
+  });
+
+  describe("fast path with AllDebrid alongside", () => {
+    const originalAd = process.env.ALLDEBRID_API_KEY;
+    const RD_KEY = `${IMDB}|movie|0|0|native-2160|realdebrid`;
+    beforeEach(() => {
+      process.env.ALLDEBRID_API_KEY = "test-ad-key";
+      mockTorrentioStreams([]);
+      cacheStore.set(RD_KEY, { title: "Movie.2024.2160p.WEB-DL.H264-RD", source: "rd", url: `http://127.0.0.1:${server.port}/cdn/rd-2160.mp4`, compat: "native", codec: "h264" });
+      cacheStore.set(AD_KEY, AD_FILE);
+    });
+    afterEach(() => {
+      if (originalAd === undefined) delete process.env.ALLDEBRID_API_KEY;
+      else process.env.ALLDEBRID_API_KEY = originalAd;
+    });
+    const providers = async () => (await resolveFastDebridSources({ tmdbId: 1, mediaType: "movie" })).map((s) => s.provider);
+
+    it("gives both services' cached files", async () => {
+      expect(await providers()).toEqual(["Debrid", "AllDebrid"]);
+    });
+
+    it("does not send AllDebrid's file out alone when Real-Debrid ran out of time", async () => {
+      readDelays.set(RD_KEY, 1_700);
+      expect(await providers()).toEqual([]);
+    });
+
+    it("sends AllDebrid's file when Real-Debrid has looked and has none", async () => {
+      cacheStore.delete(RD_KEY);
+      // All Real-Debrid can offer is its placeholder clip: a search that ends empty-handed.
+      mockTorrentioStreams([
+        { title: "Movie.2024.1080p.WEB-DL.H264.BAD.mp4\n👤 9 💾 3 GB", infoHash: SMALL_CLIP_HASH, fileIdx: 0, url: resolveProxyUrl(SMALL_CLIP_HASH, 0, "movie.1080p.bad.mp4") },
+      ]);
+      await settle();
+      expect(await providers()).toEqual(["AllDebrid"]);
+    });
+
+    it("does not send AllDebrid's file out alone while Real-Debrid is still looking", async () => {
+      cacheStore.delete(RD_KEY);
+      mockTorrentioStreams(buildStreams().slice(2, 5));
+      for (const hash of NATIVE_1080_HASHES) resolveDelays.set(hash, 400);
+      expect(await providers()).toEqual([]);
+      await settle();
+      expect(await providers()).toEqual(["Debrid", "AllDebrid"]);
+    });
   });
 
   it("fast path: cached MKV native slot is a miss so the player never remuxes", async () => {

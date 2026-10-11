@@ -44,6 +44,18 @@ export const LOW_QUALITY_GRACE_MS = 5_000;
  * Starting 1080p early is what made one episode 4K and the next not.
  */
 export const FOUR_K_GRACE_MS = 20_000;
+/** A start at this height waits for nothing once no better tier can come. */
+const GOOD_START_HEIGHT = 1080;
+
+/** What the server says can still arrive from the debrid services. */
+export interface Outlook {
+  /** No 4K file can still arrive. */
+  fourKSettled: boolean;
+  /** Nothing more can arrive from the debrid services at all. */
+  debridSettled: boolean;
+}
+
+export const OPEN_OUTLOOK: Outlook = { fourKSettled: false, debridSettled: false };
 
 export interface SourceHealth {
   failures: number;
@@ -138,20 +150,37 @@ export interface Transition {
   command: Command;
 }
 
+/**
+ * Whether discovery may still bring a source that should start instead of
+ * `best`. Below the target it may, until the server says otherwise: with no
+ * 4K to come a debrid file at 1080p is the best there will be, and with
+ * nothing to come from debrid at all only a start below 1080p still waits
+ * (the web providers may have that much).
+ */
+function mayBeBettered(best: PlaybackSource, targetHeight: number, outlook: Outlook): boolean {
+  const height = heightOf(best);
+  if (height >= targetHeight) return false;
+  if (outlook.debridSettled) return height < GOOD_START_HEIGHT;
+  if (outlook.fourKSettled) return height < GOOD_START_HEIGHT || best.origin !== "debrid";
+  return true;
+}
+
 /** New roster (sources list). Starts playback when nothing is running yet; never switches a running source. */
 export function onRoster(
   state: OrchestratorState,
   sources: readonly PlaybackSource[],
   discovering: boolean,
   ranker: Ranker,
-  now: number
+  now: number,
+  outlook: Outlook = OPEN_OUTLOOK
 ): Transition {
   if (state.phase === "resolving" || state.phase === "failed") {
     const best = ranker.pick(eligible(state, sources, now));
-    const weak = best && (heightOf(best) < (ranker.targetHeight ?? 0) || ranker.isSuspect?.(best) === true);
+    const target = ranker.targetHeight ?? 0;
+    const weak = best && (mayBeBettered(best, target, outlook) || ranker.isSuspect?.(best) === true);
     if (best && weak && discovering && state.phase === "resolving" && !state.everPlayed) {
       const since = state.firstCandidateAt ?? now;
-      const grace = (ranker.targetHeight ?? 0) >= 2160 ? FOUR_K_GRACE_MS : LOW_QUALITY_GRACE_MS;
+      const grace = target >= 2160 && !outlook.debridSettled ? FOUR_K_GRACE_MS : LOW_QUALITY_GRACE_MS;
       const left = grace - (now - since);
       if (left > 0) return { state: { ...state, firstCandidateAt: since }, command: { type: "wait", recheckInMs: left } };
     }
