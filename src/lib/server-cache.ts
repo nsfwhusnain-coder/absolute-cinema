@@ -96,8 +96,8 @@ export async function cachedFetch<T>(
 const playbackStore = new Map<string, { value: unknown; until: number }>();
 /** Match the 3m scraper TTL so expired signed links are never kept for 20m. */
 export const PLAYBACK_TTL_MS = 3 * 60 * 1000;
-/** Any partial answer: shorter than the client's 2s re-ask, so each re-ask sees new sources. */
-export const PLAYBACK_PARTIAL_TTL_MS = 1_000;
+/** Any partial answer: shorter than the client's quickest re-ask (1 s while a debrid service decides), so each re-ask sees new sources. */
+export const PLAYBACK_PARTIAL_TTL_MS = 500;
 
 export function playbackResponseTtlMs(result: { partial?: boolean }): number {
   return result.partial ? PLAYBACK_PARTIAL_TTL_MS : PLAYBACK_TTL_MS;

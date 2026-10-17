@@ -35,10 +35,10 @@ describe("raw scraper cache quality identity", () => {
 });
 
 describe("playback response TTL", () => {
-  it("never caches a partial answer past the client's 2s re-ask", () => {
+  it("never caches a partial answer past the client's quickest re-ask (1 s while a debrid service decides)", () => {
     const ttl = playbackResponseTtlMs({ partial: true });
     expect(ttl).toBe(PLAYBACK_PARTIAL_TTL_MS);
-    expect(ttl).toBeLessThan(2_000);
+    expect(ttl).toBeLessThan(1_000);
   });
 
   it("uses the full TTL once the roster is complete", () => {

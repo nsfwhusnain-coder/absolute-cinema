@@ -34,6 +34,13 @@ const FAST_TIMEOUT_MS = 8_000;
 const FULL_TIMEOUT_MS = 45_000;
 /** While the server says more sources are coming, ask again this often… */
 const POLL_INTERVAL_MS = 3_000;
+/**
+ * …and this often while a debrid service is still deciding: the player holds
+ * its start for that answer (a 4K file may be a second away), so each second
+ * between the service deciding and the next ask was a second of spinner. The
+ * server answers a re-ask from what the services have so far.
+ */
+const DEBRID_POLL_INTERVAL_MS = 1_000;
 /** Once the debrid services have nothing more to add, only the web providers' slow tail is awaited: this often is enough. */
 const SETTLED_POLL_INTERVAL_MS = 10_000;
 /** …but stop after this long either way. */
@@ -232,6 +239,7 @@ export function useStreams({ tmdbId, mediaType, season, episode, enabled = true 
       const starts = pollStarts.current;
       if (!starts.has(titleKey)) starts.set(titleKey, Date.now());
       if (Date.now() - starts.get(titleKey)! >= POLL_WINDOW_MS) return false;
+      if (query.state.data.debridSettled === false) return DEBRID_POLL_INTERVAL_MS;
       return query.state.data.debridSettled ? SETTLED_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
     },
   });
