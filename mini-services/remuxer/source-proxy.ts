@@ -109,8 +109,14 @@ const LANE_WEIGHT = 0.3;
 const LANE_WEIGHT_DOWN = 0.6;
 /** Seconds of one connection's reading that a parallel piece grows to. */
 const PIECE_SECONDS = 8;
-/** Seconds of the file the first round of parallel pieces covers: a picture group, for most releases. */
-const FIRST_ROUND_SECONDS = 4;
+/** Seconds of the file the first round of parallel pieces covers: a picture group or two, for most releases. */
+const FIRST_ROUND_SECONDS = 6;
+/**
+ * On a paced link, the second round's pieces are at least big enough that the
+ * requests the link allows bring the file in this many times faster than it
+ * plays.
+ */
+const PACED_HEADROOM = 2;
 /**
  * A probe may decide after this much reading past its settle when the
  * connection is plainly far too slow: needing this many connections or more.
@@ -576,18 +582,29 @@ export function steadyPieceBytes(source: ProxySource, windowBytes: number, tunin
  * come in one after another, in the order they are played, and the rounds
  * after keep that order. Had the second round been all of the steady size, it
  * would have arrived together, a whole piece's time later (eight seconds on a
- * slow connection), with playback waiting on it.
+ * slow connection), with playback waiting on it. On a paced link it starts no
+ * smaller than the link's turns allow for (see PACED_HEADROOM): growing from
+ * 300 KB at 1.2 requests a second, a 6.4 Mbit/s file came in at 3 Mbit/s for
+ * its first twenty seconds and stalled twice.
  */
-export function rampedPieceBytes(source: ProxySource, windowBytes: number, tuning: LaneTuning, nth: number): number {
+export function rampedPieceBytes(
+  source: ProxySource,
+  windowBytes: number,
+  tuning: LaneTuning,
+  nth: number,
+  slots = slotsFor(source, windowBytes, tuning)
+): number {
   const steady = steadyPieceBytes(source, windowBytes, tuning);
-  const slots = slotsFor(source, windowBytes, tuning);
   if (nth <= slots) {
     const fileBps = source.targetBps && source.targetBps > 0 ? source.targetBps : MIN_TARGET_BPS;
     const firstRound = ((fileBps / 8) * FIRST_ROUND_SECONDS) / slots;
     return Math.min(steady, Math.max(tuning.firstChunkBytes, Math.round(firstRound)));
   }
-  const step = steady / slots;
-  return Math.min(steady, Math.max(tuning.firstChunkBytes, Math.round((nth - slots) * step)));
+  const fileBps = source.targetBps && source.targetBps > 0 ? source.targetBps : MIN_TARGET_BPS;
+  const rate = linkRate(source.url);
+  const least = Number.isFinite(rate) ? Math.min(steady, ((fileBps / 8) * PACED_HEADROOM) / rate) : 0;
+  const step = (steady - least) / slots;
+  return Math.min(steady, Math.max(tuning.firstChunkBytes, Math.round(least + (nth - slots) * step)));
 }
 
 /**
@@ -616,10 +633,12 @@ async function streamParallel(
   const stopAll = () => pieces.forEach(halt);
   client.release = stopAll;
   let started = 0;
+  // The rounds are counted in the connections the read began with: more added part-way do not start it over.
+  const rampSlots = slotsFor(source, windowBytes, tuning);
   try {
     for (;;) {
       while (next <= end && parallel(source) && pieces.length < slotsFor(source, windowBytes, tuning)) {
-        const pieceBytes = rampedPieceBytes(source, windowBytes, tuning, ++started);
+        const pieceBytes = rampedPieceBytes(source, windowBytes, tuning, ++started, rampSlots);
         const piece = startPiece(source, next, Math.min(end, next + pieceBytes - 1), client, tuning);
         pieces.push(piece);
         next = piece.end + 1;

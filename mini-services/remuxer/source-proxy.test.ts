@@ -408,14 +408,15 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     const total = 4 * 1024 * KB;
     const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 256 * KB, firstChunkBytes: 32 * KB, earlyDecisionMs: 60_000 };
     const up = await upstream(total, SLOW);
-    // 128 KB/s of file: four seconds of it is 512 KB, 64 KB for each of eight connections.
-    const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: 1_024_000, lanes: 8, laneBps: 125_000 };
+    // 128 KB/s of file: six seconds of it is 768 KB, 96 KB for each of eight connections.
+    // Each connection as fast as the upstream's (1 MB/s), so the reads never call for more of them mid-test.
+    const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: 1_024_000, lanes: 8, laneBps: 1_000_000 };
     const port = await proxy(source, WINDOW, tuning);
     const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
     // In the order of the file: pieces started together reach the upstream in any order.
     const sizes = [...up.asked].sort((a, b) => a[0] - b[0]).slice(0, 17).map(([start, end]) => end - start + 1);
-    expect(sizes.slice(0, 8)).toEqual(new Array(8).fill(64_000));
+    expect(sizes.slice(0, 8)).toEqual(new Array(8).fill(96_000));
     // Then the steady 256 KiB in eight steps of 32 KiB.
     expect(sizes.slice(8)).toEqual([32, 64, 96, 128, 160, 192, 224, 256, 256].map((kb) => kb * KB));
   });
@@ -504,13 +505,14 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     const steady = steadyPieceBytes(source, 128 * 1024 * KB, tuning);
     expect(steady).toBe(3_906_250);
     expect(12 / (steady / 312_500)).toBeLessThanOrEqual(1.2 * 0.8 + 1e-9);
-    // The second round grows to it in twelve equal steps.
-    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 13)).toBe(325_521);
-    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 18)).toBe(1_953_125);
+    // The second round grows to it in twelve equal steps, from what the link's turns allow for:
+    // twice the (unknown, so 8 Mbit/s) file's rate at 1.2 requests a second, 1.67 MB.
+    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 13)).toBe(1_853_299);
+    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 18)).toBe(2_786_458);
     expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 24)).toBe(steady);
     expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 40)).toBe(steady);
-    // The first round: four seconds of a 16 Mbit/s file across the twelve, 666,667 bytes each.
-    expect(rampedPieceBytes({ ...source, targetBps: 16_000_000 }, 128 * 1024 * KB, tuning, 1)).toBe(666_667);
-    expect(rampedPieceBytes({ ...source, targetBps: 16_000_000 }, 128 * 1024 * KB, tuning, 12)).toBe(666_667);
+    // The first round: six seconds of a 16 Mbit/s file across the twelve, 1 MB each.
+    expect(rampedPieceBytes({ ...source, targetBps: 16_000_000 }, 128 * 1024 * KB, tuning, 1)).toBe(1_000_000);
+    expect(rampedPieceBytes({ ...source, targetBps: 16_000_000 }, 128 * 1024 * KB, tuning, 12)).toBe(1_000_000);
   });
 });
