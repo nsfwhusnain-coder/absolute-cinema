@@ -8,6 +8,18 @@ import { getTitleLanguage, rememberTitleLanguage } from "@/lib/title-language";
 import { betterThanExternal } from "./subtitle-policy";
 import { parseVtt } from "./vtt";
 import { baseLanguage } from "@/lib/language-name";
+import {
+  clearTrackCues,
+  cuesToAdd,
+  ensureMirrorTrack,
+  findMirrorTrack,
+  isMirrorTrack,
+  latestCueEnd,
+  mirrorMode,
+  needsReadAhead,
+  readTrackCues,
+  refreshDelaysAfterJump,
+} from "./cue-sync";
 
 export interface ExternalSubtitle {
   id: string;
@@ -97,11 +109,24 @@ export function useSubtitles(
   const streamCues = useRef<StreamCue[]>([]);
   const streamTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamAbort = useRef<AbortController | null>(null);
+  // The remux subtitle track being read (null when none), when it was last
+  // read, where its newest cue ends, and the reads due soon after a jump.
+  const streamIndex = useRef<number | null>(null);
+  const streamLastRead = useRef(0);
+  const streamFrontier = useRef<number | null>(null);
+  const streamQuick = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  // The embedded track whose cues the mirror copies, and how many it held last time.
+  const embeddedSource = useRef<TextTrack | null>(null);
+  const embeddedCount = useRef(-1);
+  // The platform's own player (iPhone fullscreen, picture-in-picture) is on screen.
+  const nativeFullscreen = useRef(false);
+  const pictureInPicture = useRef(false);
 
   const embeddedTracks = useCallback((video: HTMLVideoElement) => {
     const out: Array<{ track: TextTrack; option: SubtitleOption }> = [];
     for (let i = 0; i < video.textTracks.length; i++) {
       const track = video.textTracks[i]!;
+      if (isMirrorTrack(track)) continue;
       if (track.kind !== "subtitles" && track.kind !== "captions") continue;
       out.push({
         track,
@@ -111,50 +136,118 @@ export function useSubtitles(
     return out;
   }, []);
 
+  /**
+   * Keeps the mirror track in step with the selected subtitle. `reset` empties
+   * it first, for a new selection. Otherwise only the cues it lacks are added,
+   * because stream cues grow on every read.
+   */
+  const syncMirror = useCallback(
+    (reset = false) => {
+      const video = videoRef.current;
+      if (!video) return;
+      const { activeSubtitle, subtitles } = store.getState();
+      if (!activeSubtitle) {
+        const off = findMirrorTrack(video);
+        if (off && off.mode !== "disabled") {
+          clearTrackCues(off);
+          off.mode = "disabled";
+        }
+        return;
+      }
+      const language = subtitles.find((o) => o.id === activeSubtitle)?.language ?? "und";
+      const mirror = ensureMirrorTrack(video, language);
+      // A track that was switched off may still hold cues from before: it starts empty.
+      const wasOff = mirror.mode === "disabled";
+      mirror.mode = mirrorMode({ selected: true, nativeFullscreen: nativeFullscreen.current, pip: pictureInPicture.current });
+      if (wasOff || reset) clearTrackCues(mirror);
+      // Embedded tracks keep their cues on the track; stream and downloaded cues are held here.
+      const embedded = embeddedTracks(video).find((e) => e.option.id === activeSubtitle);
+      const wanted = embedded ? readTrackCues(embedded.track) : streamCues.current;
+      for (const cue of cuesToAdd(readTrackCues(mirror), wanted)) {
+        mirror.addCue(new VTTCue(cue.start, cue.end, cue.text));
+      }
+    },
+    [videoRef, store, embeddedTracks]
+  );
+
+  const clearQuickReads = useCallback(() => {
+    for (const timer of streamQuick.current) clearTimeout(timer);
+    streamQuick.current = [];
+  }, []);
+
   const stopStream = useCallback(() => {
     clockDriven.current = false;
     if (streamTimer.current) clearInterval(streamTimer.current);
     streamTimer.current = null;
+    clearQuickReads();
+    streamIndex.current = null;
+    streamFrontier.current = null;
     streamAbort.current?.abort();
     streamAbort.current = null;
     streamCues.current = [];
-  }, []);
+  }, [clearQuickReads]);
+
+  /** Reads the cues the remux run has produced so far, and keeps the ones we have if the read fails. */
+  const readStream = useCallback(() => {
+    const index = streamIndex.current;
+    const source = store.getState().streamSubtitles;
+    if (index === null || !source) return;
+    streamAbort.current?.abort();
+    const abort = new AbortController();
+    streamAbort.current = abort;
+    streamLastRead.current = Date.now();
+    const load = async () => {
+      try {
+        const res = await fetch(`${source.base}sub-${index}.json`, { signal: abort.signal, cache: "no-store" });
+        if (!res.ok) return;
+        const body = (await res.json()) as { cues?: StreamCue[] };
+        if (abort.signal.aborted) return;
+        streamCues.current = body.cues ?? [];
+        streamFrontier.current = latestCueEnd(streamCues.current);
+        syncMirror();
+      } catch {
+        /* aborted or offline: keep the cues we have */
+      }
+    };
+    void load();
+  }, [store, syncMirror]);
+
+  // A jump starts a new remux run at the new position, so its first cues come
+  // in over the next seconds: read again soon, before the usual cadence.
+  const scheduleQuickReads = useCallback(() => {
+    clearQuickReads();
+    streamQuick.current = refreshDelaysAfterJump().map((ms) => setTimeout(readStream, ms));
+  }, [clearQuickReads, readStream]);
 
   const startStream = useCallback(
     (index: number) => {
-      const source = store.getState().streamSubtitles;
-      if (!source) return;
-      const load = async () => {
-        streamAbort.current?.abort();
-        const abort = new AbortController();
-        streamAbort.current = abort;
-        try {
-          const res = await fetch(`${source.base}sub-${index}.json`, { signal: abort.signal, cache: "no-store" });
-          if (!res.ok) return;
-          const body = (await res.json()) as { cues?: StreamCue[] };
-          streamCues.current = body.cues ?? [];
-        } catch {
-          /* aborted or offline: keep the cues we have */
-        }
-      };
-      void load();
-      streamTimer.current = setInterval(() => void load(), STREAM_CUE_REFRESH_MS);
+      if (!store.getState().streamSubtitles) return;
+      streamIndex.current = index;
+      readStream();
+      streamTimer.current = setInterval(readStream, STREAM_CUE_REFRESH_MS);
+      scheduleQuickReads();
     },
-    [store]
+    [store, readStream, scheduleQuickReads]
   );
 
-  const loadExternal = useCallback((vttUrl: string) => {
-    const abort = new AbortController();
-    streamAbort.current = abort;
-    void fetch(vttUrl, { signal: abort.signal })
-      .then((res) => (res.ok ? res.text() : ""))
-      .then((text) => {
-        if (!abort.signal.aborted) streamCues.current = parseVtt(text);
-      })
-      .catch(() => {
-        /* aborted or offline: nothing to draw */
-      });
-  }, []);
+  const loadExternal = useCallback(
+    (vttUrl: string) => {
+      const abort = new AbortController();
+      streamAbort.current = abort;
+      void fetch(vttUrl, { signal: abort.signal })
+        .then((res) => (res.ok ? res.text() : ""))
+        .then((text) => {
+          if (!abort.signal.aborted) {
+            streamCues.current = parseVtt(text);
+            syncMirror();
+          }
+        })
+        .catch(() => {
+          /* aborted or offline: nothing to draw */
+        });
+    },
+    [syncMirror]
+  );
 
   const select = useCallback(
     (id: string | null, byUser = true) => {
@@ -167,7 +260,9 @@ export function useSubtitles(
       }
       for (const { track } of embeddedTracks(video)) track.mode = "disabled";
       stopStream();
+      embeddedSource.current = null;
       store.getState().set({ activeSubtitle: id, cueText: "" });
+      syncMirror(true);
       if (!id) return;
 
       if (id.startsWith(STREAM_PREFIX)) {
@@ -194,8 +289,11 @@ export function useSubtitles(
         }
         store.getState().set({ cueText: lines.join("\n") });
       };
+      embeddedSource.current = track;
+      embeddedCount.current = -1;
+      syncMirror();
     },
-    [videoRef, external, embeddedTracks, store, startStream, stopStream, loadExternal, rememberKey]
+    [videoRef, external, embeddedTracks, store, startStream, stopStream, loadExternal, rememberKey, syncMirror]
   );
 
   const refreshOptions = useCallback(() => {
@@ -233,10 +331,14 @@ export function useSubtitles(
     // The player draws every caption itself. A track the stream marks as
     // default can be switched to "showing" by the engine after our choice,
     // and the browser then drew it too, a second copy under the controls.
+    // The mirror track is the one exception while the platform's own player is on screen.
     const keepNativeHidden = () => {
+      const onNativeScreen = nativeFullscreen.current || pictureInPicture.current;
       for (let i = 0; i < video.textTracks.length; i++) {
         const track = video.textTracks[i]!;
-        if (track.mode === "showing") track.mode = "hidden";
+        if (track.mode !== "showing") continue;
+        if (onNativeScreen && isMirrorTrack(track)) continue;
+        track.mode = "hidden";
       }
     };
     video.textTracks.addEventListener("addtrack", onChange);
@@ -249,6 +351,42 @@ export function useSubtitles(
     };
   }, [videoRef, refreshOptions]);
 
+  // iPhone fullscreen and picture-in-picture draw only native tracks, so the
+  // mirror is shown while either is on screen.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    nativeFullscreen.current = (video as HTMLVideoElement & { webkitDisplayingFullscreen?: boolean }).webkitDisplayingFullscreen === true;
+    pictureInPicture.current = document.pictureInPictureElement === video;
+    syncMirror();
+    const beginFullscreen = () => {
+      nativeFullscreen.current = true;
+      syncMirror();
+    };
+    const endFullscreen = () => {
+      nativeFullscreen.current = false;
+      syncMirror();
+    };
+    const enterPip = () => {
+      pictureInPicture.current = true;
+      syncMirror();
+    };
+    const leavePip = () => {
+      pictureInPicture.current = false;
+      syncMirror();
+    };
+    video.addEventListener("webkitbeginfullscreen", beginFullscreen);
+    video.addEventListener("webkitendfullscreen", endFullscreen);
+    video.addEventListener("enterpictureinpicture", enterPip);
+    video.addEventListener("leavepictureinpicture", leavePip);
+    return () => {
+      video.removeEventListener("webkitbeginfullscreen", beginFullscreen);
+      video.removeEventListener("webkitendfullscreen", endFullscreen);
+      video.removeEventListener("enterpictureinpicture", enterPip);
+      video.removeEventListener("leavepictureinpicture", leavePip);
+    };
+  }, [videoRef, syncMirror]);
+
   // A new remux session (another server, or another audio track) has its own
   // subtitle URLs: rebuild the list and keep showing the same track number.
   useEffect(() => {
@@ -257,22 +395,47 @@ export function useSubtitles(
     if (active?.startsWith(STREAM_PREFIX) && store.getState().activeSubtitle === active) select(active, false);
   }, [streamSubtitles, refreshOptions, select, store]);
 
-  // Stream cues are drawn from the playback clock.
+  // Stream cues are drawn from the playback clock. An embedded track gains
+  // cues as the browser parses them, so its new cues are mirrored here too.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     const onTime = () => {
+      const embedded = embeddedSource.current;
+      if (embedded) {
+        const count = embedded.cues?.length ?? 0;
+        if (count !== embeddedCount.current) {
+          embeddedCount.current = count;
+          syncMirror();
+        }
+      }
       if (!clockDriven.current) return;
       const text = activeText(streamCues.current, video.currentTime);
       if (text !== store.getState().cueText) store.getState().set({ cueText: text });
+      if (
+        streamIndex.current !== null &&
+        needsReadAhead({
+          time: video.currentTime,
+          lastCueEnd: streamFrontier.current,
+          duration: video.duration,
+          now: Date.now(),
+          lastReadAt: streamLastRead.current,
+        })
+      ) {
+        readStream();
+      }
+    };
+    const onSeeked = () => {
+      if (streamIndex.current !== null) scheduleQuickReads();
+      onTime();
     };
     video.addEventListener("timeupdate", onTime);
-    video.addEventListener("seeked", onTime);
+    video.addEventListener("seeked", onSeeked);
     return () => {
       video.removeEventListener("timeupdate", onTime);
-      video.removeEventListener("seeked", onTime);
+      video.removeEventListener("seeked", onSeeked);
     };
-  }, [videoRef, store]);
+  }, [videoRef, store, syncMirror, readStream, scheduleQuickReads]);
 
   useEffect(() => () => stopStream(), [stopStream]);
 
