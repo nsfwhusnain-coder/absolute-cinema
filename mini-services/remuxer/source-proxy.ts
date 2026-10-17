@@ -131,9 +131,57 @@ export function recentDomainSpeed(url: string, now = Date.now()): number | null 
   return known && now - known.at < DOMAIN_MEMORY_MS ? known.laneBps : null;
 }
 
+/**
+ * Most upstream requests open at once to one CDN, across every file and run.
+ * AllDebrid answers 204 instead of the range once one address has too many
+ * downloads open, and twelve connections for each of a few runs passes that.
+ */
+export const MAX_DOMAIN_REQUESTS = 12;
+/** After a refusal, the CDN's limit drops to what was open less one, for this long. */
+const DOMAIN_REFUSAL_MS = 60_000;
+const domainOpen = new Map<string, number>();
+const domainCaps = new Map<string, { cap: number; until: number }>();
+
+/** How many requests this CDN may have open now: the usual limit, or less for a while after it refused one. */
+export function domainRequestCap(domain: string, now = Date.now()): number {
+  const learned = domainCaps.get(domain);
+  return learned && now < learned.until ? learned.cap : MAX_DOMAIN_REQUESTS;
+}
+
+/** Whether another request to this CDN may start now. */
+function domainHasRoom(domain: string): boolean {
+  return (domainOpen.get(domain) ?? 0) < domainRequestCap(domain);
+}
+
+/** Counts a request to this CDN as open; the returned function counts it closed (once). */
+function openDomainRequest(domain: string): () => void {
+  domainOpen.set(domain, (domainOpen.get(domain) ?? 0) + 1);
+  let closed = false;
+  return () => {
+    if (closed) return;
+    closed = true;
+    domainOpen.set(domain, Math.max(0, (domainOpen.get(domain) ?? 1) - 1));
+  };
+}
+
+/** The CDN refused a request: it takes one fewer than were open, for a minute. */
+function domainRefused(domain: string, now = Date.now()): void {
+  const open = domainOpen.get(domain) ?? 1;
+  const cap = Math.max(1, Math.min(domainRequestCap(domain, now), open - 1));
+  domainCaps.set(domain, { cap, until: now + DOMAIN_REFUSAL_MS });
+  console.log(`[proxy] ${domain} refused a request with ${open} open; at most ${cap} for a minute`);
+}
+
+/** A status that means the CDN would not serve the range now: 429, 503, or a 2xx that is not the range (AllDebrid's 204). */
+function isRefusal(status: number): boolean {
+  return status === 429 || status === 503 || (status >= 200 && status < 300 && status !== 206);
+}
+
 /** Test seam: the domain memory is module state that would otherwise leak between cases. */
 export function __resetDomainSpeedsForTests(): void {
   domainSpeeds.clear();
+  domainOpen.clear();
+  domainCaps.clear();
 }
 
 /**
@@ -337,18 +385,28 @@ async function copyWindow(
   client: Client,
   report: WindowReport
 ): Promise<void> {
+  const domain = cdnDomainOf(url);
+  const close = openDomainRequest(domain);
   const waiting = new AbortController();
   const headerTimer = setTimeout(() => waiting.abort(), UPSTREAM_TIMEOUT_MS);
   client.release = () => waiting.abort();
-  const upstream = await fetch(url, {
-    headers: { Range: `bytes=${start}-${end}` },
-    signal: waiting.signal,
-  }).finally(() => {
-    clearTimeout(headerTimer);
-    client.release = NOTHING;
-  });
+  let upstream: Response;
+  try {
+    upstream = await fetch(url, {
+      headers: { Range: `bytes=${start}-${end}` },
+      signal: waiting.signal,
+    }).finally(() => {
+      clearTimeout(headerTimer);
+      client.release = NOTHING;
+    });
+  } catch (err) {
+    close();
+    throw err;
+  }
   if (upstream.status !== 206 || !upstream.body) {
     await upstream.body?.cancel().catch(() => {});
+    if (isRefusal(upstream.status)) domainRefused(domain);
+    close();
     throw new Error(`upstream HTTP ${upstream.status}`);
   }
   const reader = upstream.body.getReader();
@@ -370,6 +428,7 @@ async function copyWindow(
   } finally {
     client.release = NOTHING;
     await reader.cancel().catch(() => {});
+    close();
   }
 }
 
@@ -507,7 +566,12 @@ async function streamParallel(
   let pieceBytes = Math.min(tuning.chunkBytes, Math.max(1, tuning.firstChunkBytes));
   try {
     for (;;) {
-      while (next <= end && parallel(source) && pieces.length < slotsFor(source, windowBytes, tuning)) {
+      while (
+        next <= end &&
+        parallel(source) &&
+        pieces.length < slotsFor(source, windowBytes, tuning) &&
+        (pieces.length === 0 || domainHasRoom(cdnDomainOf(source.url)))
+      ) {
         const piece = startPiece(source, next, Math.min(end, next + pieceBytes - 1), client, tuning);
         pieces.push(piece);
         next = piece.end + 1;
@@ -597,22 +661,31 @@ async function download(piece: Piece, source: ProxySource, client: Client, tunin
 /** Reads the rest of a piece from one response, handing each read's bytes to the piece. */
 async function fetchPiece(piece: Piece, source: ProxySource, client: Client, tuning: LaneTuning): Promise<void> {
   const lanesWhenAsked = source.lanes;
+  const domain = cdnDomainOf(source.url);
+  const close = openDomainRequest(domain);
   const waiting = new AbortController();
   const headerTimer = setTimeout(() => waiting.abort(), UPSTREAM_TIMEOUT_MS);
   piece.cancel = () => waiting.abort();
-  const upstream = await fetch(source.url, {
-    headers: { Range: `bytes=${piece.next}-${piece.end}` },
-    signal: waiting.signal,
-  }).finally(() => {
-    clearTimeout(headerTimer);
-    piece.cancel = NOTHING;
-  });
+  let upstream: Response;
+  try {
+    upstream = await fetch(source.url, {
+      headers: { Range: `bytes=${piece.next}-${piece.end}` },
+      signal: waiting.signal,
+    }).finally(() => {
+      clearTimeout(headerTimer);
+      piece.cancel = NOTHING;
+    });
+  } catch (err) {
+    close();
+    throw err;
+  }
   if (upstream.status !== 206 || !upstream.body) {
     await upstream.body?.cancel().catch(() => {});
-    // A refusal: 429 or 503, or a 2xx that is not the range asked for (AllDebrid answers 204 to too many at once).
-    if (upstream.status === 429 || upstream.status === 503 || (upstream.status >= 200 && upstream.status < 300)) {
+    if (isRefusal(upstream.status)) {
       backOff(source, lanesWhenAsked);
+      domainRefused(domain);
     }
+    close();
     throw new Error(`upstream HTTP ${upstream.status}`);
   }
   const reader = upstream.body.getReader();
@@ -634,6 +707,7 @@ async function fetchPiece(piece: Piece, source: ProxySource, client: Client, tun
   } finally {
     piece.cancel = NOTHING;
     await reader.cancel().catch(() => {});
+    close();
   }
 }
 

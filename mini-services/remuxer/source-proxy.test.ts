@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { createServer, type Server } from "node:http";
 import { connect, type AddressInfo } from "node:net";
-import { cachedAt, lanesFor, parseRange, serveRange, windowEnd, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf } from "./source-proxy";
+import { cachedAt, lanesFor, parseRange, serveRange, windowEnd, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf, domainRequestCap, MAX_DOMAIN_REQUESTS } from "./source-proxy";
 
 /** Byte `i` of the pretend source file, so any slice can be checked without keeping the file. */
 const byteAt = (i: number): number => (i * 7 + (i >> 9)) % 251;
@@ -100,6 +100,22 @@ async function proxy(source: ProxySource, windowBytes: number, tuning?: LaneTuni
 
 const KB = 1024;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * A count once it has stopped moving for `quietMs`, or null when it is still
+ * moving after `limitMs`: socket buffers take a varying while to fill on a busy machine.
+ */
+async function settled(count: () => number, quietMs = 300, limitMs = 5_000): Promise<number | null> {
+  const started = Date.now();
+  let last = count();
+  while (Date.now() - started < limitMs) {
+    await sleep(quietMs);
+    const now = count();
+    if (now === last) return now;
+    last = now;
+  }
+  return null;
+}
 
 describe("parseRange", () => {
   it("reads open and closed ranges, clamped to the file", () => {
@@ -218,20 +234,16 @@ describe("serveRange", () => {
     socket.write("GET /src HTTP/1.1\r\nHost: test\r\nRange: bytes=0-\r\n\r\n");
 
     // ffmpeg paused: what upstream has sent settles at what the sockets hold, a small part of the file.
-    await sleep(400);
-    const whilePaused = up.sent();
-    await sleep(300);
-    expect(up.sent()).toBe(whilePaused);
-    expect(whilePaused).toBeLessThan(total / 4);
+    const whilePaused = await settled(() => up.sent());
+    expect(whilePaused).not.toBeNull();
+    expect(whilePaused!).toBeLessThan(total / 4);
 
     // ffmpeg killed: at most the window in flight is finished, and nothing more is asked for.
     socket.destroy();
-    await sleep(300);
-    const afterKill = up.sent();
-    await sleep(300);
-    expect(up.sent()).toBe(afterKill);
-    expect(afterKill).toBeLessThanOrEqual(whilePaused + windowBytes);
-  });
+    const afterKill = await settled(() => up.sent());
+    expect(afterKill).not.toBeNull();
+    expect(afterKill!).toBeLessThanOrEqual(whilePaused! + windowBytes);
+  }, 15_000);
 });
 
 describe("serveRange over several connections", () => {
@@ -383,5 +395,26 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
     expect(source.lanes).toBeLessThan(8);
+  });
+
+  it("keeps every file on one CDN to the CDN's limit of open requests together", async () => {
+    const total = 2 * 1024 * KB;
+    const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 64 * KB, firstChunkBytes: 64 * KB, earlyDecisionMs: 60_000 };
+    const up = await upstream(total, SLOW);
+    const files = [1, 2].map(() => ({ url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS, lanes: 10, laneBps: 125_000 }) as ProxySource);
+    const ports = await Promise.all(files.map((file) => proxy(file, WINDOW, tuning)));
+    const bodies = await Promise.all(ports.map(async (port) => new Uint8Array(await (await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } })).arrayBuffer())));
+    for (const body of bodies) expect(body).toEqual(slice(0, total - 1));
+    expect(up.maxOpen()).toBeLessThanOrEqual(MAX_DOMAIN_REQUESTS);
+  });
+
+  it("holds a CDN to one fewer request than it refused at, for a while", async () => {
+    const total = 1024 * KB;
+    const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 64 * KB, firstChunkBytes: 64 * KB, earlyDecisionMs: 60_000 };
+    const up = await upstream(total, { ...SLOW, refuseStatus: 204, refuse: (request) => request === 4 });
+    const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS, lanes: 8, laneBps: 125_000 };
+    const port = await proxy(source, WINDOW, tuning);
+    await (await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } })).arrayBuffer();
+    expect(domainRequestCap(cdnDomainOf(up.url))).toBeLessThan(MAX_DOMAIN_REQUESTS);
   });
 });
