@@ -1,5 +1,5 @@
 import type { PlaybackSource } from "@/lib/playback/types";
-import { decidePlayback } from "@/lib/playback/decide-playback";
+import { decidePlayback, withoutWebFallbacks } from "@/lib/playback/decide-playback";
 import { bitrateSustainabilityRank, isSourcePlayableHere, sourceDelivery, sourceMaxHeight } from "@/lib/playback/source-quality";
 import { preferNativeHls } from "@/lib/playback/player-engine";
 import { supportsDolbyVision } from "@/lib/playback/decode-capability";
@@ -51,9 +51,9 @@ export function isSuspect(source: PlaybackSource, now = Date.now()): boolean {
 
 /**
  * Best (auto) aims for 4K: a start below it waits while discovery may still
- * find one (see LOW_QUALITY_GRACE_MS / FOUR_K_GRACE_MS). Capping this at
- * 1080 let whichever 1080p source answered first win the start, so one
- * episode played 4K and the next did not.
+ * find one (see START_WAIT_MS). Capping this at 1080 let whichever 1080p
+ * source answered first win the start, so one episode played 4K and the
+ * next did not.
  */
 const BEST_START_HEIGHT = 2160;
 
@@ -66,7 +66,8 @@ export function createRanker(quality: "auto" | number, remuxAvailable: boolean, 
       if (!playable.length) return null;
       // Sources the server has seen failing are a last resort, not a first try.
       const healthy = playable.filter((s) => !isSuspect(s));
-      const pool = healthy.length ? healthy : playable;
+      // A web stream never leads a healthy debrid file of 1080p or better, whatever its height.
+      const pool = healthy.length ? withoutWebFallbacks(healthy) : playable;
       let narrowed = pool;
       if (quality !== "auto") {
         const heights = [...new Set(pool.map(sourceMaxHeight))].filter((h) => h > 0 && h <= quality);

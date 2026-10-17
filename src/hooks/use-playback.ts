@@ -14,6 +14,7 @@ import {
 } from "@/lib/player-preferences";
 import { getMemPlaybackSeed, playbackMemKey } from "@/lib/playback-preresolve";
 import { usableCachedPlayback } from "@/lib/playback/cache-age";
+import { streamsDiscovering } from "@/lib/playback/stream-discovery";
 import { PlaybackRequestError, shouldRetryPlaybackRequest } from "@/lib/playback/request-error";
 import { tvQueryIndex } from "@/lib/playback/tv-index";
 import { timeoutSignal } from "@/lib/abort";
@@ -181,7 +182,7 @@ export interface Streams {
  * re-polled while the server reports that more are on the way.
  */
 export function useStreams({ tmdbId, mediaType, season, episode, enabled = true }: Args): Streams {
-  const { data: session } = useSession();
+  const { data: session, status: sessionStatus } = useSession();
   const qc = useQueryClient();
   const canFetch = enabled && !!session;
   const refreshNext = useRef(false);
@@ -241,9 +242,12 @@ export function useStreams({ tmdbId, mediaType, season, episode, enabled = true 
     [fastData?.sources, full.data?.sources, full.data?.refreshNonce]
   );
 
-  const fullOpen = canFetch && (!full.isFetched || full.isFetching);
   const pollStart = pollStarts.current.get(titleKey);
   const partial = Boolean(full.data?.partial) && (pollStart === undefined || Date.now() - pollStart < POLL_WINDOW_MS);
+  // Before the session is known the queries cannot run yet, but the full answer is still to come.
+  const discovering = canFetch
+    ? streamsDiscovering({ hasFullData: full.data !== undefined, fullStatus: full.status, fullFetching: full.isFetching, partialWithinWindow: partial })
+    : enabled && sessionStatus === "loading";
 
   const refresh = useCallback(() => {
     refreshNext.current = true;
@@ -258,7 +262,7 @@ export function useStreams({ tmdbId, mediaType, season, episode, enabled = true 
   const response = full.data ?? fastData;
   return {
     sources,
-    discovering: fullOpen || partial,
+    discovering,
     outlook,
     preferences: full.data?.preferences ?? fastData?.preferences,
     remuxAvailable: (full.data?.remuxAvailable ?? fastData?.remuxAvailable) !== false,

@@ -250,6 +250,29 @@ function pickFrom(
   return [...pool].sort((a, b) => compareForAutoStart(a, b, options, height))[0] ?? null;
 }
 
+/** A debrid file of 1080p or better that this device can start. */
+function isDebridHdStart(source: PlaybackSource): boolean {
+  return source.origin === "debrid" && sourceMaxHeight(source) >= HD_FLOOR_HEIGHT && isAutoEligible(source);
+}
+
+/**
+ * Web streams (anything not from debrid) are a last resort. When the pool
+ * holds a debrid file of 1080p or better that the language policy would
+ * start, they are dropped whatever their height: a web "2160" stream used to
+ * beat a debrid 1080p file for a 4K viewer, and debrid's file is the better
+ * start. The check runs on the language pool, so a debrid file the policy
+ * holds back (a multi-audio file that would start on its first track) does
+ * not hold a web stream back.
+ */
+export function withoutWebFallbacks(
+  sources: readonly PlaybackSource[],
+  contentClass?: string | null
+): PlaybackSource[] {
+  const starts = autoLanguagePool(autoIdentityPool(sources), contentClass);
+  if (!starts.some(isDebridHdStart)) return [...sources];
+  return sources.filter((source) => source.origin === "debrid");
+}
+
 /**
  * The auto-start decider.
  * Always prioritizes highest available decodable resolution (4K > 1080p > 720p).
@@ -267,9 +290,10 @@ export function decidePlayback(
   // it is not started while anything else will play, a shorter file included.
   const carried = deliverable.filter((source) => bitrateSustainabilityRank(source) >= 0);
   const playableLive = carried.length ? carried : deliverable;
+  const pool = withoutWebFallbacks(playableLive, options.contentClass);
 
   const roster = autoLanguagePool(
-    autoIdentityPool(playableLive),
+    autoIdentityPool(pool),
     options.contentClass
   );
   if (!roster.length) {
@@ -277,7 +301,7 @@ export function decidePlayback(
   }
 
   // Direct 4K check
-  const identity = autoIdentityPool(playableLive);
+  const identity = autoIdentityPool(pool);
   const fourKDirect = pickFrom(
     identity.filter(
       (source) =>

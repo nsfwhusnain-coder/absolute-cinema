@@ -1,11 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { PlaybackSource } from "./types";
 import {
-  FOUR_K_GRACE_MS,
   LOW_QUALITY_GRACE_MS,
   hasAlternative,
   PLAYED_FAIL_COOLDOWN_MS,
   START_FAIL_COOLDOWN_MS,
+  START_WAIT_MS,
   initialOrchestratorState,
   onFirstFrame,
   onPlaybackError,
@@ -31,51 +31,62 @@ function playing(on: PlaybackSource, sources = [A, B, C]): OrchestratorState {
 }
 
 describe("orchestrator", () => {
-  describe("low-quality start grace", () => {
+  describe("start wait for a better source", () => {
     const low: PlaybackSource = { ...src("low"), quality: "480p", label: "low • 480p" };
     const hd: PlaybackSource = { ...src("hd"), quality: "1080p" };
     const picky: Ranker = { pick: (c) => [...c].sort((x, y) => parseInt(y.quality) - parseInt(x.quality))[0] ?? null, targetHeight: 1080 };
+    const settled = { fourKSettled: true, debridSettled: true };
 
-    it("waits briefly while only a low-quality source has been found", () => {
-      const { state, command } = onRoster(initialOrchestratorState, [low], true, picky, T0);
+    it("waits briefly while only a low-quality source has been found and debrid has settled", () => {
+      const { state, command } = onRoster(initialOrchestratorState, [low], true, picky, T0, settled);
       expect(command).toEqual({ type: "wait", recheckInMs: LOW_QUALITY_GRACE_MS });
       expect(state.firstCandidateAt).toBe(T0);
-      const later = onRoster(state, [low], true, picky, T0 + 2_000);
+      const later = onRoster(state, [low], true, picky, T0 + 2_000, settled);
       expect(later.command).toEqual({ type: "wait", recheckInMs: LOW_QUALITY_GRACE_MS - 2_000 });
     });
 
-    it("starts the better source if it arrives within the grace", () => {
-      const waiting = onRoster(initialOrchestratorState, [low], true, picky, T0).state;
-      expect(onRoster(waiting, [low, hd], true, picky, T0 + 1_000).command).toMatchObject({ type: "attach", sourceId: "hd" });
+    it("starts the better source if it arrives within the short wait", () => {
+      const waiting = onRoster(initialOrchestratorState, [low], true, picky, T0, settled).state;
+      expect(onRoster(waiting, [low, hd], true, picky, T0 + 1_000, settled).command).toMatchObject({ type: "attach", sourceId: "hd" });
     });
 
-    it("starts the low-quality source once the grace runs out or the search ends", () => {
-      const waiting = onRoster(initialOrchestratorState, [low], true, picky, T0).state;
-      expect(onRoster(waiting, [low], true, picky, T0 + LOW_QUALITY_GRACE_MS).command).toMatchObject({ type: "attach", sourceId: "low" });
-      expect(onRoster(waiting, [low], false, picky, T0 + 1).command).toMatchObject({ type: "attach", sourceId: "low" });
+    it("starts the low-quality source once the short wait runs out or the search ends", () => {
+      const waiting = onRoster(initialOrchestratorState, [low], true, picky, T0, settled).state;
+      expect(onRoster(waiting, [low], true, picky, T0 + LOW_QUALITY_GRACE_MS, settled).command).toMatchObject({ type: "attach", sourceId: "low" });
+      expect(onRoster(waiting, [low], false, picky, T0 + 1, settled).command).toMatchObject({ type: "attach", sourceId: "low" });
     });
 
-    it("waits briefly to replace a source the server has seen failing", () => {
+    it("waits up to START_WAIT_MS for a low-quality source while debrid may still bring one", () => {
+      const { state, command } = onRoster(initialOrchestratorState, [low], true, picky, T0);
+      expect(command).toEqual({ type: "wait", recheckInMs: START_WAIT_MS });
+      expect(onRoster(state, [low], true, picky, T0 + START_WAIT_MS).command).toMatchObject({ type: "attach", sourceId: "low" });
+    });
+
+    it("waits to replace a source the server has seen failing", () => {
       const flaky: Ranker = { ...picky, isSuspect: (s) => s.id === "hd" };
       expect(onRoster(initialOrchestratorState, [hd], true, flaky, T0).command.type).toBe("wait");
       expect(onRoster(initialOrchestratorState, [hd], false, flaky, T0).command).toMatchObject({ type: "attach", sourceId: "hd" });
     });
 
-    it("holds out longer for 4K when the viewer wants the best quality", () => {
+    it("holds out the full wait for 4K when the viewer wants the best quality", () => {
       const best: Ranker = { ...picky, targetHeight: 2160 };
-      expect(onRoster(initialOrchestratorState, [hd], true, best, T0).command).toEqual({ type: "wait", recheckInMs: FOUR_K_GRACE_MS });
+      expect(onRoster(initialOrchestratorState, [hd], true, best, T0).command).toEqual({ type: "wait", recheckInMs: START_WAIT_MS });
       expect(onRoster(initialOrchestratorState, [hd], false, best, T0).command).toMatchObject({ type: "attach", sourceId: "hd" });
     });
 
     it("does not wait when the viewer asked for low quality", () => {
       const saver: Ranker = { ...picky, targetHeight: 480 };
-      expect(onRoster(initialOrchestratorState, [low], true, saver, T0).command).toMatchObject({ type: "attach", sourceId: "low" });
+      const lowDebrid: PlaybackSource = { ...low, origin: "debrid" };
+      expect(onRoster(initialOrchestratorState, [lowDebrid], true, saver, T0).command).toMatchObject({ type: "attach", sourceId: "low" });
+      expect(onRoster(initialOrchestratorState, [low], true, saver, T0, settled).command).toMatchObject({ type: "attach", sourceId: "low" });
     });
   });
 
   describe("what the server says can still arrive", () => {
     const best: Ranker = { pick: (c) => [...c].sort((x, y) => parseInt(y.quality) - parseInt(x.quality))[0] ?? null, targetHeight: 2160 };
     const file: PlaybackSource = { ...src("file"), origin: "debrid" };
+    const file4k: PlaybackSource = { ...src("file4k"), quality: "2160p", origin: "debrid" };
+    const lowFile: PlaybackSource = { ...src("low-file"), quality: "720p", origin: "debrid" };
     const web: PlaybackSource = { ...src("web"), origin: "embed" };
     const lowWeb: PlaybackSource = { ...web, id: "low-web", quality: "720p" };
     const noFourK = { fourKSettled: true, debridSettled: false };
@@ -88,15 +99,27 @@ describe("orchestrator", () => {
     });
 
     it("still holds a web stream back while debrid files may come", () => {
-      expect(start([web], noFourK)).toEqual({ type: "wait", recheckInMs: FOUR_K_GRACE_MS });
+      expect(start([web], noFourK)).toEqual({ type: "wait", recheckInMs: START_WAIT_MS });
+    });
+
+    it("holds a web 1080p stream back while debrid is unsettled, even with 4K settled", () => {
+      expect(start([web], { fourKSettled: true, debridSettled: false })).toEqual({ type: "wait", recheckInMs: START_WAIT_MS });
     });
 
     it("starts the best there is once debrid has nothing more to give", () => {
       expect(start([web], nothingMore)).toMatchObject({ type: "attach", sourceId: "web" });
     });
 
+    it("starts a debrid 4K file at once", () => {
+      expect(start([file4k], noFourK)).toMatchObject({ type: "attach", sourceId: "file4k" });
+    });
+
     it("gives the web providers the short wait when only less than 1080p is in hand", () => {
       expect(start([lowWeb], nothingMore)).toEqual({ type: "wait", recheckInMs: LOW_QUALITY_GRACE_MS });
+    });
+
+    it("gives a debrid file under 1080p the short wait once debrid has nothing more", () => {
+      expect(start([lowFile], nothingMore)).toEqual({ type: "wait", recheckInMs: LOW_QUALITY_GRACE_MS });
     });
 
     it("waits no longer than the short wait on a doubted source once debrid has nothing more", () => {
@@ -104,8 +127,16 @@ describe("orchestrator", () => {
       expect(start([file], nothingMore, doubting)).toEqual({ type: "wait", recheckInMs: LOW_QUALITY_GRACE_MS });
     });
 
-    it("changes nothing while the outlook is open", () => {
-      expect(onRoster(initialOrchestratorState, [file], true, best, T0).command).toEqual({ type: "wait", recheckInMs: FOUR_K_GRACE_MS });
+    it("waits for a debrid 1080p file while a 4K file may still come", () => {
+      expect(onRoster(initialOrchestratorState, [file], true, best, T0).command).toEqual({ type: "wait", recheckInMs: START_WAIT_MS });
+    });
+
+    it("counts the wait from the first roster, not from the first source", () => {
+      const first = onRoster(initialOrchestratorState, [], true, best, T0);
+      expect(first.command).toEqual({ type: "wait" });
+      const late = onRoster(first.state, [web], true, best, T0 + 3_000);
+      expect(late.command).toEqual({ type: "wait", recheckInMs: START_WAIT_MS - 3_000 });
+      expect(onRoster(late.state, [web], true, best, T0 + START_WAIT_MS).command).toMatchObject({ type: "attach", sourceId: "web" });
     });
   });
 
@@ -202,8 +233,8 @@ describe("orchestrator", () => {
   });
 
   it("upgrades once to a higher resolution that arrives before the first frame", () => {
-    const hd = { ...src("hd"), maxHeight: 1080 };
-    const uhd = { ...src("uhd"), maxHeight: 2160 };
+    const hd = { ...src("hd"), maxHeight: 1080, origin: "debrid" as const };
+    const uhd = { ...src("uhd"), maxHeight: 2160, origin: "debrid" as const };
     const starting = onRoster(initialOrchestratorState, [hd], true, ranker, T0).state;
     const byHeight: Ranker = { pick: (c) => [...c].sort((a, b) => (b.maxHeight ?? 0) - (a.maxHeight ?? 0))[0] ?? null };
     const upgraded = onRoster(starting, [hd, uhd], true, byHeight, T0);

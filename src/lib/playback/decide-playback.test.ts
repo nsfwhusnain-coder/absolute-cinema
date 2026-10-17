@@ -128,7 +128,7 @@ describe("decidePlayback contract", () => {
     expect(decision.immediate?.id).toBe("luna");
   });
 
-  it("Ultra starts unlabeled Solstice 4K over English Kronos 1080", () => {
+  it("Ultra holds unlabeled web Solstice 4K behind English Kronos 1080", () => {
     const solstice = src({
       id: "solstice",
       provider: "Vidking",
@@ -141,7 +141,7 @@ describe("decidePlayback contract", () => {
       preferredHeight: 2160,
       fourKStartup: "maximum",
     });
-    expect(decision.immediate?.id).toBe("solstice");
+    expect(decision.immediate?.id).toBe("kronos");
     expect(decision.deferredFourK).toBeNull();
   });
 
@@ -363,5 +363,40 @@ describe("a file of several languages that is remuxed", () => {
   it("is still passed over when it would be played as it is, on its maker's first track", () => {
     const direct = src({ id: "debrid-mp4", provider: "Debrid", origin: "debrid", compat: "native", container: "mp4", audioLanguage: "xx", multiAudio: true, maxHeight: 1080 });
     expect(decidePlayback([webEnglish, direct]).immediate?.id).toBe("web-en");
+  });
+});
+
+describe("a web stream behind a debrid file of 1080p or better", () => {
+  const webUhd = src({
+    id: "web-uhd",
+    provider: "Vidrock",
+    label: "Rock 4K",
+    audioLanguage: "en",
+    type: "hls",
+    maxHeight: 2160,
+  });
+  const debrid720 = src({
+    id: "debrid-720",
+    provider: "Debrid",
+    origin: "debrid",
+    label: "720p • Debrid",
+    audioLanguage: "en",
+    titleMatch: "exact",
+    container: "mp4",
+    compat: "native",
+    maxHeight: 720,
+  });
+
+  it("does not start a web 2160 stream over a debrid 1080p file, for a 4K viewer or on auto", () => {
+    expect(decidePlayback([webUhd, kronos], { preferredHeight: 2160, fourKStartup: "maximum" }).immediate?.id).toBe("kronos");
+    expect(decidePlayback([webUhd, kronos], { preferredHeight: "auto", fourKStartup: "fast" }).immediate?.id).toBe("kronos");
+  });
+
+  it("does not hold back a web 2160 stream when no debrid file reaches 1080p", () => {
+    expect(decidePlayback([webUhd, debrid720], { preferredHeight: 2160, fourKStartup: "maximum" }).immediate?.id).toBe("web-uhd");
+  });
+
+  it("still lets a web 1080p stream beat a debrid 720p file", () => {
+    expect(decidePlayback([luna, debrid720]).immediate?.id).toBe("luna");
   });
 });

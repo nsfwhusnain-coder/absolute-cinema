@@ -36,14 +36,19 @@ export const SAME_SOURCE_RETRIES = 2;
  * "plays a bit, then buffers" looks like from the sofa.
  */
 export const RETRIES_FORGIVEN_AFTER_MS = 60_000;
-/** Longest a start waits for a better source than the ones found so far. */
-export const LOW_QUALITY_GRACE_MS = 5_000;
 /**
- * With a 4K target the wait is longer: the loading scene covers it, and the
- * server's 4K hunt (placeholder-heavy on Real-Debrid) needs time to finish.
+ * Longest a start waits for a better source than the best one found so far,
+ * counted from when the player first asked. Debrid's 4K and good 1080p files
+ * come late (the server's 4K hunt is placeholder-heavy on Real-Debrid), and a
+ * web stream that turns up a few seconds early is no reason to start it.
  * Starting 1080p early is what made one episode 4K and the next not.
  */
-export const FOUR_K_GRACE_MS = 20_000;
+export const START_WAIT_MS = 20_000;
+/**
+ * Once debrid has settled nothing better can come from it, so only the web
+ * providers' slow tail is still worth waiting for: a short wait is enough.
+ */
+export const LOW_QUALITY_GRACE_MS = 5_000;
 /** A start at this height waits for nothing once no better tier can come. */
 const GOOD_START_HEIGHT = 1080;
 
@@ -77,8 +82,10 @@ export interface OrchestratorState {
   lastReason: string | null;
   /** A better source already replaced the one being started once. */
   upgradedBeforeStart: boolean;
-  /** When the first playable source turned up (for the low-quality grace). */
+  /** When the first playable source turned up (for the short wait once debrid has settled). */
   firstCandidateAt: number | null;
+  /** When the player first asked for this title to start (for START_WAIT_MS); kept until a retry. */
+  startWaitFrom: number | null;
   /** When the active source last failed while playing (for RETRIES_FORGIVEN_AFTER_MS). */
   lastErrorAt?: number | null;
 }
@@ -108,6 +115,7 @@ export const initialOrchestratorState: OrchestratorState = {
   lastReason: null,
   upgradedBeforeStart: false,
   firstCandidateAt: null,
+  startWaitFrom: null,
 };
 
 export function isCoolingDown(health: SourceHealth | undefined, now: number): boolean {
@@ -165,23 +173,42 @@ function mayBeBettered(best: PlaybackSource, targetHeight: number, outlook: Outl
   return true;
 }
 
+/**
+ * Whether discovery may still bring something that should start instead of
+ * `best`: a web stream while debrid can still add a file (debrid is always
+ * the first choice), a start below the target while the server says more may
+ * come, or a source the server doubts.
+ */
+function mayStillBeBettered(best: PlaybackSource, ranker: Ranker, outlook: Outlook): boolean {
+  if (best.origin !== "debrid" && !outlook.debridSettled) return true;
+  return mayBeBettered(best, ranker.targetHeight ?? 0, outlook) || ranker.isSuspect?.(best) === true;
+}
+
 /** New roster (sources list). Starts playback when nothing is running yet; never switches a running source. */
 export function onRoster(
-  state: OrchestratorState,
+  before: OrchestratorState,
   sources: readonly PlaybackSource[],
   discovering: boolean,
   ranker: Ranker,
   now: number,
   outlook: Outlook = OPEN_OUTLOOK
 ): Transition {
+  // The first roster while the player is waiting to start marks when it was
+  // asked, whether or not any source has turned up yet.
+  const state: OrchestratorState =
+    before.phase === "resolving" && !before.everPlayed && before.startWaitFrom === null
+      ? { ...before, startWaitFrom: now }
+      : before;
   if (state.phase === "resolving" || state.phase === "failed") {
     const best = ranker.pick(eligible(state, sources, now));
-    const target = ranker.targetHeight ?? 0;
-    const weak = best && (mayBeBettered(best, target, outlook) || ranker.isSuspect?.(best) === true);
+    const weak = best && mayStillBeBettered(best, ranker, outlook);
     if (best && weak && discovering && state.phase === "resolving" && !state.everPlayed) {
       const since = state.firstCandidateAt ?? now;
-      const grace = target >= 2160 && !outlook.debridSettled ? FOUR_K_GRACE_MS : LOW_QUALITY_GRACE_MS;
-      const left = grace - (now - since);
+      // Debrid settled: only the web tail is left to wait for, so the short
+      // wait runs from the candidate. Otherwise the wait runs from the ask.
+      const left = outlook.debridSettled
+        ? LOW_QUALITY_GRACE_MS - (now - since)
+        : START_WAIT_MS - (now - (state.startWaitFrom ?? now));
       if (left > 0) return { state: { ...state, firstCandidateAt: since }, command: { type: "wait", recheckInMs: left } };
     }
     if (best) {
@@ -329,7 +356,7 @@ export function onUserSelect(state: OrchestratorState, sourceId: string): Transi
 
 /** "Try again" after a hard failure: forget cooldowns and start over. */
 export function onRetryAll(state: OrchestratorState): OrchestratorState {
-  return { ...state, phase: "resolving", activeId: null, health: {}, retries: 0, pinned: false, upgradedBeforeStart: false, firstCandidateAt: null };
+  return { ...state, phase: "resolving", activeId: null, health: {}, retries: 0, pinned: false, upgradedBeforeStart: false, firstCandidateAt: null, startWaitFrom: null };
 }
 
 /** Wait for a refreshed roster instead of failing (sources that failed stay cooled down). */
