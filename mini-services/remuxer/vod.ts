@@ -81,6 +81,8 @@ const INIT_WAIT_MS = 20_000;
 const POLL_MS = 100;
 const MAX_RUNS_PER_SESSION = 2;
 const MAX_FAILED_RUNS_PER_SEGMENT = 2;
+/** Runs that may die without writing anything before the header is given up on. */
+const MAX_FAILED_RUNS_BEFORE_INIT = 3;
 /**
  * How much ffmpeg may read to identify the streams before it starts. A file
  * with image subtitles never satisfies it (those say nothing until a caption
@@ -149,7 +151,10 @@ interface Run {
   proc: ChildProcess;
   startTime: number;
   fragments: FragmentRecord[];
+  /** It has ended, one way or another (completed, or stopped). */
   finished: boolean;
+  /** ffmpeg read to the end of the file and exited cleanly: its last window is whole as it is. */
+  completed: boolean;
   failed: boolean;
   paused: boolean;
   /**
@@ -343,7 +348,10 @@ export async function openVodSession(
  */
 async function adoptLink(session: Session, url: string): Promise<Session | undefined> {
   const size = await probeTotalSize(url);
-  if (size !== null && size === session.source.totalSize) {
+  // No answer says nothing of the file: the session carries on under the link it has, and the
+  // runs other viewers are watching are left alone.
+  if (size === null) return session;
+  if (size === session.source.totalSize) {
     session.url = url;
     session.source.url = url;
     return session;
@@ -616,7 +624,7 @@ function startRun(session: Session, segment: number, watcher: string): Run {
   const proc = spawn("ffmpeg", ffmpegArgs(session, startTime), {
     stdio: ["ignore", "pipe", "pipe", ...session.subtitles.map(() => "pipe" as const)],
   });
-  const run: Run = { id, startSegment: segment, proc, startTime, fragments: [], finished: false, failed: false, paused: false, unusable: false, dir, watcher, servedAt: Date.now(), wanted: startTime };
+  const run: Run = { id, startSegment: segment, proc, startTime, fragments: [], finished: false, completed: false, failed: false, paused: false, unusable: false, dir, watcher, servedAt: Date.now(), wanted: startTime };
   session.runs.push(run);
   const giveUp = (reason: string) => {
     run.unusable = true;
@@ -634,7 +642,13 @@ function startRun(session: Session, segment: number, watcher: string): Run {
     const limit = (session.source.lanes ?? 1) >= 2 ? SLOW_SOURCE_FIRST_FRAGMENT_TIMEOUT_MS : FIRST_FRAGMENT_TIMEOUT_MS;
     const left = runStartedAt + limit - Date.now();
     if (left > 0) firstFragment = setTimeout(awaitFirstFragment, left);
-    else giveUp("made nothing");
+    else {
+      // Slow, not unplayable: a CDN that was slow this once (or a bug of ours, as on 2.6.1) used to get the
+      // release refused to every viewer for 90 days. Only a run that began at the wrong place, or made sound
+      // with no picture, says something of the file.
+      stopRun(run, "made nothing");
+      run.failed = true;
+    }
   };
   let firstFragment = setTimeout(awaitFirstFragment, FIRST_FRAGMENT_TIMEOUT_MS);
   const splitter = new Fmp4StreamSplitter();
@@ -702,6 +716,7 @@ function startRun(session: Session, segment: number, watcher: string): Run {
     if (run.finished) return;
     if (code === 0) {
       run.finished = true;
+      run.completed = true;
     } else {
       run.failed = true;
       log(`run ${run.id} of ${session.id} failed (${code ?? signal}): ${stderr.trim().slice(0, 300)}`);
@@ -781,6 +796,11 @@ export async function vodInit(id: string, watcher = ""): Promise<Uint8Array> {
   const deadline = Date.now() + INIT_WAIT_MS;
   while (!session.init) {
     if (session.runs.some((run) => run.unusable)) throw new VodError(UNUSABLE_ENTRY, 502);
+    // Runs that died before writing anything (an expired link, a CDN that will not answer): a few, then an
+    // error, rather than a new ffmpeg every 100 ms until the wait runs out.
+    if (session.runs.filter((run) => run.failed && !run.fragments.length).length >= MAX_FAILED_RUNS_BEFORE_INIT) {
+      throw new VodError("source failed to remux", 502);
+    }
     if (!aliveRuns(session).length) startRun(session, segmentForTime(session.bounds, session.wantedTime), watcher);
     if (Date.now() > deadline) throw new VodError("init not ready", 504);
     await sleep(POLL_MS);
@@ -825,7 +845,8 @@ async function* windowFragments(session: Session, window: PlanWindow, segment: n
   for (const run of aliveRuns(session)) throttle(session, run);
 
   for (const run of [...session.runs].reverse()) {
-    const complete = fragmentsInWindow(window, run.fragments, run.finished);
+    // A run stopped part-way (a seek, the run limit, the janitor) has not finished the window it stopped in.
+    const complete = fragmentsInWindow(window, run.fragments, run.completed);
     if (complete) {
       if (!run.finished && !run.failed) served(session, run, window.start);
       for (const fragment of complete) yield fragment.path;
@@ -838,6 +859,9 @@ async function* windowFragments(session: Session, window: PlanWindow, segment: n
   let cursor = -1;
   while (!run) {
     for (const candidate of [...session.runs].reverse()) {
+      // One that has ended will make no more of the window: waiting on it served the same error at every
+      // retry, and no run was ever started for that stretch again.
+      if (candidate.failed || (candidate.finished && !candidate.completed)) continue;
       if (!runCovers(candidate.fragments, window.anchor)) continue;
       const first = candidate.fragments.findIndex((f) => f.time >= window.start - KEYFRAME_MATCH_TOLERANCE_S);
       if (first < 0) continue;
@@ -867,8 +891,9 @@ async function* windowFragments(session: Session, window: PlanWindow, segment: n
       yield fragment.path;
       cursor++;
     }
-    if (run.finished || gone()) return;
-    if (run.failed) throw new VodError("remux run failed mid-segment", 502);
+    if (run.completed || gone()) return;
+    // Stopped or failed part-way: the player asks again, and a new run makes the rest.
+    if (run.failed || run.finished) throw new VodError("remux run ended mid-segment", 502);
     if (Date.now() > deadline) throw new VodError("segment stalled", 504);
     session.lastRequestAt = Date.now();
     run.servedAt = Date.now();
