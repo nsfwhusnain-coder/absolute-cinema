@@ -4,6 +4,7 @@ import {
   bitrateSustainabilityRank,
   isRuntimeSourceUnhealthy,
   isSourcePlayableHere,
+  QUALITY_SCORE_STEP,
   sourceDelivery,
   parseMaxHeight,
   pickDefaultSource,
@@ -1112,5 +1113,60 @@ describe("a debrid file on a CDN too slow to carry it", () => {
 
   it("is still played when it is all there is", () => {
     expect(pickDefaultSource([debrid("alldebrid-4k", 2160, 8.7)])?.id).toBe("alldebrid-4k");
+  });
+});
+
+describe("qualityBadge — picture flags", () => {
+  const release = (qualityFlags: string[]): PlaybackSource =>
+    makeSource({
+      id: "release-1080",
+      provider: "AllDebrid",
+      origin: "debrid",
+      type: "mp4",
+      compat: "native",
+      codec: "h264",
+      maxHeight: 1080,
+      qualityFlags,
+    });
+
+  it("shows an upscale beside the height", () => {
+    expect(qualityBadge(release(["upscaled"]))).toBe("1080p · upscaled (AllDebrid)");
+  });
+
+  it("shows a starved encode as low bitrate", () => {
+    expect(qualityBadge(release(["starved"]))).toBe("1080p · low bitrate (AllDebrid)");
+  });
+
+  it("shows both, and leaves the other flags out of the badge", () => {
+    expect(qualityBadge(release(["upscaled", "starved"]))).toBe("1080p · upscaled · low bitrate (AllDebrid)");
+    expect(qualityBadge(release(["remux", "heavy"]))).toBe("1080p (AllDebrid)");
+  });
+});
+
+describe("sortSourcesForPicker — picture quality at equal height", () => {
+  it("lists a flagged 1080p below a normal one, even with the higher bitrate", () => {
+    const flagged = makeSource({ id: "flagged", label: "Flagged", provider: "CinemaOS", type: "mp4", maxHeight: 1080, qualityTier: 1, qualityScore: 300, qualityFlags: ["starved"], bitrateBps: 20_000_000 });
+    const normal = makeSource({ id: "normal", label: "Normal", provider: "CinemaOS", type: "mp4", maxHeight: 1080, qualityTier: 3, qualityScore: 120, bitrateBps: 4_000_000 });
+    expect(sortSourcesForPicker([flagged, normal]).map((s) => s.id)).toEqual(["normal", "flagged"]);
+    expect(sortSourcesForPicker([normal, flagged]).map((s) => s.id)).toEqual(["normal", "flagged"]);
+  });
+
+  it("orders by score once the gap is a full step, ahead of the encode rate and the name", () => {
+    const sharper = makeSource({ id: "sharper", label: "Zeta", provider: "CinemaOS", type: "mp4", maxHeight: 1080, qualityTier: 3, qualityScore: 300 + QUALITY_SCORE_STEP, bitrateBps: 4_000_000 });
+    const richer = makeSource({ id: "richer", label: "Alpha", provider: "CinemaOS", type: "mp4", maxHeight: 1080, qualityTier: 3, qualityScore: 300, bitrateBps: 12_000_000 });
+    expect(sortSourcesForPicker([richer, sharper]).map((s) => s.id)).toEqual(["sharper", "richer"]);
+    expect(sortSourcesForPicker([sharper, richer]).map((s) => s.id)).toEqual(["sharper", "richer"]);
+  });
+
+  it("leaves a gap under one step to the encode rate", () => {
+    const leaner = makeSource({ id: "leaner-300", label: "Leaner", provider: "CinemaOS", type: "mp4", maxHeight: 1080, qualityTier: 3, qualityScore: 300, bitrateBps: 4_000_000 });
+    const denser = makeSource({ id: "denser-261", label: "Denser", provider: "CinemaOS", type: "mp4", maxHeight: 1080, qualityTier: 3, qualityScore: 300 - QUALITY_SCORE_STEP + 1, bitrateBps: 12_000_000 });
+    expect(sortSourcesForPicker([leaner, denser]).map((s) => s.id)).toEqual(["denser-261", "leaner-300"]);
+  });
+
+  it("keeps the height order above picture quality", () => {
+    const flagged4k = makeSource({ id: "flagged-4k", label: "Flagged", provider: "CinemaOS", type: "mp4", maxHeight: 2160, qualityTier: 1, qualityScore: 100 });
+    const normal1080 = makeSource({ id: "normal-1080", label: "Normal", provider: "CinemaOS", type: "mp4", maxHeight: 1080, qualityTier: 3, qualityScore: 400 });
+    expect(sortSourcesForPicker([normal1080, flagged4k]).map((s) => s.id)).toEqual(["flagged-4k", "normal-1080"]);
   });
 });

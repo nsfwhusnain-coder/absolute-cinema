@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { decidePlayback } from "./decide-playback";
 import { resetDecodeCapabilityCache } from "./decode-capability";
-import { isSourcePlayableHere } from "./source-quality";
+import { isSourcePlayableHere, QUALITY_SCORE_STEP } from "./source-quality";
 import type { PlaybackSource } from "./types";
 
 function src(overrides: Partial<PlaybackSource> & { id: string }): PlaybackSource {
@@ -398,5 +398,68 @@ describe("a web stream behind a debrid file of 1080p or better", () => {
 
   it("still lets a web 1080p stream beat a debrid 720p file", () => {
     expect(decidePlayback([luna, debrid720]).immediate?.id).toBe("luna");
+  });
+});
+
+describe("picture quality before delivery", () => {
+  /** A debrid file with English audio and the release score and tier the server stamps on it. */
+  const scored = (id: string, container: "mp4" | "mkv", maxHeight: number, score: number, tier: 1 | 2 | 3 = 3): PlaybackSource =>
+    src({
+      id,
+      provider: "Debrid",
+      origin: "debrid",
+      compat: "native",
+      container,
+      audioLanguage: "en",
+      titleMatch: "exact",
+      maxHeight,
+      qualityTier: tier,
+      qualityScore: score,
+    });
+
+  it("starts the sharper remux over a direct file with far less picture, in either order", () => {
+    const remux = scored("remux-1080", "mkv", 1080, 430);
+    const direct = scored("direct-1080", "mp4", 1080, 90);
+    expect(decidePlayback([direct, remux]).immediate?.id).toBe("remux-1080");
+    expect(decidePlayback([remux, direct]).immediate?.id).toBe("remux-1080");
+  });
+
+  it("starts the direct file when the scores are within one step, for the quicker start", () => {
+    const remux = scored("remux-1080", "mkv", 1080, 300);
+    const direct = scored("direct-1080", "mp4", 1080, 280);
+    expect(decidePlayback([remux, direct]).immediate?.id).toBe("direct-1080");
+  });
+
+  it("counts a gap of exactly one QUALITY_SCORE_STEP as a real difference", () => {
+    const direct = scored("direct-1080", "mp4", 1080, 90);
+    expect(decidePlayback([direct, scored("remux-1080", "mkv", 1080, 90 + QUALITY_SCORE_STEP)]).immediate?.id).toBe("remux-1080");
+    expect(decidePlayback([direct, scored("remux-1080", "mkv", 1080, 90 + QUALITY_SCORE_STEP - 1)]).immediate?.id).toBe("direct-1080");
+  });
+
+  it("ranks a flagged file behind a normal one at the same height, whatever the scores", () => {
+    const flagged = scored("flagged-direct", "mp4", 1080, 500, 1);
+    const normal = scored("normal-remux", "mkv", 1080, 100);
+    expect(decidePlayback([flagged, normal]).immediate?.id).toBe("normal-remux");
+    expect(decidePlayback([normal, flagged]).immediate?.id).toBe("normal-remux");
+  });
+
+  it("picks a normal remux 4K over a flagged direct 4K", () => {
+    const flagged = scored("flagged-4k", "mp4", 2160, 500, 1);
+    const normal = scored("normal-4k", "mkv", 2160, 100);
+    const maximum = { preferredHeight: 2160, fourKStartup: "maximum" } as const;
+    expect(decidePlayback([flagged, normal], maximum).immediate?.id).toBe("normal-4k");
+    expect(decidePlayback([normal, flagged], maximum).immediate?.id).toBe("normal-4k");
+  });
+
+  it("keeps a direct file before a remux when neither carries picture quality", () => {
+    const remux = src({ id: "remux-plain", provider: "Debrid", origin: "debrid", compat: "native", container: "mkv", audioLanguage: "en", titleMatch: "exact", maxHeight: 1080 });
+    const direct = src({ id: "direct-plain", provider: "Debrid", origin: "debrid", compat: "native", container: "mp4", audioLanguage: "en", titleMatch: "exact", maxHeight: 1080 });
+    expect(decidePlayback([remux, direct]).immediate?.id).toBe("direct-plain");
+  });
+
+  it("still leaves out a remux, however sharp, when the packer is full", () => {
+    const direct = scored("direct-1080", "mp4", 1080, 90);
+    expect(decidePlayback([scored("remux-4k", "mkv", 2160, 430), direct], { remuxAvailable: false }).immediate?.id).toBe("direct-1080");
+    expect(decidePlayback([scored("remux-1080", "mkv", 1080, 430), direct], { remuxAvailable: false }).immediate?.id).toBe("direct-1080");
   });
 });

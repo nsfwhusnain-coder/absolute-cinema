@@ -6,7 +6,13 @@ import {
   sourceAudioLanguageCode,
   sourceAudioLanguageRank,
 } from "./source-facts";
-import { bitrateSustainabilityRank, isSourcePlayableHere, sourceDelivery, normalizedBitrate } from "./source-quality";
+import {
+  bitrateSustainabilityRank,
+  compareQualityTierAndScore,
+  isSourcePlayableHere,
+  sourceDelivery,
+  normalizedBitrate,
+} from "./source-quality";
 import { supportsHev1Files } from "./decode-capability";
 import { isNeverAutoDefaultUrl } from "./poison-url";
 import { isMoviePackRelease } from "./debrid/torrentio";
@@ -216,6 +222,12 @@ function compareForAutoStart(
   const bDebrid = b.origin === "debrid" ? 1 : 0;
   if (aDebrid !== bDebrid) return bDebrid - aDebrid;
 
+  // Picture before delivery: a file that holds clearly more detail starts before
+  // one that plays as it is. Only near-equal pictures reach the start-up steps
+  // below, so a remux costs its second or two only where it buys real quality.
+  const picture = compareQualityTierAndScore(a, b);
+  if (picture !== 0) return picture;
+
   const aStart = startConfidence(a);
   const bStart = startConfidence(b);
   if (aStart !== bStart) return bStart - aStart;
@@ -274,6 +286,23 @@ export function withoutWebFallbacks(
 }
 
 /**
+ * A 4K file the household language policy lets start. A direct file must be
+ * English or unlabeled; a remux may also be a multi-track file, which the
+ * remuxer sets to the viewer's language. A remux is never a start when the
+ * packer is full.
+ */
+function isFourKStart(source: PlaybackSource, remuxAllowed: boolean): boolean {
+  if (sourceMaxHeight(source) < STARTUP_UHD_HEIGHT) return false;
+  const delivery = sourceDelivery(source);
+  if (delivery === "direct") return isHouseholdStartLanguage(source);
+  return (
+    remuxAllowed &&
+    delivery === "remux" &&
+    (isHouseholdStartLanguage(source) || choosesItsAudio(source))
+  );
+}
+
+/**
  * The auto-start decider.
  * Always prioritizes highest available decodable resolution (4K > 1080p > 720p).
  */
@@ -300,37 +329,16 @@ export function decidePlayback(
     return { immediate: null, deferredFourK: null, reason: "no_source" };
   }
 
-  // Direct 4K check
+  // One 4K pool: a direct file and a remux compete on picture quality, and
+  // direct-before-remux only decides between files of equal quality.
   const identity = autoIdentityPool(pool);
-  const fourKDirect = pickFrom(
-    identity.filter(
-      (source) =>
-        sourceMaxHeight(source) >= STARTUP_UHD_HEIGHT &&
-        sourceDelivery(source) === "direct" &&
-        isHouseholdStartLanguage(source)
-    ),
+  const fourK = pickFrom(
+    identity.filter((source) => isFourKStart(source, remuxAllowed)),
     options,
     STARTUP_UHD_HEIGHT
   );
-  if (fourKDirect) {
-    return { immediate: fourKDirect, deferredFourK: null, reason: "ranked_best" };
-  }
-
-  // Remux 4K check (if remux allowed)
-  if (remuxAllowed) {
-    const fourKRemux = pickFrom(
-      identity.filter(
-        (source) =>
-          sourceMaxHeight(source) >= STARTUP_UHD_HEIGHT &&
-          sourceDelivery(source) === "remux" &&
-          (isHouseholdStartLanguage(source) || choosesItsAudio(source))
-      ),
-      options,
-      STARTUP_UHD_HEIGHT
-    );
-    if (fourKRemux) {
-      return { immediate: fourKRemux, deferredFourK: null, reason: "ranked_best" };
-    }
+  if (fourK) {
+    return { immediate: fourK, deferredFourK: null, reason: "ranked_best" };
   }
 
   // Best ranked source in roster (highest quality available)

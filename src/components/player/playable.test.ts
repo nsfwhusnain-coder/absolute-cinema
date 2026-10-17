@@ -95,3 +95,26 @@ describe("a web stream against a debrid file of 1080p or better", () => {
     expect(createRanker("auto", true, "").pick(pool)?.id).toBe("web-2160");
   });
 });
+
+describe("picture quality at 1080p", () => {
+  const sharpRemux: PlaybackSource = {
+    ...debrid("sharp-remux", 1080),
+    container: "mkv",
+    qualityTier: 3,
+    qualityScore: 430,
+    qualityFlags: ["remux"],
+  };
+  const starvedDirect: PlaybackSource = {
+    ...debrid("starved-direct", 1080),
+    qualityTier: 1,
+    qualityScore: 60,
+    qualityFlags: ["starved"],
+  };
+
+  it("starts the sharp remux over a starved direct file for auto, 2160 and 1080 choices", () => {
+    const pool = [starvedDirect, sharpRemux];
+    expect(createRanker("auto", true, "").pick(pool)?.id).toBe("sharp-remux");
+    expect(createRanker(2160, true, "").pick(pool)?.id).toBe("sharp-remux");
+    expect(createRanker(1080, true, "").pick(pool)?.id).toBe("sharp-remux");
+  });
+});

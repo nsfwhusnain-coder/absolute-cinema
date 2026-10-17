@@ -163,8 +163,21 @@ function baseQualityBadge(source: PlaybackSource): string {
  * it now means what it says: no route exists, in this browser, at all. */
 const UNAVAILABLE_BADGE_TAG = "unavailable";
 
+/**
+ * Picture problems `assessRelease` found, shown beside the height. The server
+ * lowers an upscaled 2160p to 1080, and this tag says the picture holds no more
+ * detail than that; a starved file is an encode with too few bits per frame.
+ * Either explains why one "1080p" can look worse than another.
+ */
+function pictureFlagTags(source: PlaybackSource): string {
+  const flags = source.qualityFlags ?? [];
+  const upscaled = flags.includes("upscaled") ? " · upscaled" : "";
+  const starved = flags.includes("starved") ? " · low bitrate" : "";
+  return `${upscaled}${starved}`;
+}
+
 export function qualityBadge(source: PlaybackSource): string {
-  const badge = baseQualityBadge(source);
+  const badge = `${baseQualityBadge(source)}${pictureFlagTags(source)}`;
   // A release this browser cannot decode says so before it is clicked.
   const withCompatTag = isSourcePlayableHere(source)
     ? badge
@@ -683,11 +696,38 @@ export function scoreSource(source: PlaybackSource): number {
 }
 
 /**
- * Source picker: playable/healthy first, then resolution and encode richness,
- * then the saved server and adaptive-ladder conveniences. The visible order
- * mirrors auto-pick: 4K stays above HD, while a meaningfully richer 1080p
- * encode is not hidden below a leaner one merely because the latter arrived
- * from an adaptive manifest.
+ * Score gap that counts as a real difference in picture. The source term of
+ * a release score (release-quality.ts) runs from 10 for a WEBRip to 120 for a
+ * remux, so 40 is about one source step: a Blu-ray is 50 points above a
+ * WEBRip. In picture detail the same 40 is roughly 0.5 Mbit/s of H.264 at
+ * 1080p, which a viewer can see. A smaller gap is within what the size-based
+ * bitrate estimate can tell apart, so the start-up order decides it.
+ */
+export const QUALITY_SCORE_STEP = 40;
+
+/** A source with no quality data is a normal release: it is not punished for missing it. */
+const UNRATED_QUALITY_TIER = 3;
+
+/**
+ * Picture order between two sources, as a comparator fragment: the higher
+ * quality tier first, then the higher score once the gap is at least
+ * QUALITY_SCORE_STEP. Inside the step, or without scores on both sides, it
+ * has no opinion and the caller's next rule decides.
+ */
+export function compareQualityTierAndScore(a: PlaybackSource, b: PlaybackSource): number {
+  const tierOrder = (b.qualityTier ?? UNRATED_QUALITY_TIER) - (a.qualityTier ?? UNRATED_QUALITY_TIER);
+  if (tierOrder !== 0) return tierOrder;
+  if (typeof a.qualityScore !== "number" || typeof b.qualityScore !== "number") return 0;
+  const gap = b.qualityScore - a.qualityScore;
+  return Math.abs(gap) >= QUALITY_SCORE_STEP ? gap : 0;
+}
+
+/**
+ * Source picker: playable/healthy first, then resolution, picture quality and
+ * encode richness, then the saved server and adaptive-ladder conveniences. The
+ * visible order mirrors auto-pick: 4K stays above HD, while a meaningfully
+ * richer 1080p encode is not hidden below a leaner one merely because the
+ * latter arrived from an adaptive manifest.
  */
 export function sortSourcesForPicker(sources: PlaybackSource[]): PlaybackSource[] {
   const pref =
@@ -727,6 +767,11 @@ export function sortSourcesForPicker(sources: PlaybackSource[]): PlaybackSource[
     const aH = sourceMaxHeight(a);
     const bH = sourceMaxHeight(b);
     if (aH !== bH) return bH - aH;
+
+    // Picture before the measured-link rank, as in auto-pick: auto-pick drops a
+    // link too slow to carry a file, and reads CDN speed only after picture.
+    const pictureOrder = compareQualityTierAndScore(a, b);
+    if (pictureOrder !== 0) return pictureOrder;
 
     const supportOrder = compareBitrateSustainability(a, b);
     if (supportOrder !== 0) return supportOrder;
