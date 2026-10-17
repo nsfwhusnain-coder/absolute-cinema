@@ -115,3 +115,24 @@ describe("annotateDebridQuality", () => {
     expect(list[0]).toMatchObject({ maxHeight: 1080, label: "4K • Debrid · upscaled", qualityScore: 475, qualityFlags: ["upscaled"] });
   });
 });
+
+describe("annotateDebridQuality — the file's bitrate", () => {
+  it("works out the average bitrate from the size and runtime, for the CDN check", () => {
+    const source: PlaybackSource = {
+      id: "alldebrid-tt1-movie-0-0-1080p",
+      url: "https://x.debrid.it/dl/a/file.mkv",
+      provider: "AllDebrid",
+      quality: "1080p",
+      label: "AllDebrid · 1080p",
+      type: "mp4" as const,
+      origin: "debrid" as const,
+      maxHeight: 1080,
+      codec: "h264" as const,
+      releaseTitle: "Film.2024.1080p.BluRay.x264-SPARKS",
+      sizeBytes: 9_000_000_000,
+    };
+    const list = [source];
+    annotateDebridQuality(list, 120, false);
+    expect(source.fileBitrateBps).toBe(10_000_000);
+  });
+});

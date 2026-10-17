@@ -1105,6 +1105,24 @@ describe("a debrid file on a CDN too slow to carry it", () => {
     expect(bitrateSustainabilityRank(heavy)).toBe(-1);
   });
 
+  it("credits a file the remuxer reads with its parallel connections", () => {
+    // 2.6 Mbit/s per connection, twelve connections: a 10 Mbit/s remux plays; read by the browser it could not.
+    const mkv = { ...debrid("alldebrid-1080", 1080, 2.6), container: "mkv" as const, fileBitrateBps: 10_000_000 };
+    const mp4 = { ...debrid("alldebrid-1080", 1080, 2.6), fileBitrateBps: 10_000_000 };
+    expect(bitrateSustainabilityRank(mkv)).toBe(0);
+    expect(bitrateSustainabilityRank(mp4)).toBe(-1);
+  });
+
+  it("still passes over a remux too heavy for the parallel connections", () => {
+    const heavyMkv = { ...debrid("alldebrid-4k", 2160, 2.6), container: "mkv" as const, fileBitrateBps: 40_000_000 };
+    expect(bitrateSustainabilityRank(heavyMkv)).toBe(-1);
+  });
+
+  it("prefers the server's file bitrate over a declared one", () => {
+    const light = { ...debrid("debrid-1080", 1080, 8), bitrateBps: 20_000_000, fileBitrateBps: 5_000_000 };
+    expect(bitrateSustainabilityRank(light)).toBe(0);
+  });
+
   it("is passed over for a file that will play, even a shorter one", () => {
     const slow4k = debrid("alldebrid-4k", 2160, 8.7);
     expect(pickDefaultSource([slow4k, debrid("debrid-4k", 2160, 45)])?.id).toBe("debrid-4k");

@@ -138,6 +138,12 @@ export interface PlaybackSource {
   qualityScore?: number;
   /** What `assessRelease` noticed, such as "upscaled", "starved" or "remux". */
   qualityFlags?: string[];
+  /**
+   * The file's average bitrate (audio included) in bits per second, from its
+   * size and the title's runtime: what its CDN must deliver for it to play.
+   * Worked out by the server for debrid files, never declared by a manifest.
+   */
+  fileBitrateBps?: number;
   /** The release the file came from, as the index named it. */
   releaseTitle?: string;
   /**

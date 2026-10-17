@@ -44,6 +44,9 @@ export function annotateDebridQuality(
     source.qualityTier = quality.tier;
     source.qualityScore = quality.score;
     source.qualityFlags = quality.flags;
+    if (source.sizeBytes && runtimeMinutes && runtimeMinutes > 0) {
+      source.fileBitrateBps = Math.round((source.sizeBytes * 8) / (runtimeMinutes * 60));
+    }
     // Bitrate is not set here: `bitrateBps` means a manifest declared it, and other code compares it with H.264 floors.
     if (quality.effectiveHeight < height) {
       source.maxHeight = quality.effectiveHeight;

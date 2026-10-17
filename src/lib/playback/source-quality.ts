@@ -591,14 +591,38 @@ function unknownRateSwitchFloor(height: number): number {
 }
 
 /**
+ * Connections the remuxer opens to a CDN that caps each one (see
+ * mini-services/remuxer/source-proxy.ts). A debrid CDN that caps a connection
+ * adds up across connections, so a file the remuxer reads gets this many
+ * times what one connection was measured to deliver.
+ */
+export const REMUX_PARALLEL_CONNECTIONS = 12;
+
+/** A file the remuxer reads (an MKV or WebM), over as many connections as it needs, rather than the browser over one. */
+function readByRemuxer(source: PlaybackSource): boolean {
+  const container = resolvedSourceContainer(source);
+  return container === "mkv" || container === "webm";
+}
+
+/**
  * True when a debrid file's CDN has been measured too slow to carry it. The
- * file's own rate is rarely known, so the ordinary rate of its height stands
- * in for it: a CDN delivering 5 Mbit/s plays no 4K file, whatever its size.
+ * CDN is measured over one connection: a plain file is read over one by the
+ * browser, while the remuxer reads an MKV over several (a CDN measured at
+ * 2.6 Mbit/s per connection carries a 10 Mbit/s remux that way). The file's
+ * own average bitrate is used when the server worked it out, else a declared
+ * one, else the ordinary rate of its height: a CDN delivering 5 Mbit/s plays
+ * no 4K file, whatever its size.
  */
 function isBeyondItsCdn(source: PlaybackSource): boolean {
-  const delivered = (source.cdnBytesPerSec ?? 0) * 8;
-  if (delivered <= 0) return false;
-  const needed = (source.bitrateBps ?? 0) > 0 ? source.bitrateBps! : unknownRateSwitchFloor(sourceMaxHeight(source));
+  const perConnection = (source.cdnBytesPerSec ?? 0) * 8;
+  if (perConnection <= 0) return false;
+  const delivered = readByRemuxer(source) ? perConnection * REMUX_PARALLEL_CONNECTIONS : perConnection;
+  const needed =
+    (source.fileBitrateBps ?? 0) > 0
+      ? source.fileBitrateBps!
+      : (source.bitrateBps ?? 0) > 0
+        ? source.bitrateBps!
+        : unknownRateSwitchFloor(sourceMaxHeight(source));
   return delivered < needed * BITRATE_STARTUP_HEADROOM_RATIO;
 }
 
