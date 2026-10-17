@@ -11,7 +11,9 @@
  *
  * Real fetch, bounded timeout, never throws — callers get `[]` on any failure
  * (network, malformed JSON, TMDB miss) so a Torrentio outage never breaks the
- * existing embed roster.
+ * existing embed roster. The list also says how the index answered (see
+ * `torrentioOutcomeOf`), so `[]` from a failed request is not mistaken for a
+ * title that has no releases.
  *
  * CANDIDATE SELECTION — a popular title's RD-configured Torrentio response
  * typically has 150-224 fully cached streams, but they skew heavily toward
@@ -51,7 +53,6 @@ const TORRENTIO_BASE = (process.env.TORRENTIO_BASE || "https://torrentio.strem.f
   /\/+$/,
   ""
 );
-const TORRENTIO_TIMEOUT_MS = 8_000;
 
 export type ReleaseCodec = "h264" | "hevc" | "av1" | "unknown";
 export type ReleaseContainer = "mp4" | "mkv" | "webm" | "mov" | "unknown";
@@ -744,15 +745,146 @@ export function buildKindPath(params: {
     : `stream/movie/${params.imdbId}.json`;
 }
 
-/** Shared fetch + JSON parse for either Torrentio endpoint. Never throws; returns null on any failure. */
-async function fetchTorrentioJson(url: string): Promise<TorrentioResponseRaw | null> {
-  const res = await fetch(url, {
-    headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(TORRENTIO_TIMEOUT_MS),
-    cache: "no-store",
+/** How the index answered one request. "ok" means at least one stream came back; "empty" is a valid answer that lists none. */
+export type TorrentioOutcome = "ok" | "empty" | "http_error" | "timeout" | "network_error" | "bad_json";
+/** Which request a fetch report is about: the Real-Debrid-configured title lookup, the un-configured one, or a Kitsu entry. */
+export type TorrentioEndpoint = "configured" | "unconfigured" | "kitsu";
+/** One index request as the server records it. A type alias, so it passes as an event's fields. */
+export type TorrentioFetchInfo = {
+  endpoint: TorrentioEndpoint;
+  outcome: TorrentioOutcome;
+  status?: number;
+  ms: number;
+  count: number;
+  retried: boolean;
+};
+
+/**
+ * Timings of the index request. Exported so a test can exercise a timeout or
+ * the retry without waiting out the real values.
+ */
+export const torrentioTiming = {
+  /** Abort a single index request after this long. */
+  timeoutMs: 8_000,
+  /** Wait this long before asking again after an answer that was not streams. */
+  retryDelayMs: 1_200,
+  /** A first attempt that took longer than this is not retried: the index is slow, and asking again would only double the wait. */
+  noRetryAfterMs: 6_000,
+};
+
+/**
+ * Where a rejection is also sent, and where each index request is reported,
+ * when something is listening. This file is bundled for the browser too (the
+ * player reads release names with it), so it cannot reach the server's event
+ * log itself: the debrid resolver sets these.
+ */
+export const torrentioEvents: {
+  onOtherTitleRejected: ((rejection: Record<string, unknown>) => void) | null;
+  /** Called once per logical request with its final outcome. Never carries the URL or a token. */
+  onFetch: ((info: TorrentioFetchInfo) => void) | null;
+} = {
+  onOtherTitleRejected: null,
+  onFetch: null,
+};
+
+/** The outcome of the index request each returned list came from, keyed by the list itself. */
+const outcomes = new WeakMap<DebridCandidate[], TorrentioOutcome>();
+
+/** How the index answered the request that produced `list`; undefined for a list no index request produced. */
+export function torrentioOutcomeOf(list: DebridCandidate[]): TorrentioOutcome | undefined {
+  return outcomes.get(list);
+}
+
+/** Tags `list` with the outcome of the index request it came from. */
+export function setTorrentioOutcome(list: DebridCandidate[], outcome: TorrentioOutcome): DebridCandidate[] {
+  outcomes.set(list, outcome);
+  return list;
+}
+
+/** True when the index could not be asked successfully. "empty" is not a failure: the index answered, and it has nothing. */
+export function isTorrentioIndexFailure(outcome: TorrentioOutcome | undefined): boolean {
+  return outcome === "http_error" || outcome === "timeout" || outcome === "network_error" || outcome === "bad_json";
+}
+
+/** One index request as it ended: its outcome, and the streams it listed when it answered with a list. */
+interface IndexAnswer {
+  outcome: TorrentioOutcome;
+  status?: number;
+  count: number;
+  /** Set for "ok" and "empty" answers only. */
+  data: TorrentioResponseRaw | null;
+}
+
+/** Streams listed by an index body, or null when the body is not an index answer at all. */
+function indexStreamCount(body: unknown): number | null {
+  const streams = (body as TorrentioResponseRaw | null)?.streams;
+  return Array.isArray(streams) ? streams.length : null;
+}
+
+/** The outcome of a request that ended with an error. Timeouts and aborts are the index being too slow; a body that will not parse is the index answering badly. */
+function failureOutcome(error: unknown): TorrentioOutcome {
+  if (error instanceof SyntaxError) return "bad_json";
+  const name = (error as { name?: unknown } | null)?.name;
+  return name === "TimeoutError" || name === "AbortError" ? "timeout" : "network_error";
+}
+
+/** One attempt at the index. Never throws. */
+async function askIndexOnce(url: string): Promise<IndexAnswer> {
+  let status: number | undefined;
+  try {
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(torrentioTiming.timeoutMs),
+      cache: "no-store",
+    });
+    status = res.status;
+    if (!res.ok) return { outcome: "http_error", status, count: 0, data: null };
+    const body: unknown = JSON.parse(await res.text());
+    const count = indexStreamCount(body);
+    if (count === null) return { outcome: "bad_json", status, count: 0, data: null };
+    return { outcome: count > 0 ? "ok" : "empty", status, count, data: body as TorrentioResponseRaw };
+  } catch (error) {
+    return { outcome: failureOutcome(error), status, count: 0, data: null };
+  }
+}
+
+/** The same index URL under a query no cached answer carries, so the retry reaches the index rather than an edge cache. */
+function withCacheBuster(url: string): string {
+  return `${url}${url.includes("?") ? "&" : "?"}retry=${Date.now()}`;
+}
+
+/**
+ * One logical index request. An answer that is not streams is asked for once
+ * more after a short wait: an empty answer is often a transient edge-cached
+ * one, and an error or timeout is often momentary. A first attempt that
+ * already took long is not retried. The request is reported once, with the
+ * outcome that stands. Never throws.
+ */
+async function askIndex(url: string, endpoint: TorrentioEndpoint): Promise<IndexAnswer> {
+  const started = Date.now();
+  let answer = await askIndexOnce(url);
+  const retried = answer.outcome !== "ok" && Date.now() - started <= torrentioTiming.noRetryAfterMs;
+  if (retried) {
+    await new Promise((resolve) => setTimeout(resolve, torrentioTiming.retryDelayMs));
+    answer = await askIndexOnce(withCacheBuster(url));
+  }
+  torrentioEvents.onFetch?.({
+    endpoint,
+    outcome: answer.outcome,
+    status: answer.status,
+    ms: Date.now() - started,
+    count: answer.count,
+    retried,
   });
-  if (!res.ok) return null;
-  return (await res.json()) as TorrentioResponseRaw;
+  return answer;
+}
+
+/** Candidates from an index answer, tagged with how the index answered. An answer that lists no streams yields none. */
+function candidatesFrom(
+  answer: IndexAnswer,
+  parse: (data: TorrentioResponseRaw) => DebridCandidate[]
+): DebridCandidate[] {
+  return setTorrentioOutcome(answer.data ? parse(answer.data) : [], answer.outcome);
 }
 
 /**
@@ -764,15 +896,6 @@ async function fetchTorrentioJson(url: string): Promise<TorrentioResponseRaw | n
  * `isSourcePlayableHere`) can present them honestly without auto-selecting
  * an incompatible release.
  */
-/**
- * Where a rejection is also sent, when something is listening. This file is
- * bundled for the browser too (the player reads release names with it), so it
- * cannot reach the server's event log itself: the debrid resolver sets this.
- */
-export const torrentioEvents: { onOtherTitleRejected: ((rejection: Record<string, unknown>) => void) | null } = {
-  onOtherTitleRejected: null,
-};
-
 function parseTorrentioStreams(
   data: TorrentioResponseRaw,
   configuredDebrid: boolean,
@@ -898,11 +1021,13 @@ export async function fetchTorrentioCandidates(
     const configSegment = `realdebrid=${encodeURIComponent(params.rdToken)}`;
     const kindPath = buildKindPath(params);
     const url = `${TORRENTIO_BASE}/${configSegment}/${kindPath}`;
-    const data = await fetchTorrentioJson(url);
-    if (!data) return [];
-    return parseTorrentioStreams(data, true, params.mediaType, params.originalLanguage, wantedFrom(params));
+    const answer = await askIndex(url, "configured");
+    return candidatesFrom(answer, (data) =>
+      parseTorrentioStreams(data, true, params.mediaType, params.originalLanguage, wantedFrom(params))
+    );
   } catch {
-    return [];
+    // The answer could not be read into candidates: a failed index, not one with no releases.
+    return setTorrentioOutcome([], "bad_json");
   }
 }
 
@@ -921,14 +1046,16 @@ export async function fetchTorrentioKitsuCandidates(params: {
   try {
     const configSegment = params.rdToken ? `/realdebrid=${encodeURIComponent(params.rdToken)}` : "";
     const url = `${TORRENTIO_BASE}${configSegment}/stream/series/kitsu:${params.kitsuId}:${params.episode}.json`;
-    const data = await fetchTorrentioJson(url);
-    if (!data) return [];
+    const answer = await askIndex(url, "kitsu");
     // Kitsu indexes anime, whose original language is Japanese. Its episodes
     // are numbered through the whole run, so only the show is checked.
     const wanted = params.facts === undefined ? undefined : { facts: params.facts };
-    return parseTorrentioStreams(data, Boolean(params.rdToken), "tv", ANIME_ORIGINAL_LANGUAGE, wanted);
+    return candidatesFrom(answer, (data) =>
+      parseTorrentioStreams(data, Boolean(params.rdToken), "tv", ANIME_ORIGINAL_LANGUAGE, wanted)
+    );
   } catch {
-    return [];
+    // The answer could not be read into candidates: a failed index, not one with no releases.
+    return setTorrentioOutcome([], "bad_json");
   }
 }
 
@@ -948,10 +1075,12 @@ export async function fetchTorrentioCandidatesNoDebrid(
 ): Promise<DebridCandidate[]> {
   try {
     const url = `${TORRENTIO_BASE}/${buildKindPath(params)}`;
-    const data = await fetchTorrentioJson(url);
-    if (!data) return [];
-    return parseTorrentioStreams(data, false, params.mediaType, params.originalLanguage, wantedFrom(params));
+    const answer = await askIndex(url, "unconfigured");
+    return candidatesFrom(answer, (data) =>
+      parseTorrentioStreams(data, false, params.mediaType, params.originalLanguage, wantedFrom(params))
+    );
   } catch {
-    return [];
+    // The answer could not be read into candidates: a failed index, not one with no releases.
+    return setTorrentioOutcome([], "bad_json");
   }
 }

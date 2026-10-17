@@ -1,5 +1,5 @@
 /// <reference types="bun-types" />
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import {
   isHi10AvcRelease,
   debridHeightBucket,
@@ -18,6 +18,12 @@ import {
   isMoviePackRelease,
   isStereoscopicRelease,
   fetchTorrentioKitsuCandidates,
+  fetchTorrentioCandidatesNoDebrid,
+  isTorrentioIndexFailure,
+  torrentioEvents,
+  torrentioOutcomeOf,
+  torrentioTiming,
+  type TorrentioFetchInfo,
 } from "./torrentio";
 
 describe("anime-sized releases", () => {
@@ -893,5 +899,153 @@ describe("fetchTorrentioKitsuCandidates", () => {
     expect(asked[0]).toEndWith("/stream/series/kitsu:46474:3.json");
     expect(asked[0]).not.toContain("realdebrid");
     expect(found.length).toBe(1);
+  });
+});
+
+describe("index request outcome", () => {
+  const originalFetch = globalThis.fetch;
+  const originalTiming = { ...torrentioTiming };
+  const RD_TOKEN = "test-rd-token";
+  const RELEASE = { title: "Movie.2024.1080p.WEB-DL.H264-GRP\n👤 30 💾 3 GB", infoHash: "a".repeat(40) };
+  type Reply = () => Response | Promise<Response>;
+
+  let server: ReturnType<typeof Bun.serve>;
+  /** The path and query of each request the local index received, in order. */
+  let asked: string[] = [];
+  /** How the local index answers, one reply per request; the last one repeats. */
+  let replies: Reply[] = [];
+  let events: TorrentioFetchInfo[] = [];
+
+  beforeAll(() => {
+    server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const { pathname, search } = new URL(req.url);
+        asked.push(`${pathname}${search}`);
+        const reply = replies.length > 1 ? replies.shift() : replies[0];
+        return reply ? reply() : new Response("{}", { status: 500 });
+      },
+    });
+  });
+
+  beforeEach(() => {
+    asked = [];
+    replies = [];
+    events = [];
+    torrentioTiming.timeoutMs = 2_000;
+    torrentioTiming.retryDelayMs = 20;
+    torrentioEvents.onFetch = (info) => events.push(info);
+    // Torrentio's address is fixed when the module loads, so each index request is sent to the local server instead, with its path and query kept.
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (!url.includes("/stream/")) return originalFetch(input, init);
+      const { pathname, search } = new URL(url);
+      return originalFetch(`http://127.0.0.1:${server.port}${pathname}${search}`, init);
+    }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    Object.assign(torrentioTiming, originalTiming);
+    torrentioEvents.onFetch = null;
+  });
+
+  afterAll(() => {
+    server.stop(true);
+  });
+
+  const json = (body: unknown): Reply => () =>
+    new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+  const withStreams = json({ streams: [RELEASE] });
+  const noStreams = json({ streams: [] });
+  const serverError: Reply = () => new Response("upstream error", { status: 500 });
+  const after = (ms: number, reply: Reply): Reply => () =>
+    new Promise((resolve) => setTimeout(() => resolve(reply()), ms));
+  const request = { imdbId: "tt0000021", mediaType: "movie" as const, rdToken: RD_TOKEN };
+
+  it("reports an answer with streams as ok, asked once", async () => {
+    replies = [withStreams];
+    const found = await fetchTorrentioCandidates(request);
+    expect(found.length).toBe(1);
+    expect(torrentioOutcomeOf(found)).toBe("ok");
+    expect(asked.length).toBe(1);
+    expect(events).toEqual([
+      { endpoint: "configured", outcome: "ok", status: 200, ms: expect.any(Number), count: 1, retried: false },
+    ]);
+  });
+
+  it("treats an answer that lists no streams as empty, and asks once more before believing it", async () => {
+    replies = [noStreams, noStreams];
+    const found = await fetchTorrentioCandidates(request);
+    expect(found).toEqual([]);
+    expect(torrentioOutcomeOf(found)).toBe("empty");
+    expect(isTorrentioIndexFailure(torrentioOutcomeOf(found))).toBe(false);
+    expect(asked.length).toBe(2);
+    expect(asked[0]).not.toContain("retry=");
+    expect(asked[1]).toContain("retry=");
+    expect(events.map((e) => [e.outcome, e.retried])).toEqual([["empty", true]]);
+  });
+
+  it("retries a failed first answer once, under a different URL, and the retry's answer stands", async () => {
+    replies = [serverError, withStreams];
+    const found = await fetchTorrentioCandidates(request);
+    expect(found.length).toBe(1);
+    expect(torrentioOutcomeOf(found)).toBe("ok");
+    expect(asked.length).toBe(2);
+    expect(asked[1]?.split("?")[0]).toBe(asked[0]);
+    expect(asked[1]).toContain("retry=");
+    expect(events).toEqual([expect.objectContaining({ outcome: "ok", status: 200, retried: true })]);
+    // The wait before the retry is in the elapsed time.
+    expect(events[0]?.ms ?? 0).toBeGreaterThanOrEqual(15);
+  });
+
+  it("reports an HTTP error with its status, after one retry", async () => {
+    replies = [serverError, serverError];
+    const found = await fetchTorrentioCandidates(request);
+    expect(found).toEqual([]);
+    expect(torrentioOutcomeOf(found)).toBe("http_error");
+    expect(isTorrentioIndexFailure(torrentioOutcomeOf(found))).toBe(true);
+    expect(asked.length).toBe(2);
+    expect(events).toEqual([expect.objectContaining({ outcome: "http_error", status: 500, count: 0, retried: true })]);
+  });
+
+  it("reports a body that is not JSON, or not an index answer, as bad_json", async () => {
+    replies = [() => new Response("<html>gateway</html>", { status: 200 }), json({ ok: true })];
+    const found = await fetchTorrentioCandidates(request);
+    expect(found).toEqual([]);
+    expect(torrentioOutcomeOf(found)).toBe("bad_json");
+    expect(asked.length).toBe(2);
+  });
+
+  it("reports a request that runs past the timeout as timeout", async () => {
+    torrentioTiming.timeoutMs = 50;
+    replies = [after(400, noStreams)];
+    const found = await fetchTorrentioCandidates(request);
+    expect(torrentioOutcomeOf(found)).toBe("timeout");
+    expect(asked.length).toBe(2);
+    expect(events[0]?.status).toBeUndefined();
+  });
+
+  it("does not retry a first attempt that already took longer than the limit", async () => {
+    torrentioTiming.noRetryAfterMs = 20;
+    replies = [after(80, serverError), withStreams];
+    const found = await fetchTorrentioCandidates(request);
+    expect(torrentioOutcomeOf(found)).toBe("http_error");
+    expect(asked.length).toBe(1);
+    expect(events).toEqual([expect.objectContaining({ outcome: "http_error", retried: false })]);
+  });
+
+  it("reports the Kitsu and un-configured requests under their own endpoints, and never reports the token", async () => {
+    replies = [serverError, serverError];
+    const kitsu = await fetchTorrentioKitsuCandidates({ kitsuId: 46474, episode: 3, rdToken: RD_TOKEN });
+    expect(torrentioOutcomeOf(kitsu)).toBe("http_error");
+
+    replies = [withStreams];
+    const plain = await fetchTorrentioCandidatesNoDebrid({ imdbId: "tt0000021", mediaType: "movie" });
+    expect(torrentioOutcomeOf(plain)).toBe("ok");
+
+    expect(events.map((e) => e.endpoint)).toEqual(["kitsu", "unconfigured"]);
+    expect(JSON.stringify(events)).not.toContain(RD_TOKEN);
+    for (const event of events) expect(Object.keys(event)).not.toContain("url");
   });
 });

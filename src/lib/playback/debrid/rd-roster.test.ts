@@ -82,6 +82,7 @@ describe("Real-Debrid roster — full + fast paths", () => {
   let debridOutlook: OutlookFn;
   let isIncompleteDebridRoster: IncompleteFn;
   let resetSlotMisses: ResetSlotMissesFn;
+  let torrentioTiming: typeof import("./torrentio").torrentioTiming;
   let server: ReturnType<typeof Bun.serve>;
   /** Milliseconds a release takes to resolve, by hash: a slow one stands in for a slow Real-Debrid answer. */
   const resolveDelays = new Map<string, number>();
@@ -130,6 +131,7 @@ describe("Real-Debrid roster — full + fast paths", () => {
       isIncompleteDebridRoster,
       __resetRdSlotMissCacheForTests: resetSlotMisses,
     } = await import("./index"));
+    ({ torrentioTiming } = await import("./torrentio"));
   });
 
   afterAll(() => {
@@ -923,5 +925,91 @@ describe("Real-Debrid roster — full + fast paths", () => {
     const sources = await resolveFastDebridSources({ tmdbId: 1, mediaType: "movie" });
     expect(sources).toEqual([]);
     expect(calls).toBe(0);
+  });
+
+  describe("a Torrentio index that cannot be asked", () => {
+    const originalAd = process.env.ALLDEBRID_API_KEY;
+    let savedTiming: { timeoutMs: number; retryDelayMs: number; noRetryAfterMs: number };
+
+    beforeEach(() => {
+      savedTiming = { ...torrentioTiming };
+      // The wait before the retry is not what these cases are about.
+      torrentioTiming.retryDelayMs = 0;
+    });
+
+    afterEach(() => {
+      Object.assign(torrentioTiming, savedTiming);
+      if (originalAd === undefined) delete process.env.ALLDEBRID_API_KEY;
+      else process.env.ALLDEBRID_API_KEY = originalAd;
+    });
+
+    /** Answers every Torrentio request with `reply` and returns how many came; everything else goes out as usual. */
+    function mockTorrentioReply(reply: () => Response): () => number {
+      let asked = 0;
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (url.includes("torrentio") && url.includes("/stream/")) {
+          asked++;
+          return reply();
+        }
+        return originalFetch(input as never, init);
+      }) as unknown as typeof fetch;
+      return () => asked;
+    }
+
+    it("is not settled when both attempts fail, and the next ask searches again instead of remembering nothing", async () => {
+      const asked = mockTorrentioReply(() => new Response("upstream error", { status: 500 }));
+      // A roster an earlier test left running must not answer for this one.
+      const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie", forceRefresh: true });
+      expect(sources).toEqual([]);
+      expect(asked()).toBe(2);
+      expect(debridOutlook(sources)).toEqual({ fourKSettled: false, settled: false });
+      expect(isIncompleteDebridRoster(sources)).toBe(true);
+
+      mockTorrentioStreams(buildStreams());
+      const retry = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+      expect(retry.some((s) => s.id.includes("native-1080"))).toBe(true);
+    });
+
+    it("is a genuine empty answer when the index lists no streams on both attempts", async () => {
+      const asked = mockTorrentioReply(
+        () => new Response(JSON.stringify({ streams: [] }), { status: 200, headers: { "Content-Type": "application/json" } })
+      );
+      const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie", forceRefresh: true });
+      expect(sources).toEqual([]);
+      expect(asked()).toBe(2);
+      expect(debridOutlook(sources)).toEqual({ fourKSettled: true, settled: true });
+      expect(isIncompleteDebridRoster(sources)).toBe(false);
+    });
+
+    describe("AllDebrid alone", () => {
+      beforeEach(() => {
+        delete process.env.REAL_DEBRID_API_TOKEN;
+        process.env.ALLDEBRID_API_KEY = "test-ad-key";
+        cacheStore.set(AD_KEY, AD_FILE);
+      });
+
+      it("keeps the file it has cached, but is not settled while the index is unreachable", async () => {
+        const asked = mockTorrentioReply(() => new Response("upstream error", { status: 500 }));
+        const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie", forceRefresh: true });
+        expect(sources.map((s) => s.provider)).toEqual(["AllDebrid"]);
+        expect(asked()).toBe(2);
+        expect(isIncompleteDebridRoster(sources)).toBe(true);
+        expect(debridOutlook(sources)).toEqual({ fourKSettled: false, settled: false });
+      });
+
+      it("is not settled, and its failed search is not reused by the next ask", async () => {
+        cacheStore.delete(AD_KEY);
+        const asked = mockTorrentioReply(() => new Response("upstream error", { status: 500 }));
+        // The first ask forces a fresh search, so a finished search left by an earlier test cannot answer for this one.
+        const first = await resolveDebridSources({ tmdbId: 1, mediaType: "movie", forceRefresh: true });
+        expect(first).toEqual([]);
+        expect(asked()).toBe(2);
+        expect(debridOutlook(first)).toEqual({ fourKSettled: false, settled: false });
+
+        await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+        expect(asked()).toBe(4);
+      });
+    });
   });
 });

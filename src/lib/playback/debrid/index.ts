@@ -95,6 +95,10 @@ import {
   type ReleaseCompat,
   type ReleaseContainer,
   torrentioEvents,
+  isTorrentioIndexFailure,
+  setTorrentioOutcome,
+  torrentioOutcomeOf,
+  type TorrentioOutcome,
 } from "./torrentio";
 import { noteCdnLink, withCdnRates } from "./cdn-rate";
 import { bitrateSustainabilityRank } from "../source-quality";
@@ -353,12 +357,18 @@ async function fetchTorrentioCandidatesForTitle(
   ]);
   const offered = { imdbId, season: req.season ?? 0, episode: req.episode ?? 0 };
   // Runtime turns file sizes into bitrates, so 4K that cannot stream smoothly ranks last.
-  return orderForStreaming(withoutRefused(offered, candidates), runtime);
+  return carryOutcome(candidates, orderForStreaming(withoutRefused(offered, candidates), runtime));
 }
 
 /** Leaves out releases already opened as this title and found not to play as it (see refused-releases.ts). */
 function withoutRefused(offered: { imdbId: string; season: number; episode: number }, candidates: DebridCandidate[]): DebridCandidate[] {
   return candidates.filter((candidate) => !isRefusedRelease(offered, candidate.title));
+}
+
+/** A list derived from `from` by filtering or reordering, which still says how the index answered. */
+function carryOutcome(from: DebridCandidate[], derived: DebridCandidate[]): DebridCandidate[] {
+  const outcome = torrentioOutcomeOf(from);
+  return outcome ? setTorrentioOutcome(derived, outcome) : derived;
 }
 
 /**
@@ -373,6 +383,9 @@ async function fetchRankedTorrentioCandidates(
   rdToken: string | null
 ): Promise<DebridCandidate[]> {
   const facts = titleFactsFor(imdbId) ?? (await loadTitleFacts(imdbId, req.tmdbId, req.mediaType));
+  // A Kitsu lookup that failed, as opposed to one that found nothing, is kept
+  // in mind: the IMDb lookup after it cannot vouch for an empty answer.
+  let kitsuFailure: TorrentioOutcome | undefined;
   if (req.mediaType === "tv" && req.season && req.episode) {
     const kitsu = await resolveKitsuEpisode(req.tmdbId, req.season, req.episode);
     if (kitsu) {
@@ -381,6 +394,8 @@ async function fetchRankedTorrentioCandidates(
       const entry = { kitsuId: kitsu.kitsuId, episode: kitsu.episode, facts: known };
       const byKitsu = await fetchTorrentioKitsuCandidates(rdToken ? { ...entry, rdToken } : entry);
       if (byKitsu.length) return byKitsu;
+      const outcome = torrentioOutcomeOf(byKitsu);
+      if (outcome && isTorrentioIndexFailure(outcome)) kitsuFailure = outcome;
     }
   }
   const title = {
@@ -391,7 +406,11 @@ async function fetchRankedTorrentioCandidates(
     originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
     facts,
   };
-  return rdToken ? fetchTorrentioCandidates({ ...title, rdToken }) : fetchTorrentioCandidatesNoDebrid(title);
+  const byImdb = rdToken
+    ? await fetchTorrentioCandidates({ ...title, rdToken })
+    : await fetchTorrentioCandidatesNoDebrid(title);
+  if (kitsuFailure && torrentioOutcomeOf(byImdb) === "empty") return setTorrentioOutcome(byImdb, kitsuFailure);
+  return byImdb;
 }
 
 interface KeyBase {
@@ -1154,7 +1173,8 @@ function buildRdSource(
   return { record, source };
 }
 
-type RosterResult = { sources: PlaybackSource[]; candidates: DebridCandidate[] };
+/** `indexFailed` is set when the Torrentio index could not be asked, so nothing was looked for and the roster is not complete. */
+type RosterResult = { sources: PlaybackSource[]; candidates: DebridCandidate[]; indexFailed?: boolean };
 
 /**
  * One live roster resolve per title at a time. The fast path starts a
@@ -1238,6 +1258,7 @@ const RD_GOOD_ENOUGH_HEIGHT = 1080;
 export const RD_4K_SOFT_DEADLINE_MS = 18_000;
 
 torrentioEvents.onOtherTitleRejected = (rejection) => recordEvent("web", "debrid_other_title_rejected", rejection);
+torrentioEvents.onFetch = (info) => recordEvent("web", "torrentio_fetch", info);
 
 const reaches = (sources: readonly PlaybackSource[], height: number) => sources.some((s) => (s.maxHeight ?? 0) >= height);
 /** The tallest file each service gave, for the record of a search. */
@@ -1295,7 +1316,7 @@ async function resolveRealDebridSlots(
   rdToken: string,
   preFetchedCandidates?: DebridCandidate[],
   entry?: RosterEntry
-): Promise<{ sources: PlaybackSource[]; candidates: DebridCandidate[] }> {
+): Promise<RosterResult> {
   const progress = entry?.progress;
   const { hits, missing, occupiedIdentities } = await readCachedRdSlots(keyBase, rdToken);
   progress?.push(...hits);
@@ -1327,6 +1348,10 @@ async function resolveRealDebridSlots(
   const candidates =
     preFetchedCandidates ??
     (await fetchTorrentioCandidatesForTitle(req, keyBase.imdbId, rdToken));
+  // A failed index request offers no releases to try. Say so, and remember no slot as unfillable, since the index gave no answer about any of them.
+  if (isTorrentioIndexFailure(torrentioOutcomeOf(candidates))) {
+    return { sources: hits, candidates, indexFailed: true };
+  }
 
   const slotOptions = buildRdSlotOptions(candidates, missing, occupiedIdentities);
   // The slot groups draw from disjoint candidate pools (native 4K, native
@@ -1748,6 +1773,8 @@ export async function resolveDebridSources(
     let rdCandidates: DebridCandidate[] = [];
     let roster: RosterEntry | null = null;
     let rdComplete = true;
+    let rdIndexFailed = false;
+    let torboxIndexFailed = false;
     const rdFourKOver = () => (roster ? roster.fourKOver === true : true);
     const noFourKToCome = () => rdFourKOver() && (allDebrid ? allDebrid.fourKOver : true);
     // What a 4K viewer starts on is known once a 4K file is in hand (AllDebrid's
@@ -1777,13 +1804,14 @@ export async function resolveDebridSources(
       }
       const rdToken = process.env.REAL_DEBRID_API_TOKEN as string;
       roster = resolveRealDebridSlotsShared(keyBase, req, rdToken);
-      const { sources: rdSources, candidates, complete } = await awaitRosterWithSoftDeadline(
+      const { sources: rdSources, candidates, complete, indexFailed } = await awaitRosterWithSoftDeadline(
         roster,
         undefined,
         req.want4k ? RD_4K_SOFT_DEADLINE_MS : 0,
         () => startDecided(roster?.progress ?? [])
       );
       rdComplete = complete;
+      rdIndexFailed = indexFailed === true;
       sources.push(...rdSources);
       rdCandidates = candidates;
       lap(complete ? "realDebridMs" : "realDebridPartialMs");
@@ -1804,9 +1832,12 @@ export async function resolveDebridSources(
         // endpoint. Either way the TorBox key is NEVER placed in a Torrentio
         // request — this is what lets TorBox's free tier work with NO
         // Real-Debrid configured at all.
-        const torboxSourceCandidates = rdCandidates.length
-          ? rdCandidates
-          : withoutRefused(keyBase, await fetchRankedTorrentioCandidates(req, imdbId, null));
+        let torboxSourceCandidates = rdCandidates;
+        if (!torboxSourceCandidates.length) {
+          const fetched = await fetchRankedTorrentioCandidates(req, imdbId, null);
+          torboxIndexFailed = isTorrentioIndexFailure(torrentioOutcomeOf(fetched));
+          torboxSourceCandidates = withoutRefused(keyBase, fetched);
+        }
 
         // ONE absolute deadline for the ENTIRE TorBox resolve — checkCached
         // plus every createtorrent/poll/requestdl below share it (each
@@ -1869,9 +1900,12 @@ export async function resolveDebridSources(
     // A viewer whose start is already decided is not kept waiting for the rest
     // of AllDebrid's search: what it finds later joins on the player's next ask.
     if (allDebrid) sources.push(...(startDecided(sources) ? allDebrid.progress : await allDebrid.run));
-    const settled = rdComplete && (!allDebrid || allDebrid.done);
+    // A tier whose index request failed never searched, so what it lacks cannot be called settled.
+    const indexFailed = rdIndexFailed || torboxIndexFailed || allDebrid?.indexFailed === true;
+    const fourKSettled = !indexFailed && noFourKToCome();
+    const settled = !indexFailed && rdComplete && (!allDebrid || allDebrid.done);
     if (!settled) incompleteRosters.add(sources);
-    outlooks.set(sources, { fourKSettled: noFourKToCome(), settled });
+    outlooks.set(sources, { fourKSettled, settled });
     logEvent("debrid_resolve_timing", {
       mediaType: req.mediaType,
       tmdbId: req.tmdbId,
@@ -1882,8 +1916,9 @@ export async function resolveDebridSources(
       totalMs: Date.now() - started,
       sources: sources.length,
       best: bestHeightByProvider(sources),
-      fourKSettled: noFourKToCome(),
+      fourKSettled,
       settled,
+      indexFailed,
     });
 
     return sources;
@@ -1911,6 +1946,8 @@ interface AllDebridRun {
   /** True once no 4K file can still come from it: any it has is already in `progress`. */
   fourKOver: boolean;
   done: boolean;
+  /** True when the index could not be asked, so the search never ran. */
+  indexFailed: boolean;
 }
 
 /** How long a finished run answers for its title: the player asks again every few seconds while an answer is partial. */
@@ -1928,13 +1965,18 @@ function resolveAllDebridTierShared(req: ResolveDebridSourcesRequest, keyBase: K
   const key = rosterKey(keyBase);
   const existing = allDebridRuns.get(key);
   if (existing && !req.forceRefresh) return existing;
-  const tier: AllDebridRun = { run: Promise.resolve([]), progress: [], fourKOver: false, done: false };
+  const tier: AllDebridRun = { run: Promise.resolve([]), progress: [], fourKOver: false, done: false, indexFailed: false };
   tier.run = resolveAllDebridTier(req, keyBase, tier)
     .catch(() => tier.progress)
     .then((sources) => {
       tier.progress = sources;
       tier.fourKOver = true;
       tier.done = true;
+      // A search whose index was never asked is not an answer to reuse: the next ask starts a fresh one.
+      if (tier.indexFailed) {
+        if (allDebridRuns.get(key) === tier) allDebridRuns.delete(key);
+        return sources;
+      }
       const forget = setTimeout(() => {
         if (allDebridRuns.get(key) === tier) allDebridRuns.delete(key);
       }, ALLDEBRID_RUN_REUSE_MS);
@@ -1960,6 +2002,11 @@ async function resolveAllDebridTier(
   sources.push(...hits);
 
   const [raw, runtime] = await Promise.all([fetchRankedTorrentioCandidates(req, keyBase.imdbId, null), titleRuntimeMinutes(req)]);
+  if (isTorrentioIndexFailure(torrentioOutcomeOf(raw))) {
+    // Nothing to try. The run is marked, so it is neither settled nor reused.
+    if (tier) tier.indexFailed = true;
+    return sources;
+  }
   const candidates = orderForStreaming(withoutRefused(keyBase, raw), runtime);
   const episodeTarget =
     req.mediaType === "tv" && req.season && req.episode
