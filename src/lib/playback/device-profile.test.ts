@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   bufferProfileFor,
   deviceClassFromUserAgent,
+  mediaPlatformFor,
   uaPlatformToken,
 } from "./device-profile";
 
@@ -68,39 +69,136 @@ describe("uaPlatformToken", () => {
   });
 });
 
+const CHROME_WINDOWS =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+  "Chrome/131.0.0.0 Safari/537.36";
+const EDGE_WINDOWS = `${CHROME_WINDOWS} Edg/131.0.0.0`;
+const OPERA_WINDOWS = `${CHROME_WINDOWS} OPR/116.0.0.0`;
+const CHROME_MAC =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) " +
+  "Chrome/131.0.0.0 Safari/537.36";
+const EDGE_MAC = `${CHROME_MAC} Edg/131.0.0.0`;
+const OPERA_MAC = `${CHROME_MAC} OPR/116.0.0.0`;
+const FIREFOX_WINDOWS =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0";
+const FIREFOX_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.7; rv:133.0) Gecko/20100101 Firefox/133.0";
+const SAFARI_MAC =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) " +
+  "Version/18.1 Safari/605.1.15";
+const IPHONE_SAFARI =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 " +
+  "(KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1";
+const ANDROID_CHROME =
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) " +
+  "Chrome/131.0.0.0 Mobile Safari/537.36";
+const SHIELD_ANDROID_TV =
+  "Mozilla/5.0 (Linux; Android 11; SHIELD Android TV Build/RQ1A.210105.003) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const CHROMECAST_GOOGLE_TV =
+  "Mozilla/5.0 (Linux; Android 12; Chromecast Build/STTE.240206.002) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+const FIRE_TV_STICK =
+  "Mozilla/5.0 (Linux; Android 9; AFTKA Build/PS7233) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36";
+
+/** A browser with no touch screen, as a desktop reports it. */
+const classify = (userAgent: string, maxTouchPoints = 0) => mediaPlatformFor({ userAgent, maxTouchPoints, tv: false });
+
+describe("mediaPlatformFor", () => {
+  it("places Chrome, Edge and Opera in the Chromium budget", () => {
+    expect(classify(CHROME_WINDOWS)).toBe("chromium");
+    expect(classify(CHROME_MAC)).toBe("chromium");
+    expect(classify(EDGE_WINDOWS)).toBe("chromium");
+    expect(classify(OPERA_WINDOWS)).toBe("chromium");
+    expect(classify(EDGE_MAC)).toBe("chromium");
+    expect(classify(OPERA_MAC)).toBe("chromium");
+  });
+
+  it("places Firefox in its own budget", () => {
+    expect(classify(FIREFOX_WINDOWS)).toBe("firefox");
+    expect(classify(FIREFOX_MAC)).toBe("firefox");
+  });
+
+  it("places macOS Safari in the Safari budget, while Chrome's Safari token stays Chromium", () => {
+    expect(classify(SAFARI_MAC)).toBe("safari");
+    expect(classify(CHROME_MAC)).toBe("chromium");
+  });
+
+  it("places an iPhone in the iOS budget", () => {
+    expect(classify(IPHONE_SAFARI)).toBe("ios");
+  });
+
+  it("places an iPad in the iOS budget, though it reports a Mac and a touch screen", () => {
+    expect(classify(SAFARI_MAC, 5)).toBe("ios");
+    // A real Mac has no touch points, so the same agent with none is still Safari.
+    expect(classify(SAFARI_MAC, 0)).toBe("safari");
+  });
+
+  it("places Android Chrome in the Android budget", () => {
+    expect(classify(ANDROID_CHROME)).toBe("android");
+  });
+
+  it("places the living-room browsers in the TV budget", () => {
+    expect(classify(LG_C5)).toBe("tv");
+    expect(classify(SAMSUNG)).toBe("tv");
+    expect(classify(SHIELD_ANDROID_TV)).toBe("tv");
+    expect(classify(CHROMECAST_GOOGLE_TV)).toBe("tv");
+    expect(classify(FIRE_TV_STICK)).toBe("tv");
+  });
+
+  it("gives any browser the TV budget when the TV decision says so", () => {
+    // A panel that reports plain desktop Chrome is caught by its input profile or heap limit.
+    expect(mediaPlatformFor({ userAgent: CHROME_WINDOWS, maxTouchPoints: 0, tv: true })).toBe("tv");
+  });
+
+  it("falls back to the Chromium budget for an agent it does not recognise", () => {
+    expect(classify("")).toBe("chromium");
+    expect(classify("something/1.0")).toBe("chromium");
+  });
+});
+
 describe("bufferProfileFor", () => {
-  it("leaves the desktop envelope exactly as it was", () => {
-    expect(bufferProfileFor("desktop")).toEqual({
-      maxBufferLengthS: 60,
-      maxMaxBufferLengthS: 90,
-      maxBufferSizeBytes: 96_000_000,
-      backBufferLengthS: 30,
+  it("gives Chromium the desktop budget", () => {
+    expect(bufferProfileFor("chromium")).toEqual({
+      forwardBytes: 90_000_000,
+      backBytes: 20_000_000,
+      forwardMaxS: 120,
+      backMaxS: 30,
+      fallbackForwardS: 30,
+      fallbackBackS: 10,
       abrInitialEstimateBps: 10_000_000,
     });
   });
 
-  it("gives a TV a smaller duration envelope than desktop", () => {
-    const tv = bufferProfileFor("tv");
-    const desktop = bufferProfileFor("desktop");
-    expect(tv.maxBufferSizeBytes).toBeLessThan(desktop.maxBufferSizeBytes);
-    expect(tv.maxMaxBufferLengthS).toBeLessThan(desktop.maxMaxBufferLengthS);
-    expect(tv.backBufferLengthS).toBeLessThan(desktop.backBufferLengthS);
+  it("keeps each desktop budget under the cap of its browser", () => {
+    // Chrome refuses appends at about 150 MB, Firefox at about 100 MB, and Safari evicts at about 290 MB.
+    expect(bufferProfileFor("chromium").forwardBytes).toBeLessThan(150_000_000);
+    expect(bufferProfileFor("firefox").forwardBytes).toBeLessThan(100_000_000);
+    expect(bufferProfileFor("safari").forwardBytes).toBeLessThan(290_000_000);
   });
 
-  it("still reserves enough bytes for a 4K HEVC fragment", () => {
-    expect(bufferProfileFor("tv").maxBufferSizeBytes).toBeGreaterThanOrEqual(
-      40_000_000
-    );
+  it("gives the TV the smallest budget in every dimension", () => {
+    const tv = bufferProfileFor("tv");
+    for (const platform of ["chromium", "firefox", "safari", "ios", "android"] as const) {
+      const other = bufferProfileFor(platform);
+      expect(tv.forwardBytes).toBeLessThan(other.forwardBytes);
+      expect(tv.backBytes).toBeLessThan(other.backBytes);
+      expect(tv.forwardMaxS).toBeLessThan(other.forwardMaxS);
+      expect(tv.backMaxS).toBeLessThan(other.backMaxS);
+    }
+  });
+
+  it("still holds several 4K HEVC fragments on a TV", () => {
+    // A 4K HEVC fragment is 4 to 8 MB.
+    expect(bufferProfileFor("tv").forwardBytes).toBeGreaterThanOrEqual(5 * 8_000_000);
   });
 
   it("opens ABR high enough on a TV that 4K is eligible", () => {
-    expect(bufferProfileFor("tv").abrInitialEstimateBps).toBeGreaterThanOrEqual(
-      10_000_000
-    );
+    expect(bufferProfileFor("tv").abrInitialEstimateBps).toBeGreaterThanOrEqual(10_000_000);
   });
 
-  it("still buffers enough on a TV to ride out a proxy hiccup", () => {
+  it("starts a TV with at least 10 s ahead, enough to ride out a proxy hiccup", () => {
     // Too small and every double-hop stall becomes a rebuffer.
-    expect(bufferProfileFor("tv").maxBufferLengthS).toBeGreaterThanOrEqual(10);
+    expect(bufferProfileFor("tv").fallbackForwardS).toBeGreaterThanOrEqual(10);
   });
 });

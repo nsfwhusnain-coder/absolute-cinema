@@ -185,6 +185,7 @@ export async function resolvePlayable(
       slicedPlaylistUrl?: string;
       seekPoints?: number[];
       durationS?: number;
+      bitrateBps?: number | null;
       dynamicRange?: string;
       audioIndex?: number | null;
       audioTracks?: RemuxAudioTrack[];
@@ -198,6 +199,7 @@ export async function resolvePlayable(
         kind: "hls",
         url: body.playlistUrl,
         ...(body.slicedPlaylistUrl && body.seekPoints?.length ? { slicedUrl: body.slicedPlaylistUrl } : {}),
+        ...(body.bitrateBps ? { declaredBitrateBps: body.bitrateBps } : {}),
         withCredentials: true,
         nativeHls: preferNativeHls(video, source),
       },

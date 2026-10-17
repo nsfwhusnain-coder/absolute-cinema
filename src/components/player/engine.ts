@@ -15,6 +15,7 @@
 import { leaveRemuxSession, remuxSessionIdOf } from "@/lib/playback/remux-leave";
 import type HlsType from "hls.js";
 import type { ErrorData, Level, MediaPlaylist } from "hls.js";
+import { BufferBudget } from "@/lib/playback/buffer-budget";
 import { activeBufferProfile } from "@/lib/playback/device-profile";
 import { HLS_WORKER_PATH, hlsWorkerSupportedHere } from "@/lib/playback/player-engine";
 import { seekPointAtOrBefore, snapSeek } from "@/lib/playback/seek-points";
@@ -32,6 +33,8 @@ export interface Playable {
   nativeHls?: boolean;
   /** Same-origin stream that needs the session cookie. */
   withCredentials?: boolean;
+  /** The file's average bitrate in bits per second, when the server knows it (a remux does). */
+  declaredBitrateBps?: number;
 }
 
 export interface QualityLevel {
@@ -145,6 +148,8 @@ export class MediaEngine {
       startAt = seekPointAtOrBefore(this.seekPoints, startAt);
     }
     const profile = activeBufferProfile();
+    const budget = new BufferBudget(profile, playable.declaredBitrateBps);
+    const initial = budget.lengths();
     const hls = new Hls({
       enableWorker: hlsWorkerSupportedHere(),
       workerPath: HLS_WORKER_PATH,
@@ -157,10 +162,10 @@ export class MediaEngine {
       abrEwmaDefaultEstimate: profile.abrInitialEstimateBps,
       abrMaxWithRealBitrate: true,
       minAutoBitrate: MIN_AUTO_BITRATE_BPS,
-      maxBufferLength: profile.maxBufferLengthS,
-      maxMaxBufferLength: profile.maxMaxBufferLengthS,
-      maxBufferSize: profile.maxBufferSizeBytes,
-      backBufferLength: profile.backBufferLengthS,
+      maxBufferLength: initial.maxBufferLengthS,
+      maxMaxBufferLength: initial.maxMaxBufferLengthS,
+      maxBufferSize: initial.maxBufferSize,
+      backBufferLength: initial.backBufferLengthS,
       maxBufferHole: 0.8,
       nudgeMaxRetry: 8,
       manifestLoadingTimeOut: MANIFEST_TIMEOUT_MS,
@@ -177,6 +182,14 @@ export class MediaEngine {
     hls.subtitleDisplay = false;
     this.hls = hls;
 
+    // The buffer's length follows the bytes per second actually loaded, so it stays under what the browser holds.
+    const applyBudget = () => {
+      const lengths = budget.lengths();
+      hls.config.maxBufferLength = lengths.maxBufferLengthS;
+      hls.config.maxMaxBufferLength = lengths.maxMaxBufferLengthS;
+      hls.config.backBufferLength = lengths.backBufferLengthS;
+      hls.config.maxBufferSize = lengths.maxBufferSize;
+    };
     hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
       if (generation !== this.generation) return;
       // Open on a sharp rendition instead of hls.js's cautious lowest-first
@@ -184,7 +197,15 @@ export class MediaEngine {
       const start = openingLevel(data.levels, startHeight);
       if (start >= 0) hls.startLevel = start;
       if (start >= 0 && options.lockLevel) hls.nextLevel = start;
+      // A web stream's manifest states its opening rendition's bitrate, which the budget uses until a segment is measured.
+      if (start >= 0) budget.seed(data.levels[start]!.bitrate);
+      applyBudget();
       this.handlers.onLevels(toLevels(data.levels));
+    });
+    hls.on(Hls.Events.FRAG_LOADED, (_e, data) => {
+      if (generation !== this.generation) return;
+      budget.observe(data.frag.stats.total, data.frag.duration);
+      applyBudget();
     });
     hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => {
       if (generation === this.generation) this.handlers.onLevelSwitched(data.level);
@@ -202,6 +223,10 @@ export class MediaEngine {
       if (isRemuxRefusal(data)) {
         this.handlers.onFatal(`remux:${data.response?.code}`);
         return;
+      }
+      if (data.details === Hls.ErrorDetails.BUFFER_FULL_ERROR) {
+        budget.full();
+        applyBudget();
       }
       if (!data.fatal) return;
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR && this.networkRecoveries < 1) {
