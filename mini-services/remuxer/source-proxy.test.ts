@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createServer, type Server } from "node:http";
 import { connect, type AddressInfo } from "node:net";
-import { cachedAt, lanesFor, parseRange, rampedPieceBytes, serveRange, steadyPieceBytes, windowEnd, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf } from "./source-proxy";
+import { cachedAt, lanesFor, parseRange, rampedPieceBytes, serveRange, steadyPieceBytes, windowEnd, __setReadIdleForTests, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf } from "./source-proxy";
 import { __setLinkPacingForTests, linkRefused } from "./link-pacer";
 
 /** Byte `i` of the pretend source file, so any slice can be checked without keeping the file. */
@@ -31,6 +31,10 @@ function listen(server: Server): Promise<number> {
 interface UpstreamOptions {
   /** Sends at this rate on each connection, instead of as fast as it is read. */
   bytesPerSecond?: number;
+  /** On the first request only, stops sending after this many bytes without closing: a connection gone silent. */
+  silentAfter?: number;
+  /** Answers request number `request` with a Content-Range that starts this many bytes later than asked. */
+  shiftStart?: (request: number) => number;
   /** After this many bytes of a response, sends at `thenBytesPerSecond` instead: a connection that speeds up. */
   slowFor?: number;
   thenBytesPerSecond?: number;
@@ -65,6 +69,9 @@ async function upstream(totalSize: number, options: UpstreamOptions = {}): Promi
       let next = Number(match[1]);
       asked.push([next, end]);
       if (options.refuse?.(asked.length)) return void res.writeHead(options.refuseStatus ?? 503).end();
+      const shift = options.shiftStart?.(asked.length) ?? 0;
+      if (shift) next += shift;
+      const request = asked.length;
       res.writeHead(206, { "Content-Length": String(end - next + 1), "Content-Range": `bytes ${next}-${end}/${totalSize}` });
       // A response counts as open until its last byte is handed over, or its reader hangs up.
       let closed = false;
@@ -80,6 +87,8 @@ async function upstream(totalSize: number, options: UpstreamOptions = {}): Promi
       const first = next;
       const pump = (): void => {
         while (!closed && next <= end) {
+          // A connection gone silent: nothing more is sent, and it is not closed either.
+          if (request === 1 && options.silentAfter !== undefined && next - first >= options.silentAfter) return;
           const piece = slice(next, Math.min(end, next + PIECE - 1));
           next += piece.length;
           sent += piece.length;
@@ -253,6 +262,64 @@ describe("serveRange", () => {
     expect(afterKill).not.toBeNull();
     expect(afterKill!).toBeLessThanOrEqual(whilePaused! + windowBytes);
   }, 15_000);
+});
+
+describe("serveRange against a CDN that misbehaves", () => {
+  afterEach(() => __setReadIdleForTests(null));
+
+  it("asks again from where a silent connection stopped, and delivers every byte once", async () => {
+    __setReadIdleForTests(200);
+    const total = 512 * KB;
+    const up = await upstream(total, { silentAfter: 128 * KB });
+    const port = await proxy({ url: up.url, totalSize: total, cached: [], lanes: 1, laneBps: 100_000_000, targetBps: 8_000_000 }, 128 * 1024 * KB);
+    const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    expect(up.asked.length).toBe(2);
+    expect(up.asked[1]![0]).toBe(128 * KB);
+  });
+
+  it("does not hand on bytes from a range that starts somewhere else", async () => {
+    const total = 512 * KB;
+    const up = await upstream(total, { shiftStart: (request) => (request === 1 ? 4096 : 0) });
+    const port = await proxy({ url: up.url, totalSize: total, cached: [], lanes: 1, laneBps: 100_000_000, targetBps: 8_000_000 }, 128 * 1024 * KB);
+    const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    expect(up.asked.length).toBe(2);
+  });
+});
+
+describe("serveRange after bytes held in memory", () => {
+  const total = 1024 * KB;
+  const head = { start: 0, bytes: slice(0, 64 * KB - 1) };
+
+  it("asks upstream nothing for a reader that hangs up straight after the cached bytes", async () => {
+    const up = await upstream(total);
+    const port = await proxy({ url: up.url, totalSize: total, cached: [head] }, 128 * KB);
+    // ffmpeg reading a file's head and jumping elsewhere: it takes what it wants of the head and hangs up.
+    const socket = connect(port, "127.0.0.1");
+    socket.on("error", () => undefined);
+    let received = 0;
+    await new Promise<void>((resolve) => {
+      socket.on("data", (chunk) => {
+        received += chunk.length;
+        if (received >= 32 * KB) {
+          socket.destroy();
+          resolve();
+        }
+      });
+      socket.write("GET /src HTTP/1.1\r\nHost: test\r\nRange: bytes=0-\r\n\r\n");
+    });
+    await sleep(400);
+    expect(up.asked).toEqual([]);
+  });
+
+  it("reads on from upstream for a reader that stays", async () => {
+    const up = await upstream(total);
+    const port = await proxy({ url: up.url, totalSize: total, cached: [head] }, 128 * KB);
+    const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    expect(up.asked[0]![0]).toBe(64 * KB);
+  });
 });
 
 describe("serveRange over several connections", () => {

@@ -73,6 +73,50 @@ export interface LaneTuning {
 }
 
 const UPSTREAM_TIMEOUT_MS = 20_000;
+/**
+ * A response that sends nothing for this long is given up and asked for again
+ * from the byte it stopped at. A connection can go silent without closing,
+ * and with nothing to time its body, one silent piece of twelve held the
+ * whole read, and the film, still for good.
+ */
+let readIdleMs = 15_000;
+
+/** Test seam: how long a silent body is waited on (null for the usual). */
+export function __setReadIdleForTests(ms: number | null): void {
+  readIdleMs = ms ?? 15_000;
+}
+
+/** A body that went silent (see readIdleMs). */
+class SilentError extends Error {
+  constructor() {
+    super("upstream went silent");
+  }
+}
+
+/** The next read of a body, or a SilentError when nothing comes for readIdleMs. */
+async function readWithin<T>(reader: { read(): Promise<T> }): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new SilentError()), readIdleMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Whether a 206's Content-Range starts where the request did. A CDN that
+ * answered another start would have every byte after it handed to ffmpeg at
+ * the wrong place in the file.
+ */
+function rangeStartsAt(res: Response, start: number): boolean {
+  const match = /^bytes (\d+)-/.exec(res.headers.get("content-range") ?? "");
+  return match === null || Number(match[1]) === start;
+}
 
 const DEFAULT_WINDOW_BYTES = 128 * 1024 * 1024;
 
@@ -284,6 +328,18 @@ function write(res: ServerResponse, chunk: Uint8Array, client: Client): Promise<
   });
 }
 
+/**
+ * How long a request that was just served bytes from memory waits before it
+ * reads on from upstream. ffmpeg opens a file by reading its head and jumping
+ * about (to the end, back to the first cluster, to the Cues, back again):
+ * three of its requests begin in the cached head, and each, served from
+ * memory in an instant, went straight on to ask the CDN for what follows the
+ * head, a moment before ffmpeg hung up on it: three connections and three
+ * turns of a paced link spent at every start, for nothing. A reader still
+ * there after this long wants the bytes.
+ */
+const CACHE_EXIT_GRACE_MS = 200;
+
 /** Serves one ranged GET, mixing cached bytes and upstream bytes in order. */
 export async function serveRange(
   req: IncomingMessage,
@@ -311,6 +367,7 @@ export async function serveRange(
     client.release();
   });
   let offset = range.start;
+  let fromMemory = false;
   try {
     while (offset <= range.end && !client.gone) {
       const hit = cachedAt(source.cached, offset);
@@ -319,7 +376,13 @@ export async function serveRange(
         const to = Math.min(hit.bytes.length, range.end - hit.start + 1);
         await write(res, hit.bytes.subarray(from, to), client);
         offset = hit.start + to;
+        fromMemory = true;
         continue;
+      }
+      if (fromMemory) {
+        fromMemory = false;
+        await new Promise((resolve) => setTimeout(resolve, CACHE_EXIT_GRACE_MS));
+        if (client.gone) break;
       }
       // Stream upstream until the next cached range (or the end of the request).
       const nextCached = source.cached
@@ -410,21 +473,29 @@ async function copyWindow(
     if (isRefusal(upstream.status)) throw refused(url, upstream.status);
     throw new Error(`upstream HTTP ${upstream.status}`);
   }
+  if (!rangeStartsAt(upstream, start)) {
+    await upstream.body.cancel().catch(() => {});
+    throw new Error(`upstream answered another range (${upstream.headers.get("content-range")})`);
+  }
   const reader = upstream.body.getReader();
   client.release = () => void reader.cancel().catch(() => {});
   if (client.gone) client.release();
   let first = true;
+  let left = end - start + 1;
   try {
-    while (!client.gone && !report.superseded()) {
+    while (left > 0 && !client.gone && !report.superseded()) {
       const started = performance.now();
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithin(reader);
       if (done || client.gone) break;
       // The first read is not timed: its wait is the time to first byte, and its bytes may have
       // been sent before anyone asked, so they would make the connection look faster than it is.
       if (!first) report.read(value.length, performance.now() - started);
       first = false;
-      await write(res, value, client);
-      report.written(value.length);
+      // Never more than was asked for: a CDN that sends past the range would shift the rest of the file.
+      const part = value.length > left ? value.subarray(0, left) : value;
+      await write(res, part, client);
+      left -= part.length;
+      report.written(part.length);
     }
   } finally {
     client.release = NOTHING;
@@ -752,13 +823,17 @@ async function fetchPiece(piece: Piece, source: ProxySource, client: Client, tun
     }
     throw new Error(`upstream HTTP ${upstream.status}`);
   }
+  if (!rangeStartsAt(upstream, piece.next)) {
+    await upstream.body.cancel().catch(() => {});
+    throw new Error(`upstream answered another range (${upstream.headers.get("content-range")})`);
+  }
   const reader = upstream.body.getReader();
   piece.cancel = () => void reader.cancel().catch(() => {});
   let first = true;
   try {
     while (!piece.stopped && !client.gone && piece.next <= piece.end) {
       const started = performance.now();
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithin(reader);
       if (done) break;
       if (!first) measure(source, tuning, value.length, performance.now() - started);
       first = false;
