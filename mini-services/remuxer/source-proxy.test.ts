@@ -1,8 +1,9 @@
 /// <reference types="bun-types" />
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createServer, type Server } from "node:http";
 import { connect, type AddressInfo } from "node:net";
-import { cachedAt, lanesFor, parseRange, serveRange, windowEnd, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf, domainRequestCap, MAX_DOMAIN_REQUESTS } from "./source-proxy";
+import { cachedAt, lanesFor, parseRange, serveRange, steadyPieceBytes, windowEnd, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf } from "./source-proxy";
+import { __setLinkPacingForTests } from "./link-pacer";
 
 /** Byte `i` of the pretend source file, so any slice can be checked without keeping the file. */
 const byteAt = (i: number): number => (i * 7 + (i >> 9)) % 251;
@@ -14,9 +15,12 @@ function slice(start: number, end: number): Uint8Array<ArrayBuffer> {
 }
 
 const servers: Server[] = [];
+// Turns as fast as the tests ask, unless a test is about the pacing.
+beforeEach(() => __setLinkPacingForTests({ burst: 10_000, ratePerS: 10_000, refusalPauseMs: 50 }));
 afterEach(() => {
   for (const server of servers.splice(0)) server.close();
   __resetDomainSpeedsForTests();
+  __setLinkPacingForTests(null);
 });
 
 function listen(server: Server): Promise<number> {
@@ -386,35 +390,77 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     expect(sizes).toEqual([32 * KB, 64 * KB, 128 * KB, 256 * KB, 256 * KB]);
   });
 
-  it("takes a 204 answer to a range as a refusal and uses fewer connections", async () => {
+  it("waits out a link's 204 refusals and delivers every byte, on as many connections", async () => {
     const total = 1024 * KB;
     const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 64 * KB, firstChunkBytes: 64 * KB, earlyDecisionMs: 60_000 };
-    const up = await upstream(total, { ...SLOW, refuseStatus: 204, refuse: (request) => request === 2 });
+    // More refusals in a row than a plain failure is allowed (three).
+    const up = await upstream(total, { ...SLOW, refuseStatus: 204, refuse: (request) => request >= 2 && request <= 6 });
     const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS, lanes: 8, laneBps: 125_000 };
     const port = await proxy(source, WINDOW, tuning);
     const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
-    expect(source.lanes).toBeLessThan(8);
+    expect(source.lanes).toBe(8);
   });
 
-  it("keeps every file on one CDN to the CDN's limit of open requests together", async () => {
-    const total = 2 * 1024 * KB;
-    const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 64 * KB, firstChunkBytes: 64 * KB, earlyDecisionMs: 60_000 };
-    const up = await upstream(total, SLOW);
-    const files = [1, 2].map(() => ({ url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS, lanes: 10, laneBps: 125_000 }) as ProxySource);
-    const ports = await Promise.all(files.map((file) => proxy(file, WINDOW, tuning)));
-    const bodies = await Promise.all(ports.map(async (port) => new Uint8Array(await (await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } })).arrayBuffer())));
-    for (const body of bodies) expect(body).toEqual(slice(0, total - 1));
-    expect(up.maxOpen()).toBeLessThanOrEqual(MAX_DOMAIN_REQUESTS);
+  it("waits out a link's refusals on a single connection too", async () => {
+    const total = 512 * KB;
+    const up = await upstream(total, { refuseStatus: 204, refuse: (request) => request <= 4 });
+    const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: 8_000_000, lanes: 1, laneBps: 100_000_000 };
+    const port = await proxy(source, WINDOW);
+    const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    expect(up.asked.length).toBe(5);
   });
 
-  it("holds a CDN to one fewer request than it refused at, for a while", async () => {
+  it("asks a refusing link no faster than its pacing allows", async () => {
+    __setLinkPacingForTests({ burst: 4, ratePerS: 40, refusalPauseMs: 150, slowForMs: 60_000 });
     const total = 1024 * KB;
     const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 64 * KB, firstChunkBytes: 64 * KB, earlyDecisionMs: 60_000 };
-    const up = await upstream(total, { ...SLOW, refuseStatus: 204, refuse: (request) => request === 4 });
+    const askedAt: number[] = [];
+    const up = await upstream(total, {
+      refuseStatus: 204,
+      refuse: (request) => {
+        askedAt.push(Date.now());
+        return request === 3;
+      },
+    });
     const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS, lanes: 8, laneBps: 125_000 };
     const port = await proxy(source, WINDOW, tuning);
-    await (await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } })).arrayBuffer();
-    expect(domainRequestCap(cdnDomainOf(up.url))).toBeLessThan(MAX_DOMAIN_REQUESTS);
+    const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    // Nothing for the pause after the refusal; then the three turns that built up
+    // over it at half the rate, and one turn every 50 ms (20 a second) after those.
+    const refusedAt = askedAt[2]!;
+    const after = askedAt.filter((t) => t > refusedAt);
+    expect(after[0]! - refusedAt).toBeGreaterThanOrEqual(140);
+    expect(after.length).toBeGreaterThan(6);
+    expect((after.at(-1)! - after[3]!) / (after.length - 4)).toBeGreaterThanOrEqual(40);
+  });
+
+  it("adds connections as soon as a file's reads slow down", async () => {
+    // Remembered fast, then slow: once the samples come in, the file needs several connections.
+    const total = 4 * 1024 * KB;
+    const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 128 * KB, firstChunkBytes: 128 * KB, earlyDecisionMs: 60_000 };
+    const up = await upstream(total, SLOW);
+    const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS, lanes: 1, laneBps: 50_000_000 };
+    const port = await proxy(source, WINDOW, tuning);
+    const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    // Thirty-two chunks (the whole file) used to pass before the connections were looked at again.
+    expect(source.lanes).toBeGreaterThan(1);
+    expect(up.maxOpen()).toBeGreaterThan(1);
+  });
+
+  it("grows parallel pieces to about eight seconds of one connection, within the window", () => {
+    const tuning: LaneTuning = { probeBytes: 4096 * KB, chunkBytes: 2048 * KB, firstChunkBytes: 256 * KB, maxPieceBytes: 8192 * KB, earlyDecisionMs: 1_500 };
+    const window = 128 * 1024 * KB;
+    // 2.5 Mbit/s a connection: 2.5 MB pieces.
+    expect(steadyPieceBytes({ url: "", totalSize: 0, cached: [], lanes: 12, laneBps: 312_500 }, window, tuning)).toBe(2_500_000);
+    // A fast connection: the largest piece.
+    expect(steadyPieceBytes({ url: "", totalSize: 0, cached: [], lanes: 4, laneBps: 10_000_000 }, window, tuning)).toBe(8192 * KB);
+    // A prewarm's 24 MiB window across twelve connections: no more than 2 MiB each.
+    expect(steadyPieceBytes({ url: "", totalSize: 0, cached: [], lanes: 12, laneBps: 10_000_000, windowBytes: 24 * 1024 * KB }, window, tuning)).toBe(2048 * KB);
+    // Without a largest piece, pieces stay one chunk.
+    expect(steadyPieceBytes({ url: "", totalSize: 0, cached: [], lanes: 4, laneBps: 10_000_000 }, window, { ...tuning, maxPieceBytes: undefined })).toBe(2048 * KB);
   });
 });

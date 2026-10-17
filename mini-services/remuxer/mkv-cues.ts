@@ -12,6 +12,7 @@
  * SeekHead positions are relative to the Segment's data start.
  */
 
+import { isRefusal, linkRefused, linkTurn } from "./link-pacer";
 import { parseDolbyVisionRecord, type DolbyVisionInfo } from "./dolby-vision";
 
 export const EBML_ID = 0x1a45dfa3;
@@ -394,6 +395,12 @@ export type SizedRangeFetcher = RangeFetcher & { whenSized?: Promise<number> };
  * (see FFMPEG_PROBE_BYTES in vod.ts); from memory, that costs a jump nothing.
  */
 export const HEAD_BYTES = 2 * 1024 * 1024;
+/**
+ * Once the file's size is known the head is read in this many parts at once.
+ * In one request it took eight seconds from a CDN giving a connection
+ * 2.5 Mbit/s (AllDebrid, most of the time), before anything else could start.
+ */
+const HEAD_PARTS = 4;
 const CUES_GUESS_BYTES = 1024 * 1024;
 /** How much of the file's end is read alongside its head, on the guess that it holds the Cues. */
 const TAIL_GUESS_BYTES = 384 * 1024;
@@ -460,6 +467,48 @@ async function cuesFromTail(pending: Promise<Tail | null> | null, cuesOffset: nu
   return bytes && cuesOffset - tail.start < bytes.length ? bytes.subarray(cuesOffset - tail.start) : null;
 }
 
+/** The parts as one array, in order. */
+function concat(parts: readonly Uint8Array[]): Uint8Array {
+  if (parts.length === 1) return parts[0]!;
+  const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+
+/**
+ * Reads the first HEAD_BYTES of the file. With a fetcher that reports the
+ * size, the first part is asked for alone and the rest the moment its answer
+ * gives the size, only as far as the file goes. A later part that fails ends
+ * the head there: what it held is read through the proxy if ffmpeg wants it.
+ */
+async function readHead(fetchRange: SizedRangeFetcher): Promise<Uint8Array> {
+  if (!fetchRange.whenSized) return fetchRange(0, HEAD_BYTES - 1);
+  const partBytes = HEAD_BYTES / HEAD_PARTS;
+  const first = fetchRange(0, partBytes - 1);
+  const rest = fetchRange.whenSized.then(
+    (total) => {
+      const reads: Array<Promise<Uint8Array | null>> = [];
+      for (let start = partBytes; start < Math.min(total, HEAD_BYTES); start += partBytes) {
+        reads.push(fetchRange(start, start + partBytes - 1).catch(() => null));
+      }
+      return Promise.all(reads);
+    },
+    () => []
+  );
+  const parts = [await first];
+  if (parts[0]!.length < partBytes) return parts[0]!;
+  for (const part of await rest) {
+    if (!part?.length) break;
+    parts.push(part);
+    if (part.length < partBytes) break;
+  }
+  return concat(parts);
+}
+
 /**
  * Reads the keyframe index of a remote MKV through range requests.
  * Returns null when the file is not Matroska or carries no usable Cues.
@@ -467,7 +516,7 @@ async function cuesFromTail(pending: Promise<Tail | null> | null, cuesOffset: nu
 export async function readMkvKeyframes(fetchRange: SizedRangeFetcher): Promise<KeyframeIndex | null> {
   const fetched: Array<{ start: number; bytes: Uint8Array }> = [];
   const tail = readTail(fetchRange);
-  const head = await fetchRange(0, HEAD_BYTES - 1);
+  const head = await readHead(fetchRange);
   fetched.push({ start: 0, bytes: head });
   const layout = parseSegmentLayout(head);
   if (!layout || layout.videoTrack === null || layout.cuesOffset === null || !layout.durationS) {
@@ -511,11 +560,18 @@ export async function readMkvKeyframes(fetchRange: SizedRangeFetcher): Promise<K
  */
 const RANGE_RETRY_MS = 400;
 
-/** A range request the server answered but did not honour; `transient` when asking again may work. */
+/** Asks for one range this many times when the link refuses it, each on the link's next turn (after its pause). */
+const REFUSED_ATTEMPTS = 4;
+
+/**
+ * A range request the server answered but did not honour; `transient` when
+ * asking again may work, `refused` when the link was asked too often.
+ */
 class RangeRequestError extends Error {
   constructor(
     message: string,
-    readonly transient: boolean
+    readonly transient: boolean,
+    readonly refused = false
   ) {
     super(message);
   }
@@ -526,25 +582,37 @@ export function httpRangeFetcher(url: string, timeoutMs: number): SizedRangeFetc
   let sized: (total: number) => void = () => {};
   const whenSized = new Promise<number>((resolve) => (sized = resolve));
   const request = async (start: number, end: number) => {
+    await linkTurn(url);
     const res = await fetch(url, {
       headers: { Range: `bytes=${start}-${end}` },
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (res.status === 206) return res;
     await res.body?.cancel().catch(() => {});
+    if (isRefusal(res.status)) {
+      linkRefused(url);
+      throw new RangeRequestError(`range refused (HTTP ${res.status})`, true, true);
+    }
     // A 200 means Range was ignored and the whole file is on its way.
-    throw new RangeRequestError(`range not supported (HTTP ${res.status})`, res.status >= 500 || res.status === 429);
+    throw new RangeRequestError(`range not supported (HTTP ${res.status})`, res.status >= 500);
   };
   const fetcher = async (start: number, endInclusive: number) => {
     const end = totalSize !== null ? Math.min(endInclusive, totalSize - 1) : endInclusive;
     // A debrid CDN answers the odd request with a 503 and the next one
-    // normally. One failed read used to fail the whole title.
-    const res = await request(start, end).catch(async (err: unknown) => {
-      const timedOut = err instanceof DOMException && err.name === "TimeoutError";
-      if (timedOut || (err instanceof RangeRequestError && !err.transient)) throw err;
-      await new Promise((resolve) => setTimeout(resolve, RANGE_RETRY_MS));
-      return request(start, end);
-    });
+    // normally. One failed read used to fail the whole title. A link asked too
+    // often (AllDebrid's 204) is asked again on its next turn, a few times.
+    let res: Response | null = null;
+    for (let attempt = 1; !res; attempt++) {
+      try {
+        res = await request(start, end);
+      } catch (err) {
+        const timedOut = err instanceof DOMException && err.name === "TimeoutError";
+        const refused = err instanceof RangeRequestError && err.refused;
+        if (timedOut || (err instanceof RangeRequestError && !err.transient)) throw err;
+        if (attempt >= (refused ? REFUSED_ATTEMPTS : 2)) throw err;
+        if (!refused) await new Promise((resolve) => setTimeout(resolve, RANGE_RETRY_MS));
+      }
+    }
     const total = Number(res.headers.get("content-range")?.split("/")[1]);
     if (Number.isFinite(total) && total > 0) {
       totalSize = total;

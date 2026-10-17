@@ -1,4 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { __setLinkPacingForTests } from "./link-pacer";
 import {
   BLOCK_ADDITION_MAPPING_ID,
   BLOCK_ADD_ID_EXTRA_DATA_ID,
@@ -25,6 +28,8 @@ import {
   TRACK_ENTRY_ID,
   TRACK_NUMBER_ID,
   TRACK_TYPE_ID,
+  HEAD_BYTES,
+  httpRangeFetcher,
   parseCueTimes,
   parseSegmentLayout,
   isVideoUndecodable,
@@ -60,7 +65,7 @@ const float64 = (value: number) => {
 };
 
 /** A minimal MKV: header, SeekHead → Cues, Info, Tracks (video + 2 audio), a Cluster, Cues. */
-function buildMkv(cueTimesMs: number[], videoExtras: number[] = []): Uint8Array {
+function buildMkv(cueTimesMs: number[], videoExtras: number[] = [], clusterBytes = 100): Uint8Array {
   const info = el(INFO_ID, [...el(TIMESTAMP_SCALE_ID, uint(1_000_000)), ...el(DURATION_ID, float64(60_000))]);
   const tracks = el(TRACKS_ID, [
     ...el(TRACK_ENTRY_ID, [...el(TRACK_NUMBER_ID, [1]), ...el(TRACK_TYPE_ID, [1]), ...el(CODEC_ID_ID, str("V_MPEGH/ISO/HEVC")), ...videoExtras]),
@@ -72,7 +77,7 @@ function buildMkv(cueTimesMs: number[], videoExtras: number[] = []): Uint8Array 
       ...el(NAME_ID, str("Commentary")),
     ]),
   ]);
-  const cluster = el(CLUSTER_ID, new Array(100).fill(0));
+  const cluster = el(CLUSTER_ID, new Uint8Array(clusterBytes));
   const cues = el(
     CUES_ID,
     cueTimesMs.flatMap((t) =>
@@ -144,6 +149,27 @@ describe("Matroska index", () => {
     expect(index!.fetched.some((range) => range.start + range.bytes.length === file.length)).toBe(true);
   });
 
+  it("reads a large file's head in parts at once, once the size is known", async () => {
+    const big = buildMkv([0, 3420, 6840, 10302], [], 3 * 1024 * 1024);
+    const requests: string[] = [];
+    const fetcher = Object.assign(
+      async (start: number, end: number) => {
+        requests.push(`${start}-${end}`);
+        return big.subarray(start, Math.min(end + 1, big.length));
+      },
+      { whenSized: Promise.resolve(big.length) }
+    );
+    const index = await readMkvKeyframes(fetcher);
+    expect(index?.keyframes).toEqual([0, 3.42, 6.84, 10.302]);
+    const part = HEAD_BYTES / 4;
+    for (let i = 0; i < 4; i++) expect(requests).toContain(`${i * part}-${(i + 1) * part - 1}`);
+    // The four parts and the tail, which holds the Cues.
+    expect(requests.length).toBe(5);
+    // The head is kept whole, as one range, for ffmpeg's every start.
+    expect(index!.fetched[0]!.start).toBe(0);
+    expect(index!.fetched[0]!.bytes).toEqual(big.subarray(0, HEAD_BYTES));
+  });
+
   it("asks for the Cues by offset when the tail read fails", async () => {
     let calls = 0;
     const fetcher = Object.assign(
@@ -192,5 +218,56 @@ describe("isVideoUndecodable", () => {
   it("turns away the AVC profiles browsers cannot decode, and only those", () => {
     expect(isVideoUndecodable("V_MPEG4/ISO/AVC", 110)).toBe(true);
     expect(isVideoUndecodable("V_MPEG4/ISO/AVC", 100)).toBe(false);
+  });
+});
+
+describe("httpRangeFetcher", () => {
+  const servers: Server[] = [];
+  afterEach(() => {
+    for (const server of servers.splice(0)) server.close();
+    __setLinkPacingForTests(null);
+  });
+
+  async function serve(handler: Parameters<typeof createServer>[1]): Promise<string> {
+    const server = createServer(handler);
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    return `http://127.0.0.1:${(server.address() as AddressInfo).port}/file`;
+  }
+
+  it("asks a link that refused a range again once its pause is over", async () => {
+    __setLinkPacingForTests({ refusalPauseMs: 120 });
+    const askedAt: number[] = [];
+    const url = await serve((_req, res) => {
+      askedAt.push(Date.now());
+      if (askedAt.length <= 2) return void res.writeHead(204).end();
+      res.writeHead(206, { "Content-Range": "bytes 0-9/100", "Content-Length": "10" }).end(Buffer.alloc(10, 7));
+    });
+    const fetcher = httpRangeFetcher(url, 5_000);
+    expect(await fetcher(0, 9)).toEqual(new Uint8Array(10).fill(7));
+    expect(askedAt.length).toBe(3);
+    expect(askedAt[1]! - askedAt[0]!).toBeGreaterThanOrEqual(110);
+    expect(fetcher.size()).toBe(100);
+  });
+
+  it("gives up on a link that goes on refusing", async () => {
+    __setLinkPacingForTests({ refusalPauseMs: 20 });
+    let asked = 0;
+    const url = await serve((_req, res) => {
+      asked++;
+      res.writeHead(204).end();
+    });
+    await expect(httpRangeFetcher(url, 5_000)(0, 9)).rejects.toThrow("refused");
+    expect(asked).toBe(4);
+  });
+
+  it("does not ask again when the range was ignored", async () => {
+    let asked = 0;
+    const url = await serve((_req, res) => {
+      asked++;
+      res.writeHead(200, { "Content-Length": "10" }).end(Buffer.alloc(10));
+    });
+    await expect(httpRangeFetcher(url, 5_000)(0, 9)).rejects.toThrow("not supported");
+    expect(asked).toBe(1);
   });
 });

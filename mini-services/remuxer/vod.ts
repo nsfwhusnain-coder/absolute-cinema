@@ -25,6 +25,7 @@ import { audioCapsParam, DEFAULT_AUDIO_CAPS, type AudioCaps } from "../../src/li
 import { audioArgs, audioDelivery, type AudioDelivery } from "./audio-delivery";
 import { totalSizeFromContentRange } from "./content-range";
 import { httpRangeFetcher, readMkvKeyframes, type MkvAudioTrack, type MkvSubtitleTrack } from "./mkv-cues";
+import { isRefusal, linkRefused, linkTurn } from "./link-pacer";
 import { deliveredRange, dolbyVisionDelivery, type DeliveredRange } from "./dolby-vision";
 import { VttStreamParser, type VttCue } from "./vtt-stream";
 import type { ProxySource } from "./source-proxy";
@@ -348,14 +349,23 @@ async function adoptLink(session: Session, url: string): Promise<Session | undef
   return undefined;
 }
 
+/** Asks a link that refused the one-byte read again this many times, on its next turns. */
+const SIZE_PROBE_ATTEMPTS = 3;
+
 async function probeTotalSize(url: string): Promise<number | null> {
-  try {
-    const res = await fetch(url, { headers: { Range: "bytes=0-0" }, signal: AbortSignal.timeout(RANGE_TIMEOUT_MS) });
-    await res.body?.cancel().catch(() => {});
-    return res.status === 206 ? totalSizeFromContentRange(res.headers.get("content-range")) : null;
-  } catch {
-    return null;
+  for (let attempt = 0; attempt < SIZE_PROBE_ATTEMPTS; attempt++) {
+    try {
+      await linkTurn(url);
+      const res = await fetch(url, { headers: { Range: "bytes=0-0" }, signal: AbortSignal.timeout(RANGE_TIMEOUT_MS) });
+      await res.body?.cancel().catch(() => {});
+      if (res.status === 206) return totalSizeFromContentRange(res.headers.get("content-range"));
+      if (!isRefusal(res.status)) return null;
+      linkRefused(url);
+    } catch {
+      return null;
+    }
   }
+  return null;
 }
 
 async function createSession(cacheRoot: string, id: string, url: string, audio: VodAudioRequest, viewer: VodViewer): Promise<Session> {

@@ -15,6 +15,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { isRefusal, linkRefused, linkTurn } from "./link-pacer";
 
 export interface CachedRange {
   start: number;
@@ -33,6 +34,8 @@ export interface ProxySource {
   lanes?: number;
   /** Smoothed throughput of one upstream connection, in bytes per second. */
   laneBps?: number;
+  /** Until then (epoch ms) the connections may fall but not rise: the CDN refused one with 429 or 503. */
+  lanesHeldUntil?: number;
 }
 
 /** The sizes the connection logic works in. Tests use smaller ones. */
@@ -49,6 +52,14 @@ export interface LaneTuning {
    * about a second.
    */
   firstChunkBytes: number;
+  /**
+   * Once a parallel read is under way its pieces grow, to about PIECE_SECONDS
+   * of one connection's reading, up to this size (`chunkBytes` when unset). A
+   * CDN that limits how often a link is asked (link-pacer.ts) is then asked
+   * less often for the same bytes, and a fast connection spends less of its
+   * time waiting for answers.
+   */
+  maxPieceBytes?: number;
   /** Read-waiting time after which a probe may already decide on parallel connections. */
   earlyDecisionMs: number;
 }
@@ -81,6 +92,17 @@ const MIN_TARGET_BPS = 8_000_000;
 const MAX_LANES = 12;
 /** A new sample of one connection's speed counts for this much of its smoothed value. */
 const LANE_WEIGHT = 0.3;
+/**
+ * A sample below the smoothed speed counts for this much instead. AllDebrid
+ * gives some connections 30-80 Mbit/s and most 2.5: a fast first one used to
+ * leave a 4K file on one connection for a minute after the next ones came in
+ * slow, while its buffer ran down.
+ */
+const LANE_WEIGHT_DOWN = 0.6;
+/** Seconds of one connection's reading that a parallel piece grows to. */
+const PIECE_SECONDS = 8;
+/** After a 429 or 503 halves a file's connections, they are not raised again for this long. */
+const LANE_HOLD_MS = 60_000;
 /** The connections are planned again after this many completed chunks. */
 const DECIDE_EVERY = 32;
 /**
@@ -102,6 +124,7 @@ export const LANE_TUNING: LaneTuning = {
   probeBytes: 4 * 1024 * 1024,
   chunkBytes: 2 * 1024 * 1024,
   firstChunkBytes: 256 * 1024,
+  maxPieceBytes: 8 * 1024 * 1024,
   earlyDecisionMs: EARLY_DECISION_MS,
 };
 const domainSpeeds = new Map<string, { laneBps: number; at: number }>();
@@ -131,57 +154,25 @@ export function recentDomainSpeed(url: string, now = Date.now()): number | null 
   return known && now - known.at < DOMAIN_MEMORY_MS ? known.laneBps : null;
 }
 
-/**
- * Most upstream requests open at once to one CDN, across every file and run.
- * AllDebrid answers 204 instead of the range once one address has too many
- * downloads open, and twelve connections for each of a few runs passes that.
- */
-export const MAX_DOMAIN_REQUESTS = 12;
-/** After a refusal, the CDN's limit drops to what was open less one, for this long. */
-const DOMAIN_REFUSAL_MS = 60_000;
-const domainOpen = new Map<string, number>();
-const domainCaps = new Map<string, { cap: number; until: number }>();
-
-/** How many requests this CDN may have open now: the usual limit, or less for a while after it refused one. */
-export function domainRequestCap(domain: string, now = Date.now()): number {
-  const learned = domainCaps.get(domain);
-  return learned && now < learned.until ? learned.cap : MAX_DOMAIN_REQUESTS;
+/** A request the CDN would not serve just now (see link-pacer.ts): waited out rather than counted as a failure. */
+class RefusedError extends Error {
+  constructor(readonly status: number) {
+    super(`upstream refused (HTTP ${status})`);
+  }
 }
 
-/** Whether another request to this CDN may start now. */
-function domainHasRoom(domain: string): boolean {
-  return (domainOpen.get(domain) ?? 0) < domainRequestCap(domain);
-}
+/** Refusals in a row, each after the link's pause, before a read gives up: about half a minute. */
+const MAX_REFUSALS = 8;
 
-/** Counts a request to this CDN as open; the returned function counts it closed (once). */
-function openDomainRequest(domain: string): () => void {
-  domainOpen.set(domain, (domainOpen.get(domain) ?? 0) + 1);
-  let closed = false;
-  return () => {
-    if (closed) return;
-    closed = true;
-    domainOpen.set(domain, Math.max(0, (domainOpen.get(domain) ?? 1) - 1));
-  };
-}
-
-/** The CDN refused a request: it takes one fewer than were open, for a minute. */
-function domainRefused(domain: string, now = Date.now()): void {
-  const open = domainOpen.get(domain) ?? 1;
-  const cap = Math.max(1, Math.min(domainRequestCap(domain, now), open - 1));
-  domainCaps.set(domain, { cap, until: now + DOMAIN_REFUSAL_MS });
-  console.log(`[proxy] ${domain} refused a request with ${open} open; at most ${cap} for a minute`);
-}
-
-/** A status that means the CDN would not serve the range now: 429, 503, or a 2xx that is not the range (AllDebrid's 204). */
-function isRefusal(status: number): boolean {
-  return status === 429 || status === 503 || (status >= 200 && status < 300 && status !== 206);
+/** Notes a refusal against the link, and logs it once per pause (by CDN: a link is signed and never logged). */
+function refused(url: string, status: number): RefusedError {
+  if (linkRefused(url)) console.log(`[proxy] ${cdnDomainOf(url)} refused a request (HTTP ${status}); waiting before the next`);
+  return new RefusedError(status);
 }
 
 /** Test seam: the domain memory is module state that would otherwise leak between cases. */
 export function __resetDomainSpeedsForTests(): void {
   domainSpeeds.clear();
-  domainOpen.clear();
-  domainCaps.clear();
 }
 
 /**
@@ -385,28 +376,20 @@ async function copyWindow(
   client: Client,
   report: WindowReport
 ): Promise<void> {
-  const domain = cdnDomainOf(url);
-  const close = openDomainRequest(domain);
+  if (!(await linkTurn(url, () => client.gone))) return;
   const waiting = new AbortController();
   const headerTimer = setTimeout(() => waiting.abort(), UPSTREAM_TIMEOUT_MS);
   client.release = () => waiting.abort();
-  let upstream: Response;
-  try {
-    upstream = await fetch(url, {
-      headers: { Range: `bytes=${start}-${end}` },
-      signal: waiting.signal,
-    }).finally(() => {
-      clearTimeout(headerTimer);
-      client.release = NOTHING;
-    });
-  } catch (err) {
-    close();
-    throw err;
-  }
+  const upstream = await fetch(url, {
+    headers: { Range: `bytes=${start}-${end}` },
+    signal: waiting.signal,
+  }).finally(() => {
+    clearTimeout(headerTimer);
+    client.release = NOTHING;
+  });
   if (upstream.status !== 206 || !upstream.body) {
     await upstream.body?.cancel().catch(() => {});
-    if (isRefusal(upstream.status)) domainRefused(domain);
-    close();
+    if (isRefusal(upstream.status)) throw refused(url, upstream.status);
     throw new Error(`upstream HTTP ${upstream.status}`);
   }
   const reader = upstream.body.getReader();
@@ -428,7 +411,6 @@ async function copyWindow(
   } finally {
     client.release = NOTHING;
     await reader.cancel().catch(() => {});
-    close();
   }
 }
 
@@ -450,9 +432,11 @@ async function streamUpstream(
 ): Promise<number> {
   let offset = start;
   let failures = 0;
+  let refusals = 0;
   const written = (bytes: number) => {
     offset += bytes;
     failures = 0;
+    refusals = 0;
   };
   if (source.lanes === undefined) {
     // Another file from this CDN was measured a moment ago: start where it left off.
@@ -500,9 +484,11 @@ async function streamUpstream(
       }
     } catch (err) {
       if (client.gone) break;
+      // The next turn on the link comes after its pause.
+      if (err instanceof RefusedError && ++refusals < MAX_REFUSALS) continue;
       failures++;
       console.log(`[proxy] upstream at ${offset} failed (${failures}/${STREAM_ATTEMPTS}): ${err instanceof Error ? err.message : String(err)}`);
-      if (failures >= STREAM_ATTEMPTS) throw err;
+      if (failures >= STREAM_ATTEMPTS || err instanceof RefusedError) throw err;
       await new Promise((resolve) => setTimeout(resolve, RETRY_BASE_MS * 2 ** (failures - 1)));
     }
   }
@@ -538,6 +524,16 @@ function slotsFor(source: ProxySource, windowBytes: number, tuning: LaneTuning):
 }
 
 /**
+ * The size parallel pieces grow to: about PIECE_SECONDS of one connection's
+ * reading, from `chunkBytes` up to `maxPieceBytes`, and never more than the
+ * window lets wait in memory with every connection holding a piece.
+ */
+export function steadyPieceBytes(source: ProxySource, windowBytes: number, tuning: LaneTuning): number {
+  const most = Math.min(tuning.maxPieceBytes ?? tuning.chunkBytes, Math.floor(windowCap(source, windowBytes) / slotsFor(source, windowBytes, tuning)));
+  return Math.max(tuning.chunkBytes, Math.min(most, Math.round((source.laneBps ?? 0) * PIECE_SECONDS)));
+}
+
+/**
  * Reads [start, end] over several connections at once, in pieces of one chunk
  * each. The piece being written streams straight to the reader as its bytes
  * arrive; the pieces behind it fill up in memory. No new piece starts while
@@ -566,16 +562,11 @@ async function streamParallel(
   let pieceBytes = Math.min(tuning.chunkBytes, Math.max(1, tuning.firstChunkBytes));
   try {
     for (;;) {
-      while (
-        next <= end &&
-        parallel(source) &&
-        pieces.length < slotsFor(source, windowBytes, tuning) &&
-        (pieces.length === 0 || domainHasRoom(cdnDomainOf(source.url)))
-      ) {
+      while (next <= end && parallel(source) && pieces.length < slotsFor(source, windowBytes, tuning)) {
         const piece = startPiece(source, next, Math.min(end, next + pieceBytes - 1), client, tuning);
         pieces.push(piece);
         next = piece.end + 1;
-        pieceBytes = Math.min(tuning.chunkBytes, pieceBytes * 2);
+        pieceBytes = Math.min(steadyPieceBytes(source, windowBytes, tuning), pieceBytes * 2);
       }
       const head = pieces[0];
       if (!head) break;
@@ -636,18 +627,22 @@ async function writePiece(res: ServerResponse, piece: Piece, client: Client): Pr
 
 /**
  * Fetches a piece to the end, retrying from the last byte received after a
- * failure. A refusal (429 or 503) also means fewer connections for the file.
- * Three failures in a row with no bytes between them fail the piece, and with
- * it the request.
+ * failure. Three failures in a row with no bytes between them fail the piece,
+ * and with it the request. A refusal is not a failure: the piece waits for the
+ * link's next turn, after its pause (up to MAX_REFUSALS in a row).
  */
 async function download(piece: Piece, source: ProxySource, client: Client, tuning: LaneTuning): Promise<void> {
   let failures = 0;
+  let refusals = 0;
   while (!piece.stopped && !client.gone && piece.next <= piece.end) {
     const before = piece.next;
     try {
       await fetchPiece(piece, source, client, tuning);
     } catch (err) {
       if (piece.stopped || client.gone) return;
+      if (piece.next > before) refusals = 0;
+      if (err instanceof RefusedError && ++refusals < MAX_REFUSALS) continue;
+      if (err instanceof RefusedError) throw err;
       failures = piece.next > before ? 1 : failures + 1;
       console.log(`[proxy] upstream at ${piece.next} failed (${failures}/${STREAM_ATTEMPTS}): ${err instanceof Error ? err.message : String(err)}`);
       if (failures >= STREAM_ATTEMPTS) throw err;
@@ -661,31 +656,25 @@ async function download(piece: Piece, source: ProxySource, client: Client, tunin
 /** Reads the rest of a piece from one response, handing each read's bytes to the piece. */
 async function fetchPiece(piece: Piece, source: ProxySource, client: Client, tuning: LaneTuning): Promise<void> {
   const lanesWhenAsked = source.lanes;
-  const domain = cdnDomainOf(source.url);
-  const close = openDomainRequest(domain);
+  const url = source.url;
+  if (!(await linkTurn(url, () => piece.stopped || client.gone))) return;
   const waiting = new AbortController();
   const headerTimer = setTimeout(() => waiting.abort(), UPSTREAM_TIMEOUT_MS);
   piece.cancel = () => waiting.abort();
-  let upstream: Response;
-  try {
-    upstream = await fetch(source.url, {
-      headers: { Range: `bytes=${piece.next}-${piece.end}` },
-      signal: waiting.signal,
-    }).finally(() => {
-      clearTimeout(headerTimer);
-      piece.cancel = NOTHING;
-    });
-  } catch (err) {
-    close();
-    throw err;
-  }
+  const upstream = await fetch(url, {
+    headers: { Range: `bytes=${piece.next}-${piece.end}` },
+    signal: waiting.signal,
+  }).finally(() => {
+    clearTimeout(headerTimer);
+    piece.cancel = NOTHING;
+  });
   if (upstream.status !== 206 || !upstream.body) {
     await upstream.body?.cancel().catch(() => {});
     if (isRefusal(upstream.status)) {
-      backOff(source, lanesWhenAsked);
-      domainRefused(domain);
+      // A 429 or 503 may be a CDN limiting connections as well as requests.
+      if (upstream.status === 429 || upstream.status === 503) backOff(source, lanesWhenAsked);
+      throw refused(url, upstream.status);
     }
-    close();
     throw new Error(`upstream HTTP ${upstream.status}`);
   }
   const reader = upstream.body.getReader();
@@ -707,17 +696,18 @@ async function fetchPiece(piece: Piece, source: ProxySource, client: Client, tun
   } finally {
     piece.cancel = NOTHING;
     await reader.cancel().catch(() => {});
-    close();
   }
 }
 
 /**
  * A refusal from upstream means half as many connections from now on, for this
- * file. A burst of refusals to requests made before the last cut is one event,
- * not one per request, so it does not take the connections straight down to one.
+ * file, and none added back for a while. A burst of refusals to requests made
+ * before the last cut is one event, not one per request, so it does not take
+ * the connections straight down to one.
  */
 function backOff(source: ProxySource, lanesWhenAsked: number | undefined): void {
   if (source.lanes !== lanesWhenAsked) return;
+  source.lanesHeldUntil = Date.now() + LANE_HOLD_MS;
   setLanes(source, Math.max(1, Math.floor((source.lanes ?? 1) / 2)));
 }
 
@@ -745,15 +735,21 @@ function measure(source: ProxySource, tuning: LaneTuning, bytes: number, waitedM
   tally.bytes = 0;
   tally.ms = 0;
   tally.chunks++;
-  const laneBps = source.laneBps === undefined ? sample : (1 - LANE_WEIGHT) * source.laneBps + LANE_WEIGHT * sample;
+  const weight = source.laneBps !== undefined && sample < source.laneBps ? LANE_WEIGHT_DOWN : LANE_WEIGHT;
+  const laneBps = source.laneBps === undefined ? sample : (1 - weight) * source.laneBps + weight * sample;
   source.laneBps = laneBps;
   rememberDomainSpeed(source, laneBps);
-  if (tally.chunks % DECIDE_EVERY === 0) decide(source, laneBps);
+  // Connections are added the moment the file needs more, and taken away only
+  // every DECIDE_EVERY chunks, so a dip is answered and noise is not.
+  const short = lanesFor({ targetBps: source.targetBps, laneBps, current: source.lanes, maxLanes: MAX_LANES }) > (source.lanes ?? 1);
+  if (short || tally.chunks % DECIDE_EVERY === 0) decide(source, laneBps);
 }
 
-/** Plans the connections for the file's measured speed, and logs any change. */
+/** Plans the connections for the file's measured speed (never more while they are held), and logs any change. */
 function decide(source: ProxySource, laneBps: number): void {
-  setLanes(source, lanesFor({ targetBps: source.targetBps, laneBps, current: source.lanes, maxLanes: MAX_LANES }));
+  const lanes = lanesFor({ targetBps: source.targetBps, laneBps, current: source.lanes, maxLanes: MAX_LANES });
+  const held = source.lanes !== undefined && Date.now() < (source.lanesHeldUntil ?? 0);
+  setLanes(source, held ? Math.min(lanes, source.lanes!) : lanes);
 }
 
 /** Sets the connections for the file, and logs the change (with the measured speed, when there is one). */
