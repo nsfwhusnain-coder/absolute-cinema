@@ -17,7 +17,16 @@ import {
   type Outlook,
   type Transition,
 } from "@/lib/playback/orchestrator";
-import { emitPlayerFeedback, setFeedbackTitleContext, clearFeedbackTitleContext } from "@/lib/playback/player-feedback";
+import {
+  PlaybackReporter,
+  clearFeedbackTitleContext,
+  deliveryOfSource,
+  emitPlayerFeedback,
+  setFeedbackTitleContext,
+  type PlayerReadings,
+} from "@/lib/playback/player-feedback";
+import { bufferAheadSeconds } from "@/lib/telemetry/qoe";
+import type { PlayerState } from "./store";
 import { getPreferredProvider, getPreferredQualityHeight, getSavedPlaybackSpeed, setSavedPlaybackSpeed } from "@/lib/player-preferences";
 import type { PlaybackQualityPreference } from "@/lib/profile-preferences";
 import { lacksWantedAudio, normalizeTrackLanguage, selectAudioTrack } from "@/lib/playback/track-selection";
@@ -64,6 +73,20 @@ const SEEK_MOVING_S = 0.25;
 /** Reported when a file is passed over for having no audio in the wanted language. */
 const WRONG_LANGUAGE_REASON = "no audio in the wanted language";
 
+/** The language being heard: a remuxed file's own track, else the element's active one. */
+function heardLanguage(s: PlayerState): string | null {
+  const remux = s.remuxAudio;
+  const remuxTrack = remux ? remux.tracks.find((t) => t.index === remux.active) : undefined;
+  const elementTrack = s.audioTracks.find((t) => t.id === s.activeAudio);
+  return remuxTrack?.language || elementTrack?.lang || null;
+}
+
+/** The language of the subtitles shown, or null while they are off. */
+function shownSubtitleLanguage(s: PlayerState): string | null {
+  if (!s.activeSubtitle) return null;
+  return s.subtitles.find((o) => o.id === s.activeSubtitle)?.language || null;
+}
+
 export interface PlayerControllerOptions {
   videoRef: RefObject<HTMLVideoElement | null>;
   sources: PlaybackSource[];
@@ -98,6 +121,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
   const lastSeekAt = useRef(0);
   const rebufferSwitches = useRef(0);
   const attachAbort = useRef<AbortController | null>(null);
+  /** This title view's heartbeats and summary (see PlaybackReporter). Kept across a development remount of the same title. */
+  const reporterRef = useRef<PlaybackReporter | null>(null);
   const attemptStartedAt = useRef(0);
   /** When the player opened on this title, for what the viewer waited in all. */
   const openedAt = useRef(0);
@@ -163,7 +188,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
         const failure = { event: "handoff_failed" as const, reason, engine: engineRef.current?.kind };
         // The decoder refusing a file may be the device lacking the codec: see reportDecodeFailure.
         if (isViewerSideFailure(failure)) reportDecodeFailure(source.codec);
-        emitPlayerFeedback({ event: "handoff_failed", sourceId: source.id, provider: source.provider, reason, engine: engineRef.current?.kind });
+        emitPlayerFeedback({ event: "handoff_failed", sourceId: source.id, provider: source.provider, reason, engine: engineRef.current?.kind, delivery: deliveryOfSource(source) });
         const name = source.label.split("•")[0]?.trim() || source.provider;
         store.getState().set({ startNote: `${name} ${why}, trying the next server` });
       }
@@ -195,7 +220,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       if (state.phase === "starting") return startFailed(reason);
       if (state.phase !== "playing" && state.phase !== "recovering") return;
       const source = sourceById(state.activeId);
-      if (source) emitPlayerFeedback({ event: "stall", sourceId: source.id, provider: source.provider, reason, engine: engineRef.current?.kind });
+      if (source) emitPlayerFeedback({ event: "stall", sourceId: source.id, provider: source.provider, reason, engine: engineRef.current?.kind, delivery: deliveryOfSource(source) });
       if (state.retries >= 1) optionsRef.current.onRefreshSources();
       apply(onPlaybackError(state, optionsRef.current.sources, reason, ranker(), Date.now(), kind));
     },
@@ -251,6 +276,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
         return;
       }
       if (command.type === "fail") {
+        reporterRef.current?.failed();
         clearTimers();
         if (!autoRefreshed.current) {
           autoRefreshed.current = true;
@@ -270,6 +296,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       if (!video || !engine || !source) return;
       if (command.notice) s.showNotice(command.notice, "warning");
       reportSustained();
+      reporterRef.current?.attach({ sourceId: source.id, provider: source.provider, delivery: deliveryOfSource(source) });
       clearTimers();
       // From here on, errors from the source being replaced are nobody's.
       engine.abandon();
@@ -366,7 +393,38 @@ export function usePlayerController(options: PlayerControllerOptions) {
     const onPageHide = () => engine.leave();
     window.addEventListener("pagehide", onPageHide);
     const { title } = optionsRef.current;
-    setFeedbackTitleContext({ tmdbId: String(title.tmdbId), mediaType: title.mediaType, season: title.season, episode: title.episode });
+    const feedbackTitle = { tmdbId: String(title.tmdbId), mediaType: title.mediaType, season: title.season, episode: title.episode };
+    setFeedbackTitleContext(feedbackTitle);
+    // What a report reads of the player as this engine and element now stand (see PlaybackReporter).
+    const readPlayer = (): PlayerReadings => {
+      const s = store.getState();
+      const stats = engine.stats();
+      // Not every browser has the frame counts; a report without them is still a report.
+      const quality = typeof video.getVideoPlaybackQuality === "function" ? video.getVideoPlaybackQuality() : null;
+      return {
+        engine: engine.kind,
+        paused: video.paused,
+        ended: video.ended,
+        seeking: video.seeking,
+        buffering: s.buffering,
+        positionS: video.currentTime,
+        durationS: remuxDuration.current || (Number.isFinite(video.duration) && video.duration > 0 ? video.duration : optionsRef.current.fallbackDurationS),
+        bufferAheadS: bufferAheadSeconds(video.buffered, video.currentTime),
+        decodedWidth: video.videoWidth,
+        decodedHeight: video.videoHeight,
+        levelBitrateBps: stats.levelBitrateBps,
+        declaredBitrateBps: stats.declaredBitrateBps,
+        bandwidthBps: stats.bandwidthBps,
+        bytesLoaded: stats.fragmentBytes,
+        loadMs: stats.fragmentLoadMs,
+        droppedFrames: quality ? quality.droppedVideoFrames : null,
+        decodedFrames: quality ? quality.totalVideoFrames : null,
+        audioLanguage: heardLanguage(s),
+        subtitleLanguage: shownSubtitleLanguage(s),
+      };
+    };
+    const reporter = (reporterRef.current ??= new PlaybackReporter());
+    reporter.open(readPlayer, feedbackTitle);
     openedAt.current = Date.now();
     pendingSeek.current = null;
     // Mute and full screen carry over from the previous episode (the page stays
@@ -390,6 +448,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
       clearTimers();
       attachAbort.current?.abort();
       window.removeEventListener("pagehide", onPageHide);
+      // Read while the engine still stands; the summary follows a moment later unless another title takes over first.
+      reporterRef.current?.close();
       engine.destroy();
       engineRef.current = null;
       clearFeedbackTitleContext();
@@ -414,6 +474,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       // While another source is being opened, the element still plays the one
       // it replaces. Its frame is not the new source's first.
       if (attaching.current) return;
+      reporterRef.current?.playing();
       s().set({ playing: true, buffering: false, autoplayBlocked: false });
       if (stallTimer.current) clearTimeout(stallTimer.current);
       // A first frame always settles the attach's start timer, whatever the
@@ -428,6 +489,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
         clearTimers();
         const source = sourceById(orchestrator.current.activeId);
         const firstOfTitle = !orchestrator.current.everPlayed;
+        reporterRef.current?.picture(firstOfTitle ? Date.now() - openedAt.current : null);
         orchestrator.current = onFirstFrame(orchestrator.current, Date.now());
         s().set({ phase: "playing", decodedHeight: video.videoHeight, startNote: null });
         // A file played directly says nothing about its range: ask the picture itself.
@@ -443,7 +505,9 @@ export function usePlayerController(options: PlayerControllerOptions) {
             timeToFirstFrameMs: Date.now() - attemptStartedAt.current,
             ...(firstOfTitle ? { sinceOpenMs: Date.now() - openedAt.current } : {}),
             decodedHeight: video.videoHeight,
+            decodedWidth: video.videoWidth,
             engine: engineRef.current?.kind,
+            delivery: deliveryOfSource(source),
           });
         }
       }
@@ -465,7 +529,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       else if (jump && !video.seeking && t > jump.target + SEEK_MOVING_S) {
         pendingSeek.current = null;
         const source = sourceById(orchestrator.current.activeId);
-        if (source) emitPlayerFeedback({ event: "seek", sourceId: source.id, provider: source.provider, seekMs: Math.round(now - jump.at), engine: engineRef.current?.kind });
+        if (source) emitPlayerFeedback({ event: "seek", sourceId: source.id, provider: source.provider, seekMs: Math.round(now - jump.at), engine: engineRef.current?.kind, delivery: deliveryOfSource(source) });
       }
       if (orchestrator.current.phase === "playing" || orchestrator.current.phase === "recovering") positionRef.current = t;
       if (stallTimer.current && !video.paused) {
@@ -486,6 +550,10 @@ export function usePlayerController(options: PlayerControllerOptions) {
     };
     const onWaiting = () => {
       s().set({ buffering: true });
+      // A wait is a stall only after the first picture, and not while a jump (or the grace after one) is what it waits for.
+      reporterRef.current?.waiting(
+        !attaching.current && orchestrator.current.phase === "playing" && !video.seeking && Date.now() - lastSeekAt.current >= SEEK_GRACE_MS
+      );
       if (orchestrator.current.phase !== "playing") return;
       armStall();
       if (video.seeking || Date.now() - lastSeekAt.current < SEEK_GRACE_MS) return;
@@ -501,6 +569,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
     };
     // A jump is a meaningful new position: save it without waiting for the next report.
     const onSeeked = () => {
+      reporterRef.current?.seekDone(!video.paused && !video.ended);
       const duration = effectiveDuration(video);
       if (orchestrator.current.everPlayed && duration > 0) {
         lastProgressAt.current = Date.now();
@@ -523,6 +592,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
     };
     const onPause = () => {
       s().set({ playing: false });
+      reporterRef.current?.paused();
       // Paused by the viewer: buffering that was in progress is no longer a stall.
       if (stallTimer.current) {
         clearTimeout(stallTimer.current);
@@ -535,6 +605,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
     const onMeta = () => s().set({ duration: effectiveDuration(video) });
     const onEnded = () => {
       s().set({ playing: false });
+      reporterRef.current?.ended();
       optionsRef.current.onEnded();
     };
     const onPlay = () => {
@@ -594,6 +665,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
     const seek = (time: number) => {
       const v = video();
       if (!v) return;
+      reporterRef.current?.seeked();
       const duration = store.getState().duration || v.duration;
       const wanted = Math.max(0, Math.min(time, (duration || time) - 0.5));
       const target = engineRef.current?.seekTarget(wanted) ?? wanted;

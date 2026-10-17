@@ -55,6 +55,20 @@ export interface EngineAudioTrack {
   default: boolean;
 }
 
+/** Read-only numbers the player reports (docs/TELEMETRY.md). Each is null when this engine cannot know it. */
+export interface EngineStats {
+  /** Media bytes hls.js has loaded, summed over every source this engine has played. Null for a file the browser loads itself. */
+  fragmentBytes: number | null;
+  /** Milliseconds spent loading those fragments, summed the same way. */
+  fragmentLoadMs: number | null;
+  /** hls.js's own estimate of the connection's speed, in bits per second. */
+  bandwidthBps: number | null;
+  /** The bit rate of the rendition hls.js is playing now. */
+  levelBitrateBps: number | null;
+  /** The bit rate a remuxed file declares for itself (see Playable.declaredBitrateBps). */
+  declaredBitrateBps: number | null;
+}
+
 export interface EngineHandlers {
   onLevels(levels: QualityLevel[]): void;
   onLevelSwitched(index: number): void;
@@ -108,6 +122,10 @@ export class MediaEngine {
   private remuxId: string | null = null;
   /** Set while a sliced stream is attached: jumps then land on these times. */
   private seekPoints: readonly number[] | null = null;
+  /** Running totals of hls.js fragment loads, kept across sources so a report's deltas stay simple. */
+  private fragmentBytes = 0;
+  private fragmentLoadMs = 0;
+  private declaredBitrateBps: number | null = null;
   kind: EngineKind = "native_file";
 
   constructor(
@@ -127,6 +145,7 @@ export class MediaEngine {
     const generation = ++this.generation;
     this.abandoned = false;
     this.seekPoints = null;
+    this.declaredBitrateBps = playable.declaredBitrateBps ?? null;
     this.networkRecoveries = 0;
     this.mediaRecoveries = 0;
     const video = this.video;
@@ -217,6 +236,7 @@ export class MediaEngine {
     hls.on(Hls.Events.FRAG_LOADED, (_e, data) => {
       if (generation !== this.generation) return;
       budget.observe(data.frag.stats.total, data.frag.duration);
+      this.noteFragment(data.frag.stats);
       applyBudget();
     });
     hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => {
@@ -294,6 +314,25 @@ export class MediaEngine {
     this.handlers.onFatal(`media:${this.video.error?.code ?? "unknown"}`);
   }
 
+  /**
+   * What the player reports about delivery. Read-only: nothing here changes
+   * what is loaded or when. Byte and time totals are only meaningful for hls.js;
+   * the browser's own HLS and plain files do not expose their fragments.
+   */
+  stats(): EngineStats {
+    const hls = this.hls;
+    const hlsjs = this.kind === "hlsjs";
+    const index = hls ? (hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel) : -1;
+    const level: Level | undefined = hls && index >= 0 ? hls.levels[index] : undefined;
+    return {
+      fragmentBytes: hlsjs ? this.fragmentBytes : null,
+      fragmentLoadMs: hlsjs ? this.fragmentLoadMs : null,
+      bandwidthBps: hls ? positiveOrNull(hls.bandwidthEstimate) : null,
+      levelBitrateBps: positiveOrNull(level?.bitrate),
+      declaredBitrateBps: this.declaredBitrateBps,
+    };
+  }
+
   setLevel(index: number): void {
     if (!this.hls) return;
     // Next fragment switch keeps what is buffered; -1 = automatic.
@@ -345,6 +384,13 @@ export class MediaEngine {
     }
   }
 
+  /** One fragment hls.js has loaded: its bytes, and the time it took. Bad numbers are left out rather than guessed. */
+  private noteFragment(stats: { total: number; loading: { start: number; end: number } }): void {
+    if (Number.isFinite(stats.total) && stats.total > 0) this.fragmentBytes += stats.total;
+    const ms = stats.loading.end - stats.loading.start;
+    if (Number.isFinite(ms) && ms > 0) this.fragmentLoadMs += ms;
+  }
+
   /** Safari's own HLS player exposes the stream's audio tracks on the element. */
   private reportNativeAudio(generation: number): void {
     const video = this.video;
@@ -374,6 +420,10 @@ export class MediaEngine {
     };
     video.addEventListener("loadedmetadata", apply, { once: true });
   }
+}
+
+function positiveOrNull(value: number | undefined): number | null {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 /** Statuses the remuxer answers with when a source is beyond serving (a busy or slow one answers 503 or 504, and is asked again). */
