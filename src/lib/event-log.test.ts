@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EVENT_RETENTION_DAYS, eventFileName, eventLine, eventLogSettled, isExpiredEventFile, recordEvent, viewerTag } from "./event-log";
+import { EVENT_RETENTION_DAYS, eventDayOfFile, eventFileName, eventLine, eventLogSettled, isExpiredEventFile, recordEvent, viewerTag } from "./event-log";
 
 const NOON = Date.UTC(2026, 9, 11, 12);
 const DAY_MS = 86_400_000;
@@ -54,12 +54,22 @@ describe("recordEvent", () => {
     expect(lines("remux-2026-10-11.jsonl")).toEqual([{ at: NOON, event: "c" }]);
   });
 
+  it("keeps 400 days of event files", () => {
+    expect(EVENT_RETENTION_DAYS).toBe(400);
+  });
+
   it("drops files older than the days kept, and leaves the rest of the folder alone", async () => {
-    const old = eventFileName("web", NOON - 40 * DAY_MS);
-    for (const name of [old, "notes.txt"]) writeFileSync(join(dir, name), "x\n");
+    const old = eventFileName("web", NOON - (EVENT_RETENTION_DAYS + 1) * DAY_MS);
+    const kept = eventFileName("web", NOON - (EVENT_RETENTION_DAYS - 1) * DAY_MS);
+    for (const name of [old, kept, "notes.txt"]) writeFileSync(join(dir, name), "x\n");
     recordEvent("web", "a", {}, NOON + 2 * 60 * 60 * 1000);
     await eventLogSettled();
-    expect(readdirSync(dir).sort()).toEqual(["notes.txt", "web-2026-10-11.jsonl"]);
+    expect(readdirSync(dir).sort()).toEqual(["notes.txt", kept, "web-2026-10-11.jsonl"].sort());
+  });
+
+  it("names the day of an event file, and of nothing else", () => {
+    expect(eventDayOfFile("scraper-2026-10-11.jsonl")).toBe("2026-10-11");
+    expect(eventDayOfFile("notes.txt")).toBeNull();
   });
 
   it("writes nothing when turned off", async () => {

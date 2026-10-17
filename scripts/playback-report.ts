@@ -1,18 +1,21 @@
 /**
  * How well the service has been finding and playing things, from the durable
- * event log (db/events, see src/lib/event-log.ts).
+ * event log (db/events, see src/lib/event-log.ts), and from the daily rollups
+ * kept beside it (db/rollups, see src/lib/telemetry/rollups.ts).
  *
- *   bun scripts/playback-report.ts            the last 7 days
- *   bun scripts/playback-report.ts --days 1   the last day
- *   bun scripts/playback-report.ts --json     the same numbers as JSON
+ *   bun scripts/playback-report.ts                      the last 7 days
+ *   bun scripts/playback-report.ts --days 1             the last day
+ *   bun scripts/playback-report.ts --json               the same numbers as JSON
+ *   bun scripts/playback-report.ts --rollups --days 365 a year from the daily rollups, without the event lines
  *   bun scripts/playback-report.ts --dir ./db/events
  *
  * In Docker: docker exec absolute-cinema bun scripts/playback-report.ts
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import { eventLogDir } from "../src/lib/event-log";
-import { buildPlaybackReport, parseEventLines, type Counted, type EventRow, type PlaybackReport, type Quantiles } from "../src/lib/playback-report";
+import { dirname, join } from "node:path";
+import { eventDayOfFile, eventLogDir } from "../src/lib/event-log";
+import { buildPlaybackReport, countedText, parseEventLines, renderFigures, type EventRow, type PlaybackReport, type Quantiles } from "../src/lib/playback-report";
+import { parseStoredRollup, summarizeRollups, type StoredRollup } from "../src/lib/telemetry/rollups";
 
 const DAY_MS = 86_400_000;
 const DEFAULT_DAYS = 7;
@@ -25,12 +28,27 @@ function option(name: string): string | undefined {
 function readRows(dir: string, from: number): EventRow[] {
   if (!existsSync(dir)) return [];
   const firstDay = new Date(from).toISOString().slice(0, 10);
-  const files = readdirSync(dir).filter((name) => /^(web|remux|scraper)-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name) && name.slice(-16, -6) >= firstDay);
+  const files = readdirSync(dir).filter((name) => {
+    const day = eventDayOfFile(name);
+    return day !== null && day >= firstDay;
+  });
   return files.flatMap((name) => parseEventLines(readFileSync(join(dir, name), "utf8")));
 }
 
+/** The daily rollups of the days from `from` on, oldest first. A file that is not a rollup is passed over. */
+function readRollups(dir: string, from: number): StoredRollup[] {
+  if (!existsSync(dir)) return [];
+  const firstDay = new Date(from).toISOString().slice(0, 10);
+  return readdirSync(dir)
+    .filter((name) => /^\d{4}-\d{2}-\d{2}\.json$/.test(name) && name.slice(0, 10) >= firstDay)
+    .sort()
+    .flatMap((name) => {
+      const rollup = parseStoredRollup(readFileSync(join(dir, name), "utf8"));
+      return rollup ? [rollup] : [];
+    });
+}
+
 const seconds = (q: Quantiles) => (q.n ? `${(q.p50 / 1000).toFixed(1)} s typical, ${(q.p90 / 1000).toFixed(1)} s at worst tenth (${q.n})` : "none");
-const counted = (c: Counted) => Object.entries(c).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(", ") || "none";
 const each = (title: string, by: Record<string, Quantiles>) => Object.entries(by).map(([k, q]) => `    ${k}: ${seconds(q)}`).join("\n") || `    no ${title}`;
 
 function render(r: PlaybackReport): string {
@@ -50,27 +68,43 @@ function render(r: PlaybackReport): string {
     each("waits", r.starts.waitMsByDevice),
     `  file chosen to first picture: ${seconds(r.starts.startMs)}`,
     each("starts", r.starts.startMsByProvider),
-    `  opening a file to remux: ${r.opens.ok} of ${r.opens.total} opened, ${seconds(r.opens.okMs)}; ${counted(r.opens.byOutcome)}`,
+    `  opening a file to remux: ${r.opens.ok} of ${r.opens.total} opened, ${seconds(r.opens.okMs)}; ${countedText(r.opens.byOutcome)}`,
     `  made ready before Play: ${r.readied.asks} asks from title pages, ${r.readied.fresh} opened a file, ${seconds(r.readied.freshMs)}`,
-    `  failed starts by reason: ${counted(r.failures.byReason)}`,
-    `  failed starts by service: ${counted(r.failures.byProvider)}`,
+    `  failed starts by reason: ${countedText(r.failures.byReason)}`,
+    `  failed starts by service: ${countedText(r.failures.byProvider)}`,
     "",
     `PLAYING`,
-    `  by device: ${counted(r.starts.byDevice)}`,
-    `  by service: ${counted(r.starts.byProvider)}`,
-    `  by picture: ${counted(r.starts.byPicture)}`,
-    `  by engine: ${counted(r.starts.byEngine)}`,
-    `  stalls: ${r.failures.stalls} (${counted(r.failures.stallsByReason)})`,
+    `  by device: ${countedText(r.starts.byDevice)}`,
+    `  by service: ${countedText(r.starts.byProvider)}`,
+    `  by picture: ${countedText(r.starts.byPicture)}`,
+    `  by engine: ${countedText(r.starts.byEngine)}`,
+    `  stalls: ${r.failures.stalls} (${countedText(r.failures.stallsByReason)})`,
     `  jumps: ${r.seeks.total}, ${seconds(r.seeks.seekMs)}`,
     each("jumps", r.seeks.seekMsByProvider),
     `  remuxer: ${r.remux.runsStarted} runs started, ${r.remux.viewersLeft} viewers left, ${r.remux.refusedForCapacity} refused for want of a place`,
+    "",
+    ...renderFigures(r.figures),
   ].join("\n");
 }
 
 const days = Number(option("days")) || DEFAULT_DAYS;
 const to = Date.now();
 const from = to - days * DAY_MS;
-const report = buildPlaybackReport(readRows(option("dir") ?? eventLogDir(), from), from, to);
-const nothingPlayed = report.starts.total + report.failures.failedStarts + report.titles.asked === 0;
-if (nothingPlayed && !process.argv.includes("--json")) process.stdout.write("Nothing has been played in this period: the numbers below are empty, not zero.\n\n");
-process.stdout.write(`${process.argv.includes("--json") ? JSON.stringify(report, null, 2) : render(report)}\n`);
+const json = process.argv.includes("--json");
+const eventsDir = option("dir") ?? eventLogDir();
+
+if (process.argv.includes("--rollups")) {
+  const rollups = readRollups(join(dirname(eventsDir), "rollups"), from);
+  const figures = summarizeRollups(rollups);
+  if (json) {
+    process.stdout.write(`${JSON.stringify({ from, to, days: rollups.length, figures }, null, 2)}\n`);
+  } else {
+    const span = rollups.length ? `from ${rollups[0]!.day} to ${rollups[rollups.length - 1]!.day}` : "none stored";
+    process.stdout.write(`Daily rollups, ${rollups.length} day(s), ${span} (UTC)\n\n${renderFigures(figures).join("\n")}\n`);
+  }
+} else {
+  const report = buildPlaybackReport(readRows(eventsDir, from), from, to);
+  const nothingPlayed = report.starts.total + report.failures.failedStarts + report.titles.asked === 0;
+  if (nothingPlayed && !json) process.stdout.write("Nothing has been played in this period: the numbers below are empty, not zero.\n\n");
+  process.stdout.write(`${json ? JSON.stringify(report, null, 2) : render(report)}\n`);
+}

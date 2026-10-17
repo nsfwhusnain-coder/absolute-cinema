@@ -3,6 +3,22 @@
  * how well the service finds and plays things: how often a title has a good
  * file, how long a start takes, where it fails, and on what.
  */
+import {
+  figuresBuilder,
+  percentiles,
+  REAL_SEARCH_MIN_MS,
+  type CapacityFigures,
+  type Peak,
+  type Percentiles,
+  type ProviderFigures,
+  type RemuxFigures,
+  type RollupFigures,
+  type SearchFigures,
+  type StartFigures,
+  type StartTimes,
+  type WatchFigures,
+  type WatchStats,
+} from "./telemetry/rollups";
 
 export interface EventRow {
   at: number;
@@ -45,13 +61,13 @@ export interface PlaybackReport {
   remux: { runsStarted: number; viewersLeft: number; refusedForCapacity: number };
   webProviders: Record<string, { asked: number; found: number; medianMs: number }>;
   rejected: { otherTitle: number; otherLength: number; unusableLinks: number };
+  /** The rollup figures of the same span (see `telemetry/rollups.ts`): searches, watching, remux and CDNs, capacity, providers. */
+  figures: RollupFigures;
 }
 
 const UHD_MIN_LINES = 1500;
 const HD_MIN_LINES = 780;
 const HD_READY_MIN_LINES = 520;
-/** A debrid search this short only read its cache. */
-const REAL_SEARCH_MIN_MS = 100;
 /** An open this short found the file already open. */
 const FRESH_OPEN_MIN_MS = 200;
 
@@ -60,9 +76,8 @@ const number = (value: unknown) => (typeof value === "number" && Number.isFinite
 const count = (into: Counted, key: string) => void (into[key] = (into[key] ?? 0) + 1);
 
 export function quantiles(values: readonly number[]): Quantiles {
-  const sorted = [...values].sort((a, b) => a - b);
-  const at = (share: number) => (sorted.length ? Math.round(sorted[Math.min(sorted.length - 1, Math.floor(share * sorted.length))]!) : 0);
-  return { n: sorted.length, p50: at(0.5), p90: at(0.9) };
+  const shares = percentiles(values);
+  return shares === null ? { n: 0, p50: 0, p90: 0 } : { n: shares.n, p50: Math.round(shares.p50), p90: Math.round(shares.p90) };
 }
 
 /** A wide 4K picture is 1600 lines and a wide 1080p one 800: the name is the one it is sold under. */
@@ -216,6 +231,8 @@ export function buildPlaybackReport(rows: readonly EventRow[], from: number, to:
   const within = rows.filter((row) => row.at >= from && row.at < to);
   const starts = startsOf(within);
   const events = (name: string) => within.filter((r) => r.event === name).length;
+  const figures = figuresBuilder(from, to);
+  for (const row of within) figures.add(row);
   return {
     from,
     to,
@@ -229,6 +246,7 @@ export function buildPlaybackReport(rows: readonly EventRow[], from: number, to:
     remux: remuxOf(within),
     webProviders: webProvidersOf(within),
     rejected: { otherTitle: events("debrid_other_title_rejected"), otherLength: events("vod_other_length_rejected"), unusableLinks: events("debrid_media_rejected") },
+    figures: figures.finish().figures,
   };
 }
 
@@ -245,4 +263,153 @@ export function parseEventLines(text: string): EventRow[] {
     }
   }
   return rows;
+}
+
+/* The rollup figures, as the report's sections. Each heading says "no data" for what the log does not hold, never zeros. */
+
+export const formatSeconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
+const formatBufferSeconds = (seconds: number): string => `${seconds.toFixed(1)} s`;
+export const formatMbit = (bps: number): string => `${(bps / 1e6).toFixed(1)} Mbit/s`;
+const formatCount = (value: number): string => String(Math.round(value));
+const formatPercent = (ratio: number): string => `${(ratio * 100).toFixed(2)}%`;
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
+  return `${Math.round(bytes / 1e3)} kB`;
+}
+
+/** "1080 4, 720 1": the most first; "none" for no keys. */
+export function countedText(counted: Counted): string {
+  return Object.entries(counted).sort((a, b) => b[1] - a[1]).map(([key, n]) => `${key} ${n}`).join(", ") || "none";
+}
+
+const median = (p: Percentiles | null, unit: (value: number) => string): string => (p === null ? "no data" : `median ${unit(p.p50)}`);
+/** "median 2.0 s, p10 1.0 s, p90 4.0 s (12)" */
+const spread = (p: Percentiles | null, unit: (value: number) => string): string =>
+  p === null ? "no data" : `median ${unit(p.p50)}, p10 ${unit(p.p10)}, p90 ${unit(p.p90)} (${p.n})`;
+const peakText = (p: Peak | null, unit: (value: number) => string): string => (p === null ? "no data" : `peak ${unit(p.peak)}, p95 ${unit(p.p95)}`);
+
+function searchLines(s: SearchFigures): string[] {
+  const found = Object.entries(s.found)
+    .filter(([, counted]) => Object.keys(counted).length > 0)
+    .map(([service, counted]) => `${service} ${countedText(counted)}`);
+  return [
+    "SEARCHES",
+    s.discoveries ? `  titles settled: ${s.discoveries}, by outcome ${countedText(s.byOutcome)}` : "  titles settled: no data",
+    found.length ? `  files found, by service and quality: ${found.join("; ")}` : "  files found, by service and quality: no data",
+    Object.keys(s.judged).length ? `  judged debrid files: ${countedText(s.judged)}` : "  judged debrid files: no data",
+    s.answers.total
+      ? `  answers: ${s.answers.total}, by mode ${countedText(s.answers.byMode)}, by cache ${countedText(s.answers.byCache)}`
+      : "  answers: no data",
+    `  answer time: ${spread(s.answers.totalMs, formatSeconds)}`,
+  ];
+}
+
+function watchGroupLine(name: string, w: WatchStats): string {
+  const perHour = w.stallsPerHour === null ? "no hours to count against" : `${w.stallsPerHour.toFixed(2)} per hour`;
+  const dropped = w.droppedFrameRatio === null ? "no data" : formatPercent(w.droppedFrameRatio);
+  return `    ${name}: ${w.hours.toFixed(1)} h, ${w.stalls} stalls (${perHour}), bit rate ${median(w.bitrateBps, formatMbit)}, bandwidth ${median(w.bandwidthBps, formatMbit)}, buffer ${median(w.bufferAheadS, formatBufferSeconds)}, dropped frames ${dropped}`;
+}
+
+/** The groups of a watch figure, the most hours first. */
+function watchGroups(heading: string, groups: Record<string, WatchStats>): string[] {
+  const sorted = Object.entries(groups).sort((a, b) => b[1].hours - a[1].hours);
+  return sorted.length ? [`  ${heading}:`, ...sorted.map(([name, w]) => watchGroupLine(name, w))] : [];
+}
+
+/** "desktop median 2.0 s to picture from the file, 3.0 s from opening (2)" */
+function startGroups(heading: string, groups: Record<string, StartTimes>): string {
+  const parts = Object.entries(groups).map(([name, t]) => `${name} ${median(t.timeToFirstFrameMs, formatSeconds)} from the file, ${median(t.sinceOpenMs, formatSeconds)} from opening`);
+  return `  first picture ${heading}: ${parts.join("; ") || "no data"}`;
+}
+
+function watchingLines(watching: WatchFigures, starts: StartFigures): string[] {
+  const o = watching.overall;
+  const hours = o.heartbeats ? `${o.hours.toFixed(1)} h (${o.heartbeats} heartbeats)` : "no data";
+  const stalls = o.heartbeats || o.stalls
+    ? `${o.stalls}, ${o.stallsPerHour === null ? "no hours to count against" : `${o.stallsPerHour.toFixed(2)} per hour`}, stalled ${formatSeconds(o.stalledMs)}`
+    : "no data";
+  const dropped = o.droppedFrameRatio === null ? "no data" : `${formatPercent(o.droppedFrameRatio)} of ${o.decodedFrames} decoded`;
+  const ends = Object.keys(watching.endReasons).length ? `${countedText(watching.endReasons)}; startup ${spread(watching.startupMs, formatSeconds)}` : "no data";
+  const firstPicture = starts.timeToFirstFrameMs ? `  first picture, file chosen to picture: ${spread(starts.timeToFirstFrameMs, formatSeconds)}` : "  first picture: no data";
+  return [
+    "WATCHING",
+    `  hours watched: ${hours}`,
+    `  stalls: ${stalls}`,
+    `  delivered bit rate: ${spread(o.bitrateBps, formatMbit)}`,
+    `  bandwidth estimate: ${spread(o.bandwidthBps, formatMbit)}`,
+    `  buffer ahead: ${spread(o.bufferAheadS, formatBufferSeconds)}`,
+    `  dropped frames: ${dropped}`,
+    `  how titles were left: ${ends}`,
+    firstPicture,
+    startGroups("by device", starts.byDevice),
+    startGroups("by delivery", starts.byDelivery),
+    startGroups("by engine", starts.byEngine),
+    ...watchGroups("by device", watching.byDevice),
+    ...watchGroups("by quality", watching.byQuality),
+    ...watchGroups("by delivery", watching.byDelivery),
+  ];
+}
+
+function remuxLines(remux: RemuxFigures): string[] {
+  const cdns = Object.entries(remux.byCdn).sort((a, b) => b[1].sessions - a[1].sessions);
+  return [
+    "REMUX AND CDNS",
+    remux.sessions
+      ? `  sessions: ${remux.sessions}; read from CDNs ${formatBytes(remux.bytesUpstream)}, handed to players ${formatBytes(remux.bytesServed)}`
+      : "  sessions: no data",
+    remux.opens.total
+      ? `  file opens: ${remux.opens.total}, by outcome ${countedText(remux.opens.byOutcome)}; open ${median(remux.opens.tookMs, formatSeconds)}`
+      : "  file opens: no data",
+    ...(cdns.length
+      ? cdns.map(
+          ([cdn, c]) =>
+            `  ${cdn}: sessions ${c.sessions}; lane speed ${spread(c.laneBps, formatMbit)}; refusals ${c.refusals}, silences ${c.silences}, wrong ranges ${c.wrongRanges}; index ${median(c.openMs, formatSeconds)}, first fragment ${median(c.firstFragmentMs, formatSeconds)}`,
+        )
+      : ["  per CDN: no data"]),
+  ];
+}
+
+function capacityLines(c: CapacityFigures): string[] {
+  if (c.snapshots === 0) return ["CAPACITY", "  no data"];
+  const busiest = c.busiest
+    ? `${new Date(c.busiest.at).toISOString().slice(0, 16).replace("T", " ")} UTC, sending ${formatMbit(c.busiest.txBps)}`
+    : "no data";
+  return [
+    "CAPACITY",
+    `  minutes sampled: ${c.snapshots}`,
+    `  viewers: ${peakText(c.viewers, formatCount)}`,
+    `  runs: ${peakText(c.runs, formatCount)}; sessions: ${peakText(c.sessions, formatCount)}`,
+    `  container network, down: ${peakText(c.rxBps, formatMbit)}; up: ${peakText(c.txBps, formatMbit)}`,
+    `  read from CDNs: ${peakText(c.upstreamBps, formatMbit)}; handed to players: ${peakText(c.servedBps, formatMbit)}`,
+    `  remuxer cpu: ${peakText(c.cpuPercent, (value) => `${Math.round(value)}%`)}`,
+    `  busiest minute: ${busiest}`,
+  ];
+}
+
+function providerLines(p: ProviderFigures): string[] {
+  const scrapers = Object.entries(p.scraper);
+  const debrid = Object.entries(p.debrid).flatMap(([service, times]) => (times === null ? [] : [[service, times] as const]));
+  return [
+    "PROVIDERS",
+    ...(scrapers.length
+      ? scrapers.map(([name, s]) => `  scraper ${name}: ${s.hit} hit, ${s.empty} empty, ${s.error} error; ${median(s.ms, formatSeconds)}`)
+      : ["  scrapers: no data"]),
+    ...(debrid.length ? debrid.map(([service, times]) => `  debrid search ${service}: ${spread(times, formatSeconds)}`) : ["  debrid searches: no data"]),
+  ];
+}
+
+/** The rollup figures as the report's last sections: searches, watching, remux and CDNs, capacity, providers. */
+export function renderFigures(figures: RollupFigures): string[] {
+  return [
+    ...searchLines(figures.searches),
+    "",
+    ...watchingLines(figures.watching, figures.starts),
+    "",
+    ...remuxLines(figures.remux),
+    "",
+    ...capacityLines(figures.capacity),
+    "",
+    ...providerLines(figures.providers),
+  ];
 }

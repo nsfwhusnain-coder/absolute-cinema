@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { buildPlaybackReport, parseEventLines, pictureName, quantiles, type EventRow } from "./playback-report";
+import { buildPlaybackReport, countedText, formatBytes, parseEventLines, pictureName, quantiles, renderFigures, type EventRow } from "./playback-report";
 
 const T = Date.UTC(2026, 9, 11, 12);
 const feedback = (feedbackEvent: string, fields: Record<string, unknown> = {}): EventRow => ({
@@ -118,5 +118,61 @@ describe("parseEventLines", () => {
       { at: 1, event: "a" },
       { at: 3, event: "b", n: 1 },
     ]);
+  });
+});
+
+describe("rollup figures in the report", () => {
+  const rows: EventRow[] = [
+    { at: T, event: "discovery_summary", outcome: "2160", found: { realdebrid: { "2160": 2 } }, judged: { realdebrid: { tier3: 1 } } },
+    { at: T, event: "discovery_summary", outcome: "web_only", found: { vixsrc: { "1080": 1 } } },
+    feedback("heartbeat", { watchedMs: 1_800_000, bytesLoaded: 1_000_000, loadMs: 1000, bandwidthBps: 9_000_000, bufferAheadS: 20, decodedFrames: 1000, droppedFrames: 3, decodedHeight: 1080, decodedWidth: 1920, delivery: "remux" }),
+    { at: T, event: "capacity_snapshot", viewers: 3, runs: 1, sessions: 1, rxBps: 1_000_000, txBps: 20_000_000, upstreamBps: 2_000_000, servedBps: 3_000_000, cpuPercent: 40 },
+    { at: T, event: "remux_session_summary", cdn: "real-debrid.com", bytesUpstream: 2_000_000_000, bytesServed: 1_000_000_000, laneBps: { median: 16_000_000 }, refusals: 1, silences: 0, wrongRanges: 0, openMs: 500, firstFragmentMs: 1200 },
+    { at: T, event: "provider_result", provider: "vixsrc", status: "hit", ms: 1500 },
+  ];
+
+  it("carries the span's rollup figures, the same as a daily rollup of them", () => {
+    const { figures } = report(rows);
+    expect(figures.searches).toMatchObject({ discoveries: 2, byOutcome: { "2160": 1, web_only: 1 }, found: { realdebrid: { "2160": 2 }, vixsrc: { "1080": 1 } }, judged: { tier3: 1 } });
+    expect(figures.watching.overall).toMatchObject({ hours: 0.5, stalls: 0, droppedFrameRatio: 0.003, bitrateBps: { n: 1, p50: 8_000_000 }, bandwidthBps: { p50: 9_000_000 } });
+    expect(figures.watching.byQuality["1080"]).toMatchObject({ hours: 0.5 });
+    expect(figures.capacity).toMatchObject({ snapshots: 1, viewers: { peak: 3, p95: 3 }, busiest: { at: T, txBps: 20_000_000 } });
+    expect(figures.remux.byCdn["real-debrid.com"]).toMatchObject({ sessions: 1, refusals: 1, laneBps: { p50: 16_000_000 } });
+    expect(figures.providers.scraper.vixsrc).toMatchObject({ hit: 1, ms: { p50: 1500 } });
+  });
+
+  it("prints the sections from the figures, in the report's style", () => {
+    const text = renderFigures(report(rows).figures).join("\n");
+    expect(text).toContain("SEARCHES\n  titles settled: 2, by outcome 2160 1, web_only 1");
+    expect(text).toContain("  files found, by service and quality: realdebrid 2160 2; vixsrc 1080 1");
+    expect(text).toContain("  judged debrid files: tier3 1");
+    expect(text).toContain("  delivered bit rate: median 8.0 Mbit/s, p10 8.0 Mbit/s, p90 8.0 Mbit/s (1)");
+    expect(text).toContain("  dropped frames: 0.30% of 1000 decoded");
+    expect(text).toContain("  real-debrid.com: sessions 1; lane speed median 16.0 Mbit/s, p10 16.0 Mbit/s, p90 16.0 Mbit/s (1); refusals 1, silences 0, wrong ranges 0; index median 0.5 s, first fragment median 1.2 s");
+    expect(text).toContain("  sessions: 1; read from CDNs 2.0 GB, handed to players 1.0 GB");
+    expect(text).toContain("  viewers: peak 3, p95 3");
+    expect(text).toContain("  busiest minute: 2026-10-11 12:00 UTC, sending 20.0 Mbit/s");
+    expect(text).toContain("  scraper vixsrc: 1 hit, 0 empty, 0 error; median 1.5 s");
+    expect(text).not.toContain("NaN");
+  });
+
+  it("says no data, not zeros, for a span without the new events", () => {
+    const text = renderFigures(report([feedback("first_frame", { timeToFirstFrameMs: 3000 })]).figures).join("\n");
+    expect(text).toContain("SEARCHES\n  titles settled: no data");
+    expect(text).toContain("WATCHING\n  hours watched: no data\n  stalls: no data");
+    expect(text).toContain("REMUX AND CDNS\n  sessions: no data");
+    expect(text).toContain("CAPACITY\n  no data");
+    expect(text).toContain("PROVIDERS\n  scrapers: no data");
+    expect(text).not.toContain("NaN");
+  });
+});
+
+describe("formatting", () => {
+  it("writes counts most first, and sizes in the largest unit that fits", () => {
+    expect(countedText({ a: 1, b: 3 })).toBe("b 3, a 1");
+    expect(countedText({})).toBe("none");
+    expect(formatBytes(1_500_000_100)).toBe("1.5 GB");
+    expect(formatBytes(12_000_000)).toBe("12.0 MB");
+    expect(formatBytes(5_000)).toBe("5 kB");
   });
 });

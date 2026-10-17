@@ -16,7 +16,12 @@ import { join } from "node:path";
 /** Which process wrote the line; each has its own file, so no two processes share one. */
 export type EventSource = "web" | "remux" | "scraper";
 
-export const EVENT_RETENTION_DAYS = 30;
+/**
+ * Days of event files kept. A year of history is read against the year before
+ * it; the daily rollups (`telemetry/rollups.ts`) are kept for good, so what is
+ * dropped here is only the raw lines behind them.
+ */
+export const EVENT_RETENTION_DAYS = 400;
 const MAX_DAILY_BYTES = 64 * 1024 * 1024;
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const DAY_MS = 86_400_000;
@@ -35,10 +40,15 @@ export function eventFileName(source: EventSource, at: number): string {
   return `${source}-${day(at)}.jsonl`;
 }
 
+/** The day (`YYYY-MM-DD`, UTC) an event file is for; null for any file that is not an event file. */
+export function eventDayOfFile(name: string): string | null {
+  return FILE_NAME.exec(name)?.[2] ?? null;
+}
+
 /** True for an event file older than the days kept; false for any other file. */
 export function isExpiredEventFile(name: string, now: number): boolean {
-  const written = FILE_NAME.exec(name)?.[2];
-  return written !== undefined && written < day(now - EVENT_RETENTION_DAYS * DAY_MS);
+  const written = eventDayOfFile(name);
+  return written !== null && written < day(now - EVENT_RETENTION_DAYS * DAY_MS);
 }
 
 /**

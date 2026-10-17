@@ -24,6 +24,7 @@ import { UNUSABLE_HEADER } from "../../src/lib/playback/remuxer";
 import { parseAudioCaps } from "../../src/lib/playback/decode-capability";
 import { recordEvent } from "../../src/lib/event-log";
 import { metrics } from "../../src/lib/metrics";
+import { writeRollups } from "../../src/lib/telemetry/rollups";
 import { onClientGone, serveRange } from "./source-proxy";
 import { removeCacheLeftovers } from "./cache-leftovers";
 import {
@@ -304,3 +305,8 @@ function shutdown(): void {
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+
+// The daily rollups of the event log (docs/TELEMETRY.md): two minutes after start, then hourly. A failure is logged and tried again within the hour.
+const rollupsRun = (): void => void writeRollups().catch((err: unknown) => console.log(`[rollups] ${err instanceof Error ? err.message : String(err)}`));
+setTimeout(rollupsRun, 2 * 60_000).unref();
+setInterval(rollupsRun, 60 * 60_000).unref();
