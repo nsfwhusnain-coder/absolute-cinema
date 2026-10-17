@@ -3,6 +3,7 @@ import type { HlsSession } from "@/lib/hls-session";
 import { SegmentReadAhead, type ReadAheadBody } from "@/lib/hls-readahead";
 import { plainClientHeaders, wantsPlainClient } from "@/lib/playback/cdn-request-policy";
 import { preferSharpVariants } from "@/lib/hls/master-order";
+import { playbackCaps } from "@/lib/public-instance";
 import {
   buildDashTemplateProxyUrl,
   dashRepresentationIdForProxy,
@@ -972,8 +973,9 @@ async function prepareM3u8ForClient(
         prepared = injectMissingResolutionsSync(rawText, upstream, height);
       }
     }
-    // Native players open on the first rendition listed: sharp ones first, none under 1080p when there is 1080p.
-    return preferSharpVariants(prepared);
+    // Native players open on the first rendition listed: sharp ones first, none under 1080p when there is 1080p,
+    // and none over this server's cap (PLAYBACK_MAX_HEIGHT).
+    return preferSharpVariants(prepared, playbackCaps().maxHeight);
   } catch {
     // Hard requirement: never serve a broken rewrite — fall back to original.
     return rawText;

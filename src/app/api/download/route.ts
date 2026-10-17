@@ -4,6 +4,7 @@ import { getFreshCachedStream } from "@/lib/playback/debrid/cached-stream";
 import { parseDebridPlaybackSourceId } from "@/lib/playback/debrid/debrid-source-id";
 import { lookupPlaybackSourceUrl } from "@/lib/playback/source-url-cache";
 import { redeemSourceUrlTicket } from "@/lib/playback/source-url-ticket";
+import { isPublicInstance } from "@/lib/public-instance";
 
 const HEAD_TIMEOUT_MS = 8_000;
 /** How long the file's server may take to start answering. The transfer itself has no limit. */
@@ -105,6 +106,10 @@ export async function GET(req: NextRequest) {
   const userId = await getAuthenticatedUserId();
   if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  // A whole file through the tunnel would take its width for an hour, with no seat to account for it.
+  if (isPublicInstance()) {
+    return NextResponse.json({ error: "Downloads are off on this server" }, { status: 403 });
   }
   const url = new URL(req.url);
   const type = url.searchParams.get("type");

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { assignLegacyAvatarColors, profilePickerEnabled, signupsOpen } from "@/lib/profiles";
+import { assignLegacyAvatarColors, profilePickerEnabled, signupsOpen, requirePin } from "@/lib/profiles";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
  */
 export async function GET() {
   await assignLegacyAvatarColors().catch(() => undefined);
-  const [count, picker, open] = await Promise.all([db.user.count(), profilePickerEnabled(), signupsOpen()]);
+  const [count, picker, open, pinNeeded] = await Promise.all([db.user.count(), profilePickerEnabled(), signupsOpen(), requirePin()]);
   const profiles = picker
     ? (
         await db.user.findMany({
@@ -22,7 +22,7 @@ export async function GET() {
       ).map(({ pinRequired, ...profile }) => ({ ...profile, locked: pinRequired }))
     : [];
   return NextResponse.json(
-    { firstRun: count === 0, signupsOpen: open || count === 0, pickerEnabled: picker, profiles },
+    { firstRun: count === 0, signupsOpen: open || count === 0, pickerEnabled: picker, requirePin: pinNeeded, profiles },
     { headers: { "Cache-Control": "no-store" } }
   );
 }

@@ -9,7 +9,9 @@
  * smallest of the sharp ones is listed first (a start that does not lean on
  * the connection), and the taller follow. Renditions that do not say their
  * size are kept, last. Other tags keep their order, ahead of the renditions.
- * Anything not understood is returned as it came.
+ * A server that holds the picture to a height (PLAYBACK_MAX_HEIGHT) lists
+ * nothing taller, so no player climbs past it, as long as something sized
+ * fits. Anything not understood is returned as it came.
  */
 
 export const SHARP_HEIGHT = 1080;
@@ -25,7 +27,7 @@ function heightOf(tag: string): number | null {
   return match ? Number(match[2]) : null;
 }
 
-export function preferSharpVariants(text: string): string {
+export function preferSharpVariants(text: string, maxHeight: number | null = null): string {
   if (!text.includes("#EXT-X-STREAM-INF")) return text;
   const lines = text.split("\n");
   const kept: string[] = [];
@@ -45,9 +47,11 @@ export function preferSharpVariants(text: string): string {
   }
   // A bare URI outside a rendition is not a master this understands.
   if (variants.length < 2 || kept.some((line) => line.trim() && !line.trim().startsWith("#"))) return text;
-  const sized = variants.filter((v) => v.height !== null);
+  const fitting = maxHeight === null ? variants : variants.filter((v) => v.height === null || v.height <= maxHeight);
+  const pool = fitting.some((v) => v.height !== null) ? fitting : variants;
+  const sized = pool.filter((v) => v.height !== null);
   const sharp = sized.filter((v) => v.height! >= SHARP_HEIGHT);
-  const chosen = sharp.length ? variants.filter((v) => v.height === null || v.height >= SHARP_HEIGHT) : variants;
+  const chosen = sharp.length ? pool.filter((v) => v.height === null || v.height >= SHARP_HEIGHT) : pool;
   const opening = sharp.length ? Math.min(...sharp.map((v) => v.height!)) : Math.max(0, ...sized.map((v) => v.height!));
   const rank = (v: Variant) => (v.height === null ? 2 : v.height === opening ? 0 : 1);
   const ordered = [...chosen].sort((a, b) => rank(a) - rank(b) || (b.height ?? 0) - (a.height ?? 0) || a.order - b.order);

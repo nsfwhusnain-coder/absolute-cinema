@@ -59,4 +59,22 @@ describe("preferSharpVariants", () => {
     const master = ["#EXTM3U", "#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=854x480", "480.m3u8", "#EXT-X-STREAM-INF:BANDWIDTH=2,RESOLUTION=1920x1080", "1080.m3u8", ""].join("\r\n");
     expect(preferSharpVariants(master)).toBe(["#EXTM3U", "#EXT-X-STREAM-INF:BANDWIDTH=2,RESOLUTION=1920x1080", "1080.m3u8", ""].join("\r\n"));
   });
+
+  it("lists nothing over the server's cap, while something sized fits", () => {
+    const master = lines(
+      "#EXTM3U",
+      "#EXT-X-STREAM-INF:BANDWIDTH=16000000,RESOLUTION=3840x2160",
+      "2160.m3u8",
+      "#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080",
+      "1080.m3u8",
+      "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720",
+      "720.m3u8"
+    );
+    const uris = (text: string) => text.split("\n").filter((l) => l && !l.startsWith("#"));
+    expect(uris(preferSharpVariants(master, 1080))).toEqual(["1080.m3u8"]);
+    expect(uris(preferSharpVariants(master, 720))).toEqual(["720.m3u8"]);
+    // Nothing sized fits: the master is ordered as it would be without a cap.
+    expect(uris(preferSharpVariants(master, 480))).toEqual(["1080.m3u8", "2160.m3u8"]);
+    expect(uris(preferSharpVariants(master))).toEqual(["1080.m3u8", "2160.m3u8"]);
+  });
 });

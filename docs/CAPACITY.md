@@ -236,7 +236,11 @@ limit on this machine with its boost off.
 
 For viewers outside the home, the upload is the limit long before any of
 this: 45 Mbit/s carries one 4K remux, or two to four 1080p streams. Set
-`CAPACITY_UPLINK_MBPS` before opening the site to the internet.
+`CAPACITY_UPLINK_MBPS` before opening the site to the internet. A public
+instance (`PUBLIC_INSTANCE=1`, docs/SHARING.md) counts every viewer as
+outside the home; behind Tailscale Funnel, which carried about 20 Mbit/s,
+that is two or three 1080p streams, with `PLAYBACK_MAX_HEIGHT` and
+`PLAYBACK_MAX_MBPS` keeping heavier files off the menu.
 
 What would raise it: the remuxer's main thread copies every byte of every
 stream twice (from the CDN to ffmpeg, from ffmpeg's fragments to the player)

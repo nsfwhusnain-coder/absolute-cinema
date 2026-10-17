@@ -3,6 +3,7 @@ import { getAuthenticatedUser } from "@/lib/auth";
 import { clientIpFromHeaders } from "@/lib/login-rate-limit";
 import { isRemoteAddress } from "@/lib/playback/network-place";
 import { REMUXER_URL, watcherOf } from "@/lib/playback/remuxer";
+import { isPublicInstance } from "@/lib/public-instance";
 
 export const dynamic = "force-dynamic";
 
@@ -31,7 +32,8 @@ export async function POST(req: NextRequest) {
     delivery: body.delivery === "web" || body.delivery === "direct" ? body.delivery : "remux",
     height: Number.isFinite(height) && height > 0 ? Math.min(MAX_HEIGHT, Math.round(height)) : 0,
     bitrateBps: Number.isFinite(bitrate) && bitrate > 0 ? Math.min(MAX_BITRATE_BPS, Math.round(bitrate)) : 0,
-    remote: isRemoteAddress(clientIpFromHeaders(req.headers)),
+    // A public instance, reached only through a tunnel, has no viewers at home (docs/SHARING.md).
+    remote: isPublicInstance() || isRemoteAddress(clientIpFromHeaders(req.headers)),
     ...(typeof body.ticket === "string" && TICKET.test(body.ticket) ? { ticket: body.ticket } : {}),
     resume: body.resume === true,
   };

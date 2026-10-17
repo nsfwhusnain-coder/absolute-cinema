@@ -122,7 +122,8 @@ export interface PlaybackSource {
   identityEvidence?: IdentityEvidence;
   /**
    * Opaque AES-GCM ticket for /api/vod/open. Encodes the already-resolved
-   * URL so remux never scrapes again, even after a process restart.
+   * URL so remux never scrapes again, even after a process restart (when the
+   * server has a secret: NEXTAUTH_SECRET, which the Docker entrypoint makes).
    */
   remuxTicket?: string;
   /** Exact file size when the resolver knew it (Torrentio footer, RD filesize). */
@@ -147,13 +148,11 @@ export interface PlaybackSource {
   /** The release the file came from, as the index named it. */
   releaseTitle?: string;
   /**
-   * Actual container format, when known. Debrid sources always drop MKV/WebM
-   * before ever becoming a PlaybackSource (see
-   * src/lib/playback/debrid/torrentio.ts `isBrowserPlayableContainer` +
-   * index.ts) — a source that reaches the client is always mp4/mov, or
-   * "unknown" when the container couldn't be determined (heuristic honesty,
-   * never invented). Optional/additive so existing embed sources are
-   * unaffected.
+   * Actual container format, when known (heuristic honesty, never invented).
+   * Debrid MKV/WebM files reach the client and play remuxed (sourceDelivery in
+   * source-quality.ts); on a public instance they are the only debrid files
+   * offered (served-sources.ts). Optional/additive so existing embed sources
+   * are unaffected.
    */
   container?: "mp4" | "mkv" | "webm" | "mov" | "unknown";
   /** Present after full scrape latency probe; drives measured ranking when ok. */
@@ -225,6 +224,8 @@ export interface PlaybackResponse {
   refreshNonce?: number;
   /** False when the remux packer is already at capacity. */
   remuxAvailable?: boolean;
+  /** False on a server that offers no downloads (a public instance, src/lib/public-instance.ts). */
+  downloadsAvailable?: boolean;
 }
 
 export interface PlaybackProvider {

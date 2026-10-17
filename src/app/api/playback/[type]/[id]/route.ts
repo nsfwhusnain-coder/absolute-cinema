@@ -19,6 +19,8 @@ import {
   playbackRefreshMode,
 } from "@/lib/playback/refresh-mode";
 import { proxyRecoveryDebridSources } from "@/lib/playback/recovery-proxy";
+import { offeredSources, servedAnswer } from "@/lib/playback/served-sources";
+import { capsRuleOutFourK, isPublicInstance, playbackCaps } from "@/lib/public-instance";
 import { consumePlaybackResolveBudget } from "@/lib/playback/resolve-budget";
 import { stampSourceUrlTickets } from "@/lib/playback/source-url-ticket";
 import {
@@ -197,7 +199,8 @@ export async function GET(
     remuxHasCapacity(),
   ]);
   const qualityHint = profilePreferences.playbackQuality;
-  const want4k = qualityHint === "auto" || (typeof qualityHint === "number" && qualityHint >= 2160);
+  // A server that offers no 4K (PLAYBACK_MAX_HEIGHT) does not look for any.
+  const want4k = !capsRuleOutFourK(playbackCaps()) && (qualityHint === "auto" || (typeof qualityHint === "number" && qualityHint >= 2160));
   const decideOptions = {
     preferredHeight: qualityHint,
     fourKStartup: "fast",
@@ -272,9 +275,10 @@ export async function GET(
       }
 
       return NextResponse.json({
-        ...healthAware,
+        ...servedAnswer(healthAware),
         preferences: profilePreferences,
         remuxAvailable,
+        downloadsAvailable: !isPublicInstance(),
       }, {
         headers: {
           "Cache-Control": "private, no-store",
@@ -313,7 +317,8 @@ export async function GET(
 
   let result: PlaybackResponse;
   if (fast) {
-    const debridSources = await debridPromise;
+    // Only what this server offers can make a fast start (served-sources.ts): otherwise the quick providers answer.
+    const debridSources = offeredSources(await debridPromise);
     const debridOnly = buildFastDebridResponse(
       debridSources,
       qualityHint ?? "auto",
@@ -360,8 +365,9 @@ export async function GET(
       debridCount: resolvedDebridSources.length,
       providersPending,
     });
+    // A public instance's browsers never read a debrid file themselves (src/lib/public-instance.ts): nothing to refresh.
     const debridSources =
-      refreshMode === "recovery" && refreshNonce != null
+      refreshMode === "recovery" && refreshNonce != null && !isPublicInstance()
         ? proxyRecoveryDebridSources(
             userId,
             resolvedDebridSources,
@@ -413,9 +419,10 @@ export async function GET(
   }
 
   return NextResponse.json({
-    ...healthAwareResult,
+    ...servedAnswer(healthAwareResult),
     preferences: profilePreferences,
     remuxAvailable,
+    downloadsAvailable: !isPublicInstance(),
     ...(refreshNonce != null ? { refreshNonce } : {}),
   }, {
     headers: {
@@ -436,8 +443,11 @@ function withRuntimeProviderHealth(
   memory: ReadonlyMap<string, SourceMemoryRecord> = new Map()
 ): PlaybackResponse {
   if (!result.sources?.length) return result;
+  // What this server offers at all: its caps, and on a public instance no debrid file a browser would read itself.
+  const offered = offeredSources(result.sources);
+  if (!offered.length) return { ...result, sources: [], streamUrl: undefined };
   const healthy = sourcesWithProviderHealth(
-    withCdnRates(result.sources),
+    withCdnRates(offered),
     providerHealthRegistry,
     { contentClass, viewerId }
   );
@@ -462,7 +472,7 @@ function withRuntimeProviderHealth(
   return {
     ...result,
     sources: ticketed,
-    streamUrl: best?.url ?? result.streamUrl,
+    streamUrl: best?.url ?? (offered.length === result.sources.length ? result.streamUrl : undefined),
   };
 }
 

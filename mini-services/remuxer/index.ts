@@ -102,6 +102,8 @@ import {
 
 const PORT = Number(process.env.REMUXER_PORT || 3040);
 const CACHE_DIR = process.env.REMUX_CACHE_DIR || "/app/transcode-cache";
+/** A public instance (src/lib/public-instance.ts): every viewer is outside the home. */
+const ALL_REMOTE = ["1", "on", "true"].includes(process.env.PUBLIC_INSTANCE?.trim().toLowerCase() ?? "");
 const MAX_START_AT_S = 24 * 60 * 60;
 const SESSION_ID = /^[a-f0-9]{24}$/;
 
@@ -606,7 +608,7 @@ const server = createServer(async (req, res) => {
         const seated = given.state === "active" && governor.attach(seat, watcher, id);
         if (!seated) seat = "";
         if (!seated && !governor.seated(id, watcher)) {
-          const asked = governor.admitUnasked(watcher, { delivery: "remux", height: Number(url.searchParams.get("height")) || 2160, bitrateBps: 0, remote: false });
+          const asked = governor.admitUnasked(watcher, { delivery: "remux", height: Number(url.searchParams.get("height")) || 2160, bitrateBps: 0, remote: ALL_REMOTE });
           if ("refused" in asked) {
             telemetry(() => capacityRequests.inc({ answer: "unasked_refused" }));
             return sendCapacity(res, "full", asked.refused);

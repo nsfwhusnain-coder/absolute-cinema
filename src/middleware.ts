@@ -39,8 +39,11 @@ const PUBLIC_PAGE_PATHS = new Set<string>([
   "/hub",
 ]);
 
+/** Pages under these are public too: an invite link (/join/<code>) is opened by someone who has no profile yet. */
+const PUBLIC_PAGE_PREFIXES = ["/join/"];
+
 function isPublicPath(pathname: string): boolean {
-  return PUBLIC_PAGE_PATHS.has(pathname);
+  return PUBLIC_PAGE_PATHS.has(pathname) || PUBLIC_PAGE_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
 
 export async function middleware(req: NextRequest): Promise<NextResponse> {

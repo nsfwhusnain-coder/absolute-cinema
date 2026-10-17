@@ -82,7 +82,29 @@ interface ProfilesResponse {
   firstRun: boolean;
   signupsOpen: boolean;
   pickerEnabled: boolean;
+  /** Every new profile must be locked with a PIN on this server. */
+  requirePin?: boolean;
   profiles: ProfileSummary[];
+}
+
+type InviteState = "valid" | "expired" | "used" | "revoked" | "unknown";
+/** What the page learned of an invite link: its state, or that it could not ask just now. */
+type InviteCheck = InviteState | "unreachable";
+
+/** What a link that cannot be used says, in words. */
+function inviteProblem(state: InviteCheck): string {
+  switch (state) {
+    case "unreachable":
+      return "We couldn't check this invite link just now.";
+    case "expired":
+      return "This invite link has expired.";
+    case "used":
+      return "This invite link has already been used.";
+    case "revoked":
+      return "This invite link was switched off.";
+    default:
+      return "This invite link isn't valid.";
+  }
 }
 
 async function rateLimitMessage(name: string): Promise<string | null> {
@@ -100,9 +122,14 @@ async function rateLimitMessage(name: string): Promise<string | null> {
   return null;
 }
 
-type Screen = { kind: "pick" } | { kind: "pin"; profile: ProfileSummary } | { kind: "create" } | { kind: "manual" };
+type Screen =
+  | { kind: "pick" }
+  | { kind: "pin"; profile: ProfileSummary }
+  | { kind: "create" }
+  | { kind: "manual" }
+  | { kind: "invite"; problem: string; retry?: boolean };
 
-export function LoginView({ callbackUrl, error }: { callbackUrl?: string; error?: string }) {
+export function LoginView({ callbackUrl, error, invite }: { callbackUrl?: string; error?: string; invite?: string }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const nextPath = safeCallbackPath(callbackUrl);
@@ -120,11 +147,41 @@ export function LoginView({ callbackUrl, error }: { callbackUrl?: string; error?
     if (error === "SessionExpired") toast.message("Your session expired. Pick your profile to continue.");
   }, [error]);
 
+  // An invite link (/join/<code>): asked once whether it can still let someone in.
+  // A failed request, a busy server or too many look-ups is not a dead link: the page says so and offers another try.
+  const { data: inviteCheck, isFetching: checkingInvite, refetch: checkInviteAgain } = useQuery({
+    queryKey: ["invite", invite],
+    enabled: Boolean(invite),
+    retry: false,
+    queryFn: async (): Promise<{ state: InviteCheck }> => {
+      try {
+        const res = await fetch(`/api/invites/${encodeURIComponent(invite!)}`, { cache: "no-store" });
+        if (res.status === 429 || res.status >= 500) return { state: "unreachable" };
+        if (!res.ok) return { state: "unknown" };
+        return (await res.json()) as { state: InviteState };
+      } catch {
+        return { state: "unreachable" };
+      }
+    },
+  });
+
+  // The first screen hangs on the server's answer (and an invite's): nothing shows until it is chosen, so a
+  // visitor never glimpses the profile list of a server that hides it. It is chosen once: a refetch when the
+  // window comes back to the front does not undo where the visitor went since.
+  const [settled, setSettled] = useState(false);
   useEffect(() => {
-    if (!data) return;
+    if (!data || settled) return;
     if (data.firstRun) setScreen({ kind: "create" });
-    else if (!data.pickerEnabled) setScreen({ kind: "manual" });
-  }, [data]);
+    else if (invite) {
+      if (!inviteCheck || checkingInvite) return;
+      setScreen(
+        inviteCheck.state === "valid"
+          ? { kind: "create" }
+          : { kind: "invite", problem: inviteProblem(inviteCheck.state), retry: inviteCheck.state === "unreachable" }
+      );
+    } else if (!data.pickerEnabled) setScreen({ kind: "manual" });
+    setSettled(true);
+  }, [data, invite, inviteCheck, checkingInvite, settled]);
 
   const finish = useCallback(
     (name: string) => {
@@ -150,7 +207,7 @@ export function LoginView({ callbackUrl, error }: { callbackUrl?: string; error?
         <BrandLockup />
       </header>
       <main className="relative z-10 flex flex-1 items-center justify-center px-4 py-10">
-        {isLoading || !data ? (
+        {isLoading || !data || !settled ? (
           <Loader2 className="h-8 w-8 animate-spin text-white/60" />
         ) : (
           <AnimatePresence mode="wait">
@@ -178,9 +235,47 @@ export function LoginView({ callbackUrl, error }: { callbackUrl?: string; error?
                 <CreateScreen
                   firstRun={data.firstRun}
                   existing={data.profiles.length}
-                  onBack={data.firstRun ? undefined : () => setScreen({ kind: "pick" })}
+                  requirePin={Boolean(data.requirePin)}
+                  invite={invite && inviteCheck?.state === "valid" ? invite : undefined}
+                  onBack={data.firstRun || invite ? undefined : () => setScreen({ kind: data.pickerEnabled ? "pick" : "manual" })}
+                  onSignIn={invite && !data.firstRun ? () => setScreen({ kind: data.pickerEnabled ? "pick" : "manual" }) : undefined}
                   onDone={finish}
                 />
+              )}
+              {screen.kind === "invite" && (
+                <div className="mx-auto w-full max-w-md text-center">
+                  <h1 className="font-display text-2xl font-bold">{screen.problem}</h1>
+                  <p className="mt-2 text-sm text-white/60">
+                    {screen.retry
+                      ? "Check your connection and try again in a moment."
+                      : "Ask whoever sent it for a new one. Already have a profile? Sign in instead."}
+                  </p>
+                  <div className="mt-6 flex flex-wrap justify-center gap-3">
+                    {screen.retry && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSettled(false);
+                          void checkInviteAgain();
+                        }}
+                        className="inline-flex h-12 items-center justify-center rounded-full bg-white px-6 font-semibold text-black transition hover:bg-white/90"
+                      >
+                        Try again
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setScreen({ kind: data.pickerEnabled ? "pick" : "manual" })}
+                      className={
+                        screen.retry
+                          ? "inline-flex h-12 items-center justify-center rounded-full bg-white/10 px-6 font-semibold text-white transition hover:bg-white/15"
+                          : "inline-flex h-12 items-center justify-center rounded-full bg-white px-6 font-semibold text-black transition hover:bg-white/90"
+                      }
+                    >
+                      Sign in
+                    </button>
+                  </div>
+                </div>
               )}
               {screen.kind === "manual" && (
                 <ManualScreen
@@ -402,19 +497,28 @@ const inputClass =
 function CreateScreen({
   firstRun,
   existing,
+  requirePin = false,
+  invite,
   onBack,
+  onSignIn,
   onDone,
 }: {
   firstRun: boolean;
   existing: number;
+  /** The server wants every new profile locked with a PIN: the switch stays on. */
+  requirePin?: boolean;
+  /** The invite link this sign-up came through (sign-ups may be closed to everyone else). */
+  invite?: string;
   onBack?: () => void;
+  /** Someone who followed an invite but already has a profile goes to sign in instead. */
+  onSignIn?: () => void;
   onDone: (name: string) => void;
 }) {
   const [name, setName] = useState("");
   const [avatar, setAvatar] = useState<string>(defaultAvatar(existing));
   const [color, setColor] = useState<string>(AVATAR_COLORS[existing % AVATAR_COLORS.length]!);
   // On by default for the first profile: it is the admin, and every profile shows on the sign-in screen.
-  const [lock, setLock] = useState(firstRun);
+  const [lock, setLock] = useState(firstRun || requirePin);
   const [pin, setPin] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
@@ -428,7 +532,7 @@ function CreateScreen({
     const res = await fetch("/api/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: name.trim(), avatar, avatarColor: color, ...(lock ? { pin } : {}) }),
+      body: JSON.stringify({ name: name.trim(), avatar, avatarColor: color, ...(lock ? { pin } : {}), ...(invite ? { invite } : {}) }),
     });
     const json = (await res.json().catch(() => ({}))) as { error?: string };
     if (!res.ok) {
@@ -454,9 +558,9 @@ function CreateScreen({
       )}
       <div className="flex flex-col items-center text-center">
         <ProfileAvatar name={name || "?"} color={color} avatar={avatar} size="md" />
-        <h1 className="mt-4 font-display text-2xl font-bold">{firstRun ? "Create your profile" : "Add a profile"}</h1>
+        <h1 className="mt-4 font-display text-2xl font-bold">{firstRun ? "Create your profile" : invite ? "You're invited" : "Add a profile"}</h1>
         <p className="mt-1 text-sm text-white/60">
-          {firstRun ? "This first profile manages the server." : "Pick a name and a picture."}
+          {firstRun ? "This first profile manages the server." : invite ? "Pick a name, a picture and a PIN to make your profile." : "Pick a name and a picture."}
         </p>
       </div>
       <div className="glass-clear mt-8 space-y-5 rounded-3xl p-5">
@@ -475,6 +579,9 @@ function CreateScreen({
             }}
           />
         </div>
+        {requirePin ? (
+          <p className="text-xs text-white/55">You&apos;ll use this PIN to sign in. Profiles on this server always have one.</p>
+        ) : (
         <label className="flex cursor-pointer items-center justify-between gap-4">
           <span>
             <span className="block text-sm font-medium text-white">Lock with a PIN</span>
@@ -485,6 +592,7 @@ function CreateScreen({
           <input type="checkbox" className="peer sr-only" checked={lock} onChange={(e) => setLock(e.target.checked)} />
           <span className="relative inline-flex h-7 w-12 shrink-0 items-center rounded-full bg-white/15 transition-colors peer-checked:bg-[var(--primary)] peer-focus-visible:ring-2 peer-focus-visible:ring-white/60 after:ml-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow after:transition-transform peer-checked:after:translate-x-5" />
         </label>
+        )}
         {lock && (
           <div className="grid grid-cols-2 gap-3">
             <Field label="PIN">
@@ -524,6 +632,14 @@ function CreateScreen({
           {busy && <Loader2 className="h-4 w-4 animate-spin" />}
           {firstRun ? "Create and continue" : "Create profile"}
         </button>
+        {onSignIn && (
+          <p className="text-center text-sm text-white/55">
+            Already have a profile?{" "}
+            <button type="button" onClick={onSignIn} className="font-medium text-white underline-offset-4 hover:underline">
+              Sign in
+            </button>
+          </p>
+        )}
       </div>
     </form>
   );

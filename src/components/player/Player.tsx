@@ -134,6 +134,8 @@ export interface PlayerProps {
   discovering: boolean;
   outlook: Outlook;
   remuxAvailable: boolean;
+  /** The server offers downloads (not on a public instance). Default true. */
+  downloadsAvailable?: boolean;
   title: TitleContext;
   displayTitle: string;
   episodeLabel?: string;
@@ -384,9 +386,10 @@ export function Player(props: PlayerProps) {
   // Duration only feeds size estimates, so whole minutes are precise enough and
   // avoid rebuilding the list on every timeupdate.
   const durationMinutes = Math.round(state.duration / 60);
+  const downloadsAvailable = props.downloadsAvailable !== false;
   const downloads = useMemo(
-    () => buildDownloadOptions(props.sources, durationMinutes * 60).filter((o) => o.downloadable),
-    [props.sources, durationMinutes]
+    () => (downloadsAvailable ? buildDownloadOptions(props.sources, durationMinutes * 60).filter((o) => o.downloadable) : []),
+    [props.sources, durationMinutes, downloadsAvailable]
   );
   const downloadHref = (option: (typeof downloads)[number]) => {
     const params = new URLSearchParams({

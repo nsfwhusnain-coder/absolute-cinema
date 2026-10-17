@@ -176,6 +176,8 @@ export interface Streams {
   outlook: Outlook;
   preferences: PlaybackResponse["preferences"];
   remuxAvailable: boolean;
+  /** The server lets this viewer download files. */
+  downloadsAvailable: boolean;
   status: PlaybackResponse["status"] | null;
   response: PlaybackResponse | undefined;
   error: Error | null;
@@ -274,6 +276,7 @@ export function useStreams({ tmdbId, mediaType, season, episode, enabled = true 
     outlook,
     preferences: full.data?.preferences ?? fastData?.preferences,
     remuxAvailable: (full.data?.remuxAvailable ?? fastData?.remuxAvailable) !== false,
+    downloadsAvailable: (full.data?.downloadsAvailable ?? fastData?.downloadsAvailable) !== false,
     status: response?.status ?? null,
     response,
     error: (full.error as Error | null) ?? null,

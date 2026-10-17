@@ -10,11 +10,18 @@ interface TicketPayload {
   e: number;
 }
 
+/**
+ * With no secret configured, a key of this process's own: tickets then die with
+ * it (they last half an hour anyway), but no one can work the key out from the
+ * source and read the link inside one.
+ */
+const PROCESS_SECRET = randomBytes(32).toString("hex");
+
 function ticketKey(): Buffer {
   const secret =
     process.env.SOURCE_TICKET_SECRET ||
     process.env.NEXTAUTH_SECRET ||
-    "";
+    PROCESS_SECRET;
   return createHash("sha256").update(`absolute-cinema-remux-ticket:v1:${secret}`).digest();
 }
 
