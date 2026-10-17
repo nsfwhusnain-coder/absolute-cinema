@@ -368,13 +368,14 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
   const audioMode = audioDelivery(audioTrack, viewer.audio);
   const textSubtitles = index.subtitleTracks.filter((t) => t.text).slice(0, MAX_SUBTITLE_TRACKS);
   const bounds = computeSegmentBounds(index.keyframes, index.durationS);
+  const bitrateBps = averageBitrateBps(totalSize, index.durationS);
   const dir = join(cacheRoot, `vod-${id}`);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   const session: Session = {
     id,
     url,
-    source: { url, totalSize, cached: index.fetched, windowBytes: PREWARM_WINDOW_BYTES },
+    source: { url, totalSize, cached: index.fetched, windowBytes: PREWARM_WINDOW_BYTES, targetBps: bitrateBps ?? undefined },
     dir,
     bounds,
     slices: computeSlicePlan(bounds),
@@ -396,7 +397,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
     info: {
       id,
       durationS: index.durationS,
-      bitrateBps: averageBitrateBps(totalSize, index.durationS),
+      bitrateBps,
       maxKeyframeGapS: maxKeyframeGapS(index.keyframes, index.durationS),
       segments: bounds.length - 1,
       seekPoints: bounds.slice(0, -1).map((t) => Number(t.toFixed(SEEK_POINT_DECIMALS))),

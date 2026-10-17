@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { createServer, type Server } from "node:http";
 import { connect, type AddressInfo } from "node:net";
-import { cachedAt, parseRange, serveRange, windowEnd, type ProxySource } from "./source-proxy";
+import { cachedAt, lanesFor, parseRange, serveRange, windowEnd, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf } from "./source-proxy";
 
 /** Byte `i` of the pretend source file, so any slice can be checked without keeping the file. */
 const byteAt = (i: number): number => (i * 7 + (i >> 9)) % 251;
@@ -16,11 +16,19 @@ function slice(start: number, end: number): Uint8Array<ArrayBuffer> {
 const servers: Server[] = [];
 afterEach(() => {
   for (const server of servers.splice(0)) server.close();
+  __resetDomainSpeedsForTests();
 });
 
 function listen(server: Server): Promise<number> {
   servers.push(server);
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve((server.address() as AddressInfo).port)));
+}
+
+interface UpstreamOptions {
+  /** Sends at this rate on each connection, instead of as fast as it is read. */
+  bytesPerSecond?: number;
+  /** Answers request number `request` (counting from 1) with 503 when this returns true. */
+  refuse?: (request: number) => boolean;
 }
 
 interface Upstream {
@@ -29,14 +37,18 @@ interface Upstream {
   asked: Array<[number, number]>;
   /** Bytes handed to the network so far: what a reader that is not reading has let pile up somewhere. */
   sent(): number;
+  /** The most ranged responses being sent at once. */
+  maxOpen(): number;
 }
 
 const PIECE = 64 * 1024;
 
-/** A range-serving upstream that sends as fast as it is read, and records what it was asked for and sent. */
-async function upstream(totalSize: number): Promise<Upstream> {
+/** A range-serving upstream that records what it was asked for and sent, and how many responses were open at once. */
+async function upstream(totalSize: number, options: UpstreamOptions = {}): Promise<Upstream> {
   const asked: Array<[number, number]> = [];
   let sent = 0;
+  let open = 0;
+  let maxOpen = 0;
   const port = await listen(
     createServer((req, res) => {
       const match = /^bytes=(\d+)-(\d+)$/.exec(req.headers.range ?? "");
@@ -44,24 +56,45 @@ async function upstream(totalSize: number): Promise<Upstream> {
       const end = Math.min(Number(match[2]), totalSize - 1);
       let next = Number(match[1]);
       asked.push([next, end]);
+      if (options.refuse?.(asked.length)) return void res.writeHead(503).end();
       res.writeHead(206, { "Content-Length": String(end - next + 1), "Content-Range": `bytes ${next}-${end}/${totalSize}` });
+      // A response counts as open until its last byte is handed over, or its reader hangs up.
+      let closed = false;
+      const close = (): void => {
+        if (closed) return;
+        closed = true;
+        open--;
+        req.socket.off("close", close);
+      };
+      open++;
+      maxOpen = Math.max(maxOpen, open);
+      req.socket.once("close", close);
       const pump = (): void => {
-        while (next <= end) {
+        while (!closed && next <= end) {
           const piece = slice(next, Math.min(end, next + PIECE - 1));
           next += piece.length;
           sent += piece.length;
-          if (!res.write(piece)) return void res.once("drain", pump);
+          const room = res.write(piece);
+          if (next > end) {
+            close();
+            return void res.end();
+          }
+          if (options.bytesPerSecond) {
+            // A throttled connection waits its turn, and for the socket to take the piece, before the next one.
+            const wait = (piece.length / options.bytesPerSecond) * 1000;
+            return void (room ? setTimeout(pump, wait) : res.once("drain", () => setTimeout(pump, wait)));
+          }
+          if (!room) return void res.once("drain", pump);
         }
-        res.end();
       };
       pump();
     })
   );
-  return { url: `http://127.0.0.1:${port}/file`, asked, sent: () => sent };
+  return { url: `http://127.0.0.1:${port}/file`, asked, sent: () => sent, maxOpen: () => maxOpen };
 }
 
-async function proxy(source: ProxySource, windowBytes: number): Promise<number> {
-  return listen(createServer((req, res) => void serveRange(req, res, source, windowBytes)));
+async function proxy(source: ProxySource, windowBytes: number, tuning?: LaneTuning): Promise<number> {
+  return listen(createServer((req, res) => void serveRange(req, res, source, windowBytes, tuning)));
 }
 
 const KB = 1024;
@@ -97,6 +130,36 @@ describe("cachedAt", () => {
     expect(cachedAt(cached, 59)?.start).toBe(50);
     expect(cachedAt(cached, 10)).toBeNull();
     expect(cachedAt(cached, 60)).toBeNull();
+  });
+});
+
+describe("lanesFor", () => {
+  it("needs one connection when one is fast enough for the file", () => {
+    // 8 Mbit/s with headroom needs 2.5 MB/s; one connection gives 3 MB/s.
+    expect(lanesFor({ targetBps: 8_000_000, laneBps: 3_000_000, maxLanes: 12 })).toBe(1);
+  });
+
+  it("adds connections to make up the shortfall", () => {
+    // A 2.1 Mbit/s connection is 262,500 B/s: 2.5 MB/s / 0.2625 MB/s = 9.5, so 10.
+    expect(lanesFor({ targetBps: 8_000_000, laneBps: 2_100_000 / 8, maxLanes: 12 })).toBe(10);
+  });
+
+  it("never plans more connections than the maximum", () => {
+    expect(lanesFor({ targetBps: 8_000_000, laneBps: 100_000, maxLanes: 12 })).toBe(12);
+  });
+
+  it("uses at least two connections once one is not enough", () => {
+    expect(lanesFor({ targetBps: 8_000_000, laneBps: 2_400_000, maxLanes: 12 })).toBe(2);
+  });
+
+  it("plans for 8 Mbit/s when the bitrate is unknown", () => {
+    expect(lanesFor({ laneBps: 1_000_000, maxLanes: 12 })).toBe(3);
+    expect(lanesFor({ laneBps: 2_500_000, maxLanes: 12 })).toBe(1);
+  });
+
+  it("keeps the current count while the measurement is within one connection of it", () => {
+    expect(lanesFor({ targetBps: 8_000_000, laneBps: 2_100_000 / 8, current: 9, maxLanes: 12 })).toBe(9);
+    expect(lanesFor({ targetBps: 8_000_000, laneBps: 2_100_000 / 8, current: 7, maxLanes: 12 })).toBe(10);
   });
 });
 
@@ -167,5 +230,134 @@ describe("serveRange", () => {
     await sleep(300);
     expect(up.sent()).toBe(afterKill);
     expect(afterKill).toBeLessThanOrEqual(whilePaused + windowBytes);
+  });
+});
+
+describe("serveRange over several connections", () => {
+  const WINDOW = 128 * 1024 * KB;
+  /** Small probe and pieces, so the connections are decided within a few hundred milliseconds. */
+  const TUNING: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 128 * KB, earlyDecisionMs: 60_000 };
+  /** A connection that delivers about 1 MB/s, the way a throttled debrid CDN does. */
+  const SLOW = { bytesPerSecond: 1_000_000 };
+  /** 8 MB/s with headroom: several connections at the SLOW speed. */
+  const BUSY_BPS = 25_600_000;
+
+  it("reads a throttled file over several connections and delivers every byte in order", async () => {
+    const total = 2 * 1024 * KB;
+    const source: ProxySource = { url: "", totalSize: total, cached: [], targetBps: BUSY_BPS };
+    const up = await upstream(total, SLOW);
+    source.url = up.url;
+    const port = await proxy(source, WINDOW, TUNING);
+    // Starts partway into a chunk, so the first piece begins at an odd offset.
+    const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=1000-" } });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(1000, total - 1));
+    expect(source.lanes).toBeGreaterThan(1);
+    expect(up.maxOpen()).toBeGreaterThan(1);
+  });
+
+  it("keeps one connection for a file that one connection can serve", async () => {
+    const total = 2 * 1024 * KB;
+    const source: ProxySource = { url: "", totalSize: total, cached: [], targetBps: 8_000_000 };
+    const up = await upstream(total);
+    source.url = up.url;
+    const port = await proxy(source, WINDOW, TUNING);
+    const res = await fetch(`http://127.0.0.1:${port}/src`);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    expect(source.lanes).toBe(1);
+    // The probe window, then the rest of the file as one window, as before.
+    expect(up.asked).toEqual([
+      [0, 256 * KB - 1],
+      [256 * KB, total - 1],
+    ]);
+  });
+
+  it("halves the connections when upstream refuses one, and still delivers every byte", async () => {
+    const total = 2 * 1024 * KB;
+    const source: ProxySource = { url: "", totalSize: total, cached: [], targetBps: BUSY_BPS };
+    let before = 0;
+    const up = await upstream(total, {
+      ...SLOW,
+      refuse: (request) => {
+        if (request !== 3) return false;
+        before = source.lanes ?? 0;
+        return true;
+      },
+    });
+    source.url = up.url;
+    const port = await proxy(source, WINDOW, TUNING);
+    const res = await fetch(`http://127.0.0.1:${port}/src`);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    expect(before).toBeGreaterThan(1);
+    expect(source.lanes).toBe(Math.max(1, Math.floor(before / 2)));
+  });
+
+  it("stops reading upstream when a parallel reader hangs up", async () => {
+    const total = 32 * 1024 * KB;
+    const source: ProxySource = { url: "", totalSize: total, cached: [], targetBps: BUSY_BPS };
+    const up = await upstream(total, SLOW);
+    source.url = up.url;
+    const port = await proxy(source, WINDOW, TUNING);
+    const socket = connect(port, "127.0.0.1");
+    socket.on("error", () => undefined);
+    socket.on("data", () => undefined);
+    socket.write("GET /src HTTP/1.1\r\nHost: test\r\nRange: bytes=0-\r\n\r\n");
+    await sleep(800);
+    expect(source.lanes).toBeGreaterThan(1);
+    expect(up.sent()).toBeLessThan(total / 2);
+
+    const atKill = up.sent();
+    socket.destroy();
+    await sleep(300);
+    const settled = up.sent();
+    await sleep(300);
+    expect(up.sent()).toBe(settled);
+    expect(settled - atKill).toBeLessThanOrEqual(1024 * KB);
+  });
+});
+
+describe("serveRange remembers a CDN's speed and decides early", () => {
+  const WINDOW = 128 * 1024 * KB;
+  const SLOW = { bytesPerSecond: 1_000_000 };
+  const BUSY_BPS = 25_600_000;
+
+  it("names a link's CDN by its domain, and an address by itself", () => {
+    expect(cdnDomainOf("https://abc123.debrid.it/dl/x/file.mkv")).toBe("debrid.it");
+    expect(cdnDomainOf("https://42.download.real-debrid.com/d/x/file.mkv")).toBe("real-debrid.com");
+    expect(cdnDomainOf("http://127.0.0.1:8080/file")).toBe("127.0.0.1");
+    expect(cdnDomainOf("not a url")).toBe("");
+  });
+
+  it("starts the next file on a CDN measured slow a moment ago on several connections, without probing", async () => {
+    const total = 2 * 1024 * KB;
+    const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 128 * KB, earlyDecisionMs: 60_000 };
+    const up = await upstream(total, SLOW);
+    const first: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS };
+    const firstPort = await proxy(first, WINDOW, tuning);
+    await (await fetch(`http://127.0.0.1:${firstPort}/src`, { headers: { Range: "bytes=0-" } })).arrayBuffer();
+    const askedBefore = up.asked.length;
+    const second: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS };
+    const secondPort = await proxy(second, WINDOW, tuning);
+    const res = await fetch(`http://127.0.0.1:${secondPort}/src`, { headers: { Range: "bytes=0-" } });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    const [start, end] = up.asked[askedBefore]!;
+    // A piece, not the probe window: the connections were known before the first request.
+    expect(end - start + 1).toBeLessThanOrEqual(tuning.chunkBytes);
+    expect(second.lanes).toBeGreaterThan(1);
+  });
+
+  it("goes parallel part-way through a slow probe instead of waiting for its end", async () => {
+    const total = 4 * 1024 * KB;
+    const tuning: LaneTuning = { probeBytes: 2 * 1024 * KB, chunkBytes: 128 * KB, earlyDecisionMs: 150 };
+    const up = await upstream(total, SLOW);
+    const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS };
+    const port = await proxy(source, WINDOW, tuning);
+    const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    const [, probeEnd] = up.asked[0]!;
+    const [nextStart] = up.asked[1]!;
+    // The probe asked for 2 MiB, and the pieces began well inside it.
+    expect(probeEnd).toBe(2 * 1024 * KB - 1);
+    expect(nextStart).toBeLessThan(probeEnd);
+    expect(source.lanes).toBeGreaterThan(1);
   });
 });

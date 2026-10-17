@@ -7,6 +7,11 @@
  * downloaded when the session was indexed, so this proxy serves those byte
  * ranges from memory and only forwards the rest upstream. A seek then costs
  * one upstream round trip instead of about six.
+ *
+ * Some debrid CDNs cap each connection far below what a file needs, and scale
+ * with the number of connections. For those the proxy reads the file over
+ * several connections at once (see `streamParallel`), as many as the measured
+ * speed of one connection calls for.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -22,6 +27,22 @@ export interface ProxySource {
   cached: CachedRange[];
   /** A smaller window than the default, while set (a session nobody is watching yet). */
   windowBytes?: number;
+  /** The file's average bitrate in bits per second, when its size and length are known: what playback needs from the proxy. */
+  targetBps?: number;
+  /** Upstream connections in use for this file (1 is one connection, as before). Undefined until the first probe has measured one. */
+  lanes?: number;
+  /** Smoothed throughput of one upstream connection, in bytes per second. */
+  laneBps?: number;
+}
+
+/** The sizes the connection logic works in. Tests use smaller ones. */
+export interface LaneTuning {
+  /** The window one connection reads while the connections are still unknown. */
+  probeBytes: number;
+  /** One parallel piece, and the amount of reading each throughput sample covers. */
+  chunkBytes: number;
+  /** Read-waiting time after which a probe may already decide on parallel connections. */
+  earlyDecisionMs: number;
 }
 
 const UPSTREAM_TIMEOUT_MS = 20_000;
@@ -44,6 +65,85 @@ const DEFAULT_WINDOW_BYTES = 128 * 1024 * 1024;
  * it matters; 16 MB cost a third of the throughput there.
  */
 export const UPSTREAM_WINDOW_BYTES = Number(process.env.REMUX_WINDOW_BYTES) || DEFAULT_WINDOW_BYTES;
+
+/** Playback needs this much spare speed over the file's bitrate, for dips. */
+const HEADROOM = 2.5;
+/** A file whose bitrate is unknown is planned for this much (bits per second). */
+const MIN_TARGET_BPS = 8_000_000;
+const MAX_LANES = 12;
+/** A new sample of one connection's speed counts for this much of its smoothed value. */
+const LANE_WEIGHT = 0.3;
+/** The connections are planned again after this many completed chunks. */
+const DECIDE_EVERY = 32;
+/**
+ * A probe that has spent this long waiting on its reads decides at once when
+ * the connection is clearly too slow: at 2 Mbit/s the whole 4 MiB probe takes
+ * sixteen seconds, which a viewer would spend looking at a spinner.
+ */
+const EARLY_DECISION_MS = 1_500;
+/**
+ * How long a CDN's measured speed per connection stands for the next file on
+ * it. Files of one debrid service come from one CDN, which caps every
+ * connection alike, so a new session starts on the connections the last one
+ * found it needed instead of probing again.
+ */
+const DOMAIN_MEMORY_MS = 15 * 60 * 1000;
+const DOMAIN_MEMORY_MAX = 64;
+
+export const LANE_TUNING: LaneTuning = {
+  probeBytes: 4 * 1024 * 1024,
+  chunkBytes: 2 * 1024 * 1024,
+  earlyDecisionMs: EARLY_DECISION_MS,
+};
+const domainSpeeds = new Map<string, { laneBps: number; at: number }>();
+
+/** The CDN a link is served from: its host's last two labels (each debrid link has a host of its own under one domain). */
+export function cdnDomainOf(url: string): string {
+  try {
+    const host = new URL(url).hostname;
+    return /^[\d.]+$/.test(host) ? host : host.split(".").slice(-2).join(".");
+  } catch {
+    return "";
+  }
+}
+
+/** Notes what one connection to this file's CDN delivers, for the next file on it. */
+function rememberDomainSpeed(source: ProxySource, laneBps: number, now = Date.now()): void {
+  const domain = cdnDomainOf(source.url);
+  if (!domain) return;
+  domainSpeeds.delete(domain);
+  domainSpeeds.set(domain, { laneBps, at: now });
+  if (domainSpeeds.size > DOMAIN_MEMORY_MAX) domainSpeeds.delete(domainSpeeds.keys().next().value!);
+}
+
+/** What one connection to this file's CDN was last measured to deliver, while that is recent. */
+export function recentDomainSpeed(url: string, now = Date.now()): number | null {
+  const known = domainSpeeds.get(cdnDomainOf(url));
+  return known && now - known.at < DOMAIN_MEMORY_MS ? known.laneBps : null;
+}
+
+/** Test seam: the domain memory is module state that would otherwise leak between cases. */
+export function __resetDomainSpeedsForTests(): void {
+  domainSpeeds.clear();
+}
+
+/**
+ * How many upstream connections a file needs, given what one connection delivers.
+ *
+ * Playback needs the file's bitrate (or 8 Mbit/s when that is unknown), with
+ * headroom for dips. One connection is enough when it is fast enough for that.
+ * Otherwise the CDN caps each connection, and adds up across connections, so
+ * the number needed is the shortfall divided by what one connection delivers.
+ * A count within one of `current` is kept, so measurement noise does not move
+ * it every few chunks.
+ */
+export function lanesFor(input: { targetBps?: number; laneBps: number; current?: number; maxLanes: number }): number {
+  const neededBps = (Math.max(input.targetBps ?? 0, MIN_TARGET_BPS) / 8) * HEADROOM;
+  if (input.laneBps >= neededBps) return 1;
+  const wanted = Math.min(input.maxLanes, Math.max(2, Math.ceil(neededBps / input.laneBps)));
+  if (input.current !== undefined && input.current >= 2 && Math.abs(wanted - input.current) <= 1) return input.current;
+  return wanted;
+}
 
 /** Parses `bytes=a-` / `bytes=a-b` against a known size; null for unsatisfiable. */
 export function parseRange(header: string | undefined, totalSize: number): { start: number; end: number } | null {
@@ -123,7 +223,8 @@ export async function serveRange(
   req: IncomingMessage,
   res: ServerResponse,
   source: ProxySource,
-  windowBytes = UPSTREAM_WINDOW_BYTES
+  windowBytes = UPSTREAM_WINDOW_BYTES,
+  tuning: LaneTuning = LANE_TUNING
 ): Promise<void> {
   const range = parseRange(req.headers.range, source.totalSize);
   if (!range) {
@@ -159,7 +260,7 @@ export async function serveRange(
         .filter((r) => r.start > offset)
         .reduce((min, r) => Math.min(min, r.start), Number.POSITIVE_INFINITY);
       const upstreamEnd = Math.min(range.end, nextCached - 1);
-      offset = await streamUpstream(res, source, offset, upstreamEnd, client, windowBytes);
+      offset = await streamUpstream(res, source, offset, upstreamEnd, client, windowBytes, tuning);
     }
     res.end();
   } catch {
@@ -175,6 +276,37 @@ const RETRY_BASE_MS = 400;
 /** The last byte to ask upstream for in one request starting at `offset`. */
 export function windowEnd(offset: number, end: number, windowBytes: number): number {
   return Math.min(end, offset + windowBytes - 1);
+}
+
+/** The most one upstream request may read ahead: the window, or less while the source is prewarmed. */
+function windowCap(source: ProxySource, windowBytes: number): number {
+  return Math.min(windowBytes, source.windowBytes ?? windowBytes);
+}
+
+/** Whether the file is being read over several connections. */
+function parallel(source: ProxySource): boolean {
+  return (source.lanes ?? 0) >= 2;
+}
+
+/** Bytes received, and the time spent waiting for them. */
+interface Tally {
+  bytes: number;
+  ms: number;
+}
+
+/** Bytes per second that a tally came to. A tally whose reads were too quick to time reads as a millisecond: fast. */
+function bytesPerSecond(tally: Tally): number {
+  return (tally.bytes / Math.max(tally.ms, 1)) * 1000;
+}
+
+/** What one upstream window reports as it goes. */
+interface WindowReport {
+  /** Bytes handed on to the reader, in order. */
+  written: (bytes: number) => void;
+  /** Bytes received after the first read of the response, and how long that read waited for them. */
+  read: (bytes: number, waitedMs: number) => void;
+  /** True once the file has moved to parallel connections, so the window ends at its next read. */
+  superseded: () => boolean;
 }
 
 /**
@@ -194,7 +326,7 @@ async function copyWindow(
   start: number,
   end: number,
   client: Client,
-  written: (bytes: number) => void
+  report: WindowReport
 ): Promise<void> {
   const waiting = new AbortController();
   const headerTimer = setTimeout(() => waiting.abort(), UPSTREAM_TIMEOUT_MS);
@@ -213,12 +345,18 @@ async function copyWindow(
   const reader = upstream.body.getReader();
   client.release = () => void reader.cancel().catch(() => {});
   if (client.gone) client.release();
+  let first = true;
   try {
-    while (!client.gone) {
+    while (!client.gone && !report.superseded()) {
+      const started = performance.now();
       const { done, value } = await reader.read();
       if (done || client.gone) break;
+      // The first read is not timed: its wait is the time to first byte, and its bytes may have
+      // been sent before anyone asked, so they would make the connection look faster than it is.
+      if (!first) report.read(value.length, performance.now() - started);
+      first = false;
       await write(res, value, client);
-      written(value.length);
+      report.written(value.length);
     }
   } finally {
     client.release = NOTHING;
@@ -227,10 +365,11 @@ async function copyWindow(
 }
 
 /**
- * Streams [start, end] from upstream, one window at a time over one connection
- * (parallel ranged reads were measured slower on debrid CDNs and trigger
- * connection refusals). A dropped connection resumes from the last byte
- * written. Returns the offset after the last byte written.
+ * Reads [start, end] from upstream. While the connections are not known, one
+ * connection reads a short probe window and that decides them. With one
+ * connection, the window is read as before, one window at a time. With several,
+ * `streamParallel` reads the rest. A dropped connection resumes from the last
+ * byte written. Returns the offset after the last byte written.
  */
 async function streamUpstream(
   res: ServerResponse,
@@ -238,7 +377,8 @@ async function streamUpstream(
   start: number,
   end: number,
   client: Client,
-  windowBytes: number
+  windowBytes: number,
+  tuning: LaneTuning
 ): Promise<number> {
   let offset = start;
   let failures = 0;
@@ -246,11 +386,50 @@ async function streamUpstream(
     offset += bytes;
     failures = 0;
   };
+  if (source.lanes === undefined) {
+    // Another file from this CDN was measured a moment ago: start where it left off.
+    const known = recentDomainSpeed(source.url);
+    if (known !== null) {
+      source.laneBps = known;
+      decide(source, known);
+    }
+  }
   while (offset <= end && !client.gone) {
-    const last = windowEnd(offset, end, Math.min(windowBytes, source.windowBytes ?? windowBytes));
+    if (parallel(source)) {
+      offset = await streamParallel(res, source, offset, end, client, windowBytes, tuning);
+      continue;
+    }
+    const probing = source.lanes === undefined;
+    const windowStart = offset;
+    let probeWaitMs = 0;
+    let probeReadBytes = 0;
+    const cap = windowCap(source, windowBytes);
+    const last = windowEnd(offset, end, probing ? Math.min(tuning.probeBytes, cap) : cap);
     try {
-      await copyWindow(res, source.url, offset, last, client, written);
-      if (offset <= last && !client.gone) throw new Error("upstream ended early");
+      await copyWindow(res, source.url, offset, last, client, {
+        written,
+        read: (bytes, waitedMs) => {
+          if (!probing) return measure(source, tuning, bytes, waitedMs);
+          probeWaitMs += waitedMs;
+          probeReadBytes += bytes;
+          if (source.lanes !== undefined || probeWaitMs < tuning.earlyDecisionMs) return;
+          // Long enough to tell: a connection this slow goes parallel now, mid-probe.
+          const laneBps = bytesPerSecond({ bytes: probeReadBytes, ms: probeWaitMs });
+          if (lanesFor({ targetBps: source.targetBps, laneBps, maxLanes: MAX_LANES }) < 2) return;
+          source.laneBps = laneBps;
+          rememberDomainSpeed(source, laneBps);
+          decide(source, laneBps);
+        },
+        superseded: () => parallel(source),
+      });
+      if (offset <= last && !client.gone && !parallel(source)) throw new Error("upstream ended early");
+      if (probing && source.lanes === undefined && !client.gone) {
+        // The whole probe window counts, its first read included: a window that arrived in one read was too quick to time.
+        const laneBps = bytesPerSecond({ bytes: offset - windowStart, ms: probeWaitMs });
+        source.laneBps = laneBps;
+        rememberDomainSpeed(source, laneBps);
+        decide(source, laneBps);
+      }
     } catch (err) {
       if (client.gone) break;
       failures++;
@@ -260,4 +439,238 @@ async function streamUpstream(
     }
   }
   return offset;
+}
+
+/**
+ * One piece of a parallel read, fetched on a connection of its own. Its bytes
+ * wait here until the writer takes them.
+ */
+interface Piece {
+  /** The first byte not yet received. */
+  next: number;
+  /** The last byte of the piece. */
+  end: number;
+  /** Bytes received and not yet handed on, in order. */
+  parts: Uint8Array[];
+  /** Every byte of the piece has arrived. */
+  done: boolean;
+  /** Set once the piece has failed for good. */
+  error: Error | null;
+  /** The piece has been given up: nothing more is to be fetched for it. */
+  stopped: boolean;
+  /** Ends the request in flight: a wait for headers is aborted, and a body is cancelled. */
+  cancel: () => void;
+  /** Wakes the writer when there is something new for it. */
+  wake: () => void;
+}
+
+/** How many pieces may be in flight: one connection each, and no more than the window allows to wait. */
+function slotsFor(source: ProxySource, windowBytes: number, tuning: LaneTuning): number {
+  return Math.max(1, Math.min(source.lanes ?? 1, Math.floor(windowCap(source, windowBytes) / tuning.chunkBytes)));
+}
+
+/**
+ * Reads [start, end] over several connections at once, in pieces of one chunk
+ * each. The piece being written streams straight to the reader as its bytes
+ * arrive; the pieces behind it fill up in memory. No new piece starts while
+ * as many are in flight as there are connections, so memory stays at a few
+ * chunks per request. A piece that fails is retried from the last byte it had,
+ * so no byte is sent twice.
+ *
+ * Returns the offset after the last byte written. That is short of `end` when
+ * the connections drop back to one part-way, and the caller carries on with one.
+ */
+async function streamParallel(
+  res: ServerResponse,
+  source: ProxySource,
+  start: number,
+  end: number,
+  client: Client,
+  windowBytes: number,
+  tuning: LaneTuning
+): Promise<number> {
+  const pieces: Piece[] = [];
+  let next = start;
+  let written = start;
+  const stopAll = () => pieces.forEach(halt);
+  client.release = stopAll;
+  try {
+    for (;;) {
+      while (next <= end && parallel(source) && pieces.length < slotsFor(source, windowBytes, tuning)) {
+        const piece = startPiece(source, next, Math.min(end, next + tuning.chunkBytes - 1), client, tuning);
+        pieces.push(piece);
+        next = piece.end + 1;
+      }
+      const head = pieces[0];
+      if (!head) break;
+      await writePiece(res, head, client);
+      if (client.gone) break;
+      pieces.shift();
+      written = head.end + 1;
+    }
+  } finally {
+    client.release = NOTHING;
+    stopAll();
+  }
+  return written;
+}
+
+/** Starts fetching bytes [from, end] on a connection of its own. */
+function startPiece(source: ProxySource, from: number, end: number, client: Client, tuning: LaneTuning): Piece {
+  const piece: Piece = { next: from, end, parts: [], done: false, error: null, stopped: false, cancel: NOTHING, wake: NOTHING };
+  download(piece, source, client, tuning).catch((err: unknown) => {
+    piece.error = err instanceof Error ? err : new Error(String(err));
+    piece.wake();
+  });
+  return piece;
+}
+
+/** Gives a piece up: it is not retried, and the request in flight for it ends. */
+function halt(piece: Piece): void {
+  piece.stopped = true;
+  piece.cancel();
+}
+
+/**
+ * Hands a piece's bytes on in order, each one as it arrives, and returns once
+ * they are all handed on (or the reader has gone).
+ */
+async function writePiece(res: ServerResponse, piece: Piece, client: Client): Promise<void> {
+  while (!client.gone) {
+    const part = piece.parts.shift();
+    if (part) {
+      await write(res, part, client);
+    } else if (piece.error) {
+      throw piece.error;
+    } else if (piece.done) {
+      return;
+    } else {
+      await new Promise<void>((resolve) => {
+        const wake = () => {
+          piece.wake = NOTHING;
+          client.resume = NOTHING;
+          resolve();
+        };
+        piece.wake = wake;
+        client.resume = wake;
+      });
+    }
+  }
+}
+
+/**
+ * Fetches a piece to the end, retrying from the last byte received after a
+ * failure. A refusal (429 or 503) also means fewer connections for the file.
+ * Three failures in a row with no bytes between them fail the piece, and with
+ * it the request.
+ */
+async function download(piece: Piece, source: ProxySource, client: Client, tuning: LaneTuning): Promise<void> {
+  let failures = 0;
+  while (!piece.stopped && !client.gone && piece.next <= piece.end) {
+    const before = piece.next;
+    try {
+      await fetchPiece(piece, source, client, tuning);
+    } catch (err) {
+      if (piece.stopped || client.gone) return;
+      failures = piece.next > before ? 1 : failures + 1;
+      console.log(`[proxy] upstream at ${piece.next} failed (${failures}/${STREAM_ATTEMPTS}): ${err instanceof Error ? err.message : String(err)}`);
+      if (failures >= STREAM_ATTEMPTS) throw err;
+      await new Promise((resolve) => setTimeout(resolve, RETRY_BASE_MS * 2 ** (failures - 1)));
+    }
+  }
+  piece.done = piece.next > piece.end;
+  piece.wake();
+}
+
+/** Reads the rest of a piece from one response, handing each read's bytes to the piece. */
+async function fetchPiece(piece: Piece, source: ProxySource, client: Client, tuning: LaneTuning): Promise<void> {
+  const lanesWhenAsked = source.lanes;
+  const waiting = new AbortController();
+  const headerTimer = setTimeout(() => waiting.abort(), UPSTREAM_TIMEOUT_MS);
+  piece.cancel = () => waiting.abort();
+  const upstream = await fetch(source.url, {
+    headers: { Range: `bytes=${piece.next}-${piece.end}` },
+    signal: waiting.signal,
+  }).finally(() => {
+    clearTimeout(headerTimer);
+    piece.cancel = NOTHING;
+  });
+  if (upstream.status !== 206 || !upstream.body) {
+    await upstream.body?.cancel().catch(() => {});
+    if (upstream.status === 429 || upstream.status === 503) backOff(source, lanesWhenAsked);
+    throw new Error(`upstream HTTP ${upstream.status}`);
+  }
+  const reader = upstream.body.getReader();
+  piece.cancel = () => void reader.cancel().catch(() => {});
+  let first = true;
+  try {
+    while (!piece.stopped && !client.gone && piece.next <= piece.end) {
+      const started = performance.now();
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!first) measure(source, tuning, value.length, performance.now() - started);
+      first = false;
+      const part = value.subarray(0, piece.end - piece.next + 1);
+      piece.parts.push(part);
+      piece.next += part.length;
+      piece.wake();
+    }
+    if (piece.next <= piece.end && !piece.stopped && !client.gone) throw new Error("upstream ended early");
+  } finally {
+    piece.cancel = NOTHING;
+    await reader.cancel().catch(() => {});
+  }
+}
+
+/**
+ * A refusal from upstream means half as many connections from now on, for this
+ * file. A burst of refusals to requests made before the last cut is one event,
+ * not one per request, so it does not take the connections straight down to one.
+ */
+function backOff(source: ProxySource, lanesWhenAsked: number | undefined): void {
+  if (source.lanes !== lanesWhenAsked) return;
+  setLanes(source, Math.max(1, Math.floor((source.lanes ?? 1) / 2)));
+}
+
+interface LaneTally extends Tally {
+  /** Completed chunks so far. */
+  chunks: number;
+}
+
+/** The running tally of each file's reads, across all of its connections. */
+const laneTallies = new WeakMap<ProxySource, LaneTally>();
+
+/**
+ * Adds a read to the file's tally. Summed over the connections reading at once,
+ * the bytes over the waiting time come to one connection's speed. Each
+ * `chunkBytes` is one completed chunk: its speed is folded into `laneBps`, and
+ * every `DECIDE_EVERY` chunks the connections are planned again.
+ */
+function measure(source: ProxySource, tuning: LaneTuning, bytes: number, waitedMs: number): void {
+  const tally = laneTallies.get(source) ?? { bytes: 0, ms: 0, chunks: 0 };
+  laneTallies.set(source, tally);
+  tally.bytes += bytes;
+  tally.ms += waitedMs;
+  if (tally.bytes < tuning.chunkBytes) return;
+  const sample = bytesPerSecond(tally);
+  tally.bytes = 0;
+  tally.ms = 0;
+  tally.chunks++;
+  const laneBps = source.laneBps === undefined ? sample : (1 - LANE_WEIGHT) * source.laneBps + LANE_WEIGHT * sample;
+  source.laneBps = laneBps;
+  rememberDomainSpeed(source, laneBps);
+  if (tally.chunks % DECIDE_EVERY === 0) decide(source, laneBps);
+}
+
+/** Plans the connections for the file's measured speed, and logs any change. */
+function decide(source: ProxySource, laneBps: number): void {
+  setLanes(source, lanesFor({ targetBps: source.targetBps, laneBps, current: source.lanes, maxLanes: MAX_LANES }));
+}
+
+/** Sets the connections for the file, and logs the change (with the measured speed, when there is one). */
+function setLanes(source: ProxySource, lanes: number): void {
+  if (lanes === source.lanes) return;
+  source.lanes = lanes;
+  const speed = source.laneBps === undefined ? "" : `${((source.laneBps * 8) / 1_000_000).toFixed(1)} Mbit/s per connection; `;
+  console.log(`[proxy] ${speed}using ${lanes} connection${lanes === 1 ? "" : "s"}`);
 }
