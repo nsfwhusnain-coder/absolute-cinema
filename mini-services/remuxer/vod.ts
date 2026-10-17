@@ -429,6 +429,26 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
   return session;
 }
 
+/**
+ * Rebuilds the video's parameter sets into its sample description.
+ *
+ * An MP4 (and every fMP4 a browser is given) carries a video stream's
+ * parameter sets (H.264 SPS/PPS, HEVC VPS/SPS/PPS) in its avcC/hvcC box, and
+ * a decoder is set up from that box alone. Some MKV releases keep them only
+ * inside the stream, with an empty configuration in the header: a plain copy
+ * then writes an empty hvcC, the browser cannot set up its decoder
+ * (hls.js: bufferAddCodecError) and the start fails after its whole timeout.
+ * Converting the stream to Annex B and extracting the parameter sets as it
+ * passes gives the muxer a full configuration, with `delay_moov` holding the
+ * header back until the first packets have been seen. A stream whose header
+ * was complete comes out the same.
+ */
+export function videoBitstreamArgs(videoCodecId: string | null): string[] {
+  if (/HEVC/i.test(videoCodecId ?? "")) return ["-bsf:v", "hevc_mp4toannexb,extract_extradata"];
+  if (/AVC/i.test(videoCodecId ?? "")) return ["-bsf:v", "h264_mp4toannexb,extract_extradata"];
+  return [];
+}
+
 function ffmpegArgs(session: Session, startTime: number): string[] {
   const args = [
     "-hide_banner",
@@ -446,7 +466,7 @@ function ffmpegArgs(session: Session, startTime: number): string[] {
   if (session.audioIndex !== null) {
     args.push("-map", `0:a:${session.audioIndex}`, ...audioArgs(session.audioDelivery));
   }
-  args.push("-c:v", "copy");
+  args.push("-c:v", "copy", ...videoBitstreamArgs(session.info.videoCodecId));
   // Dolby Vision is only recognised with its configuration box, which ffmpeg
   // writes under -strict unofficial, and a dvh1 sample entry. Without them
   // the stream is treated as plain HEVC, right for a file with an HDR10
@@ -460,7 +480,9 @@ function ffmpegArgs(session: Session, startTime: number): string[] {
     "-map_chapters", "-1",
     // frag_discont + an explicit edit list make ffmpeg write absolute decode
     // times into every fragment (the default writes run-relative times).
-    "-movflags", "+frag_keyframe+empty_moov+default_base_moof+frag_discont",
+    // delay_moov writes the header after the first packets, once the
+    // parameter sets above have been extracted from them.
+    "-movflags", "+frag_keyframe+empty_moov+default_base_moof+frag_discont+delay_moov",
     "-use_editlist", "1",
     // Also cut mid-GOP every second so the first bytes after a seek reach the
     // player without waiting for the next keyframe. Mid-GOP fragments simply

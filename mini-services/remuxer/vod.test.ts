@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AudioCaps } from "../../src/lib/playback/decode-capability";
 import { audioDelivery } from "./audio-delivery";
-import { sessionId, type VodAudioRequest, type VodViewer } from "./vod";
+import { sessionId, videoBitstreamArgs, type VodAudioRequest, type VodViewer } from "./vod";
 
 const URL = "https://cdn.example/d/ABC/Movie.2024.2160p.REMUX.mkv";
 const AUDIO: VodAudioRequest = { preference: "original", originalLanguage: "en", preferredLanguage: "en" };
@@ -30,5 +30,14 @@ describe("sessionId", () => {
 
   it("is still a 24-character hex key", () => {
     expect(sessionId(URL, AUDIO, viewer(STEREO), "src")).toMatch(/^[a-f0-9]{24}$/);
+  });
+});
+
+describe("videoBitstreamArgs", () => {
+  it("rebuilds HEVC and H.264 parameter sets from the stream, and leaves other video alone", () => {
+    expect(videoBitstreamArgs("V_MPEGH/ISO/HEVC")).toEqual(["-bsf:v", "hevc_mp4toannexb,extract_extradata"]);
+    expect(videoBitstreamArgs("V_MPEG4/ISO/AVC")).toEqual(["-bsf:v", "h264_mp4toannexb,extract_extradata"]);
+    expect(videoBitstreamArgs("V_AV1")).toEqual([]);
+    expect(videoBitstreamArgs(null)).toEqual([]);
   });
 });
