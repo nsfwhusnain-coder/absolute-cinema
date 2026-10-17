@@ -311,10 +311,12 @@ export function useSubtitles(
     const current = store.getState().activeSubtitle;
     if (current === null) {
       // This show's remembered choice wins over the profile default, unless
-      // the viewer could not follow the audio without subtitles.
+      // the viewer could not follow the audio without subtitles. A profile set to
+      // "off" stays off: subtitles turned on once for a title used to come back
+      // at every start of it.
       const remembered = getTitleLanguage(rememberKey)?.subtitle;
       if (!required && remembered === null) return;
-      if (!required && remembered === undefined && preference === "off") return;
+      if (!required && preference === "off") return;
       const pick = defaultPick(options, remembered ?? undefined) ?? (required ? defaultPick(options) : undefined);
       if (pick) select(pick.id, false);
       return;

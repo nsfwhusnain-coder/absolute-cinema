@@ -69,6 +69,35 @@ export function normalizeTrackLanguage(value?: string | null): string {
   return LANGUAGE_ALIASES[base] ?? base;
 }
 
+/**
+ * Track names that say which language they are, whatever the tag says: a
+ * Spanish dub named "Castellano" but tagged eng, or a dub with no tag at all,
+ * which Matroska reads as English.
+ */
+const NAMED_LANGUAGES: ReadonlyArray<readonly [string, RegExp]> = [
+  ["es", /(?<!\p{L})(spanish|espa[nñ]ol|castellano|latino|latin american)(?!\p{L})/iu],
+  ["it", /(?<!\p{L})(italian|italiano)(?!\p{L})/iu],
+  ["fr", /(?<!\p{L})(french|fran[cç]ais|vff|vfq|vf2|truefrench)(?!\p{L})/iu],
+  ["de", /(?<!\p{L})(german|deutsch)(?!\p{L})/iu],
+  ["ru", /(?<!\p{L})(russian|русский|дубляж|многоголосый|двухголосый|одноголосый)(?!\p{L})/iu],
+  ["uk", /(?<!\p{L})(ukrainian|українська)(?!\p{L})/iu],
+  ["pt", /(?<!\p{L})(portuguese|portugu[eê]s|brazilian|dublado)(?!\p{L})/iu],
+  ["pl", /(?<!\p{L})(polish|polski|lektor)(?!\p{L})/iu],
+  ["tr", /(?<!\p{L})(turkish|türkçe)(?!\p{L})/iu],
+  ["hi", /(?<!\p{L})(hindi)(?!\p{L})/iu],
+  ["ja", /(?<!\p{L})(japanese)(?!\p{L})/iu],
+  ["ko", /(?<!\p{L})(korean)(?!\p{L})/iu],
+  ["zh", /(?<!\p{L})(chinese|mandarin|cantonese)(?!\p{L})/iu],
+  ["ar", /(?<!\p{L})(arabic)(?!\p{L})/iu],
+];
+
+/** The language a track's name says it is, when it names one. */
+export function namedTrackLanguage(name?: string | null): string | null {
+  if (!name) return null;
+  for (const [code, pattern] of NAMED_LANGUAGES) if (pattern.test(name)) return code;
+  return null;
+}
+
 function trackText(track: SelectableMediaTrack): string {
   return `${track.lang ?? ""} ${track.name ?? ""}`.toLowerCase();
 }
@@ -76,6 +105,10 @@ function trackText(track: SelectableMediaTrack): string {
 function isLanguage(track: SelectableMediaTrack, language?: string | null): boolean {
   const target = normalizeTrackLanguage(language);
   if (!target) return false;
+  const named = namedTrackLanguage(track.name);
+  // The name wins over the tag when it says another language.
+  if (named && named !== target) return false;
+  if (named === target) return true;
   const actual = normalizeTrackLanguage(track.lang);
   if (actual === target) return true;
   const name = (track.name ?? "").toLowerCase();
@@ -142,12 +175,13 @@ export function wantedAudioLanguage(selection: AudioTrackSelection): string {
  * be the one, so a file with any such track is never called lacking.
  */
 export function lacksWantedAudio(
-  tracks: ReadonlyArray<{ language?: string | null }>,
+  tracks: ReadonlyArray<{ language?: string | null; name?: string | null }>,
   selection: AudioTrackSelection
 ): boolean {
   const wanted = wantedAudioLanguage(selection);
   if (!wanted || tracks.length === 0) return false;
-  const languages = tracks.map((track) => normalizeTrackLanguage(track.language));
+  // A track's name says its language over its tag (see namedTrackLanguage).
+  const languages = tracks.map((track) => namedTrackLanguage(track.name) ?? normalizeTrackLanguage(track.language));
   if (languages.some((language) => !language || language === "und")) return false;
   return !languages.includes(wanted);
 }

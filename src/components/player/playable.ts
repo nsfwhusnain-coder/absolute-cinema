@@ -156,6 +156,9 @@ const VOD_OPEN_TIMEOUT_MS = 15_000;
  * before, else the profile's choice.
  */
 export function startAudio(title: TitleContext, profile: AudioChoice): AudioChoice {
+  // "Original" means the language the title was made in, every time: a track picked once on this title
+  // (a test, a slip) used to win over it at every start, failover and next episode, with no sign why.
+  if (profile.preference === "original") return profile;
   const remembered = getTitleLanguage(titleLanguageKey(title.mediaType, title.tmdbId))?.audio;
   return remembered ? { preference: "preferred", language: remembered } : profile;
 }

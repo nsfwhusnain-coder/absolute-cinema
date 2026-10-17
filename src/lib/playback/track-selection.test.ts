@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, it, test } from "bun:test";
 import {
   lacksWantedAudio,
+  namedTrackLanguage,
   normalizeTrackLanguage,
   selectAudioTrack,
   selectSubtitleTrack,
@@ -108,5 +109,39 @@ describe("the language a viewer wants to hear", () => {
   test("an English dub of an anime lacks the original, and has it for a viewer who asked for English", () => {
     expect(lacksWantedAudio([{ language: "eng" }], { preference: "original", originalLanguage: "ja" })).toBe(true);
     expect(lacksWantedAudio([{ language: "eng" }], { preference: "english", originalLanguage: "ja" })).toBe(false);
+  });
+});
+
+describe("a track's name over its tag", () => {
+  it("never takes a dub named for its language as English, whatever its tag", () => {
+    const tracks = [
+      { id: 0, lang: "eng", name: "Castellano 5.1", default: true },
+      { id: 1, lang: "eng", name: "English Atmos" },
+    ];
+    expect(selectAudioTrack(tracks, { preference: "original", originalLanguage: "en" })?.id).toBe(1);
+  });
+
+  it("finds the English track when the dub carries no tag at all", () => {
+    const tracks = [
+      { id: 0, name: "Русский (Дубляж)", default: true },
+      { id: 1, lang: "en", name: "Original" },
+    ];
+    expect(selectAudioTrack(tracks, { preference: "original", originalLanguage: "en" })?.id).toBe(1);
+  });
+
+  it("knows a file of dubs tagged English lacks English", () => {
+    const tracks = [
+      { language: "eng", name: "Italiano" },
+      { language: "eng", name: "Spanish (Latin America)" },
+    ];
+    expect(lacksWantedAudio(tracks, { preference: "original", originalLanguage: "en" })).toBe(true);
+    expect(lacksWantedAudio([{ language: "eng", name: "English" }], { preference: "original", originalLanguage: "en" })).toBe(false);
+  });
+
+  it("reads names in other scripts and leaves plain names alone", () => {
+    expect(namedTrackLanguage("Многоголосый закадровый")).toBe("ru");
+    expect(namedTrackLanguage("Português (Brasil)")).toBe("pt");
+    expect(namedTrackLanguage("Surround 5.1")).toBeNull();
+    expect(namedTrackLanguage("Original")).toBeNull();
   });
 });

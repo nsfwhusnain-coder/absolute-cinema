@@ -222,7 +222,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
       audioApplied.current = true;
       if (tracks.length < 2) return;
       const { title, audio } = optionsRef.current;
-      const remembered = getTitleLanguage(titleLanguageKey(title.mediaType, title.tmdbId))?.audio;
+      // As startAudio: a viewer who asked for the original language gets it, whatever was picked here before.
+      const remembered = audio.preference === "original" ? undefined : getTitleLanguage(titleLanguageKey(title.mediaType, title.tmdbId))?.audio;
       const base = remembered ? { preference: "preferred" as const, language: remembered } : audio;
       const pick = selectAudioTrack(tracks, {
         preference: base.preference,
