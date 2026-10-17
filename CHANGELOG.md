@@ -2,6 +2,28 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.6.1] - 2026-10-17
+
+### Fixed
+- **Some 4K films played as a green, blocky mess.** 2.6.0 rebuilt every
+  remuxed HEVC film's decoder settings from inside the stream, to rescue the
+  few releases that leave them out of the file's header. That rebuild is not
+  lossless for every stream: a Dolby Vision UHD Blu-ray remux of Avengers:
+  Infinity War came out undecodable. It now applies only to a file whose
+  header really has no decoder settings; every other file is copied exactly
+  as it was before 2.6.0.
+
+### Changed
+- **Web streams start on their sharp picture on Safari and TVs.** Their
+  playlists list the renditions from 427p up, and those players start on the
+  first one listed. The 1080p rendition (or the best there is) now comes
+  first, and none under 1080p is offered when there is 1080p.
+- **A 4K film from a slow AllDebrid connection starts sooner and stalls
+  less.** A connection that is plainly far too slow is spread over several
+  within a fraction of a second, the first seconds of the film are fetched
+  over all of them at once, and the pieces after them are sized for how
+  often AllDebrid lets one file be asked.
+
 ## [2.6.0] - 2026-10-17
 
 ### Added
