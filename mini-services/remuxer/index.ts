@@ -63,6 +63,20 @@ function parseAudio(url: URL): VodAudioRequest {
   };
 }
 
+const MAX_IDENTITY_LENGTH = 200;
+
+/** Who is asking, as the app names them (`w`): their seeks replace their own runs, no one else's. */
+function watcherOf(url: URL): string {
+  const value = url.searchParams.get("w") ?? "";
+  return /^[a-f0-9]{1,32}$/.test(value) ? value : "";
+}
+
+/** The source the app means (`k`), whatever link it holds for it just now. */
+function identityOf(url: URL): string {
+  const value = url.searchParams.get("k") ?? "";
+  return value.length <= MAX_IDENTITY_LENGTH ? value : "";
+}
+
 function send(res: ServerResponse, status: number, body: string | Uint8Array, type: string, headers: Record<string, string> = {}): void {
   res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store", ...headers });
   res.end(body);
@@ -72,7 +86,7 @@ function sendError(res: ServerResponse, err: unknown): void {
   const status = err instanceof VodError ? err.status : 500;
   const message = err instanceof Error ? err.message : String(err);
   // Said apart from the body, so the app can tell a file that will never play from a request that failed.
-  send(res, status, JSON.stringify({ error: message }), "application/json", message === UNUSABLE_ENTRY ? { [UNUSABLE_HEADER]: "1" } : {});
+  send(res, status, JSON.stringify({ error: message }), "application/json", message === UNUSABLE_ENTRY || (err instanceof VodError && err.permanent) ? { [UNUSABLE_HEADER]: "1" } : {});
 }
 
 mkdirSync(CACHE_DIR, { recursive: true });
@@ -95,7 +109,7 @@ const server = createServer(async (req, res) => {
       const startAt = Math.min(MAX_START_AT_S, Math.max(0, Number(url.searchParams.get("startAt")) || 0));
       const viewer = { decodesDolbyVision: url.searchParams.get("dolbyVision") === "1" };
       const prewarm = url.searchParams.get("prewarm") === "1";
-      const info = await openVodSession(CACHE_DIR, input, parseAudio(url), startAt, viewer, prewarm);
+      const info = await openVodSession(CACHE_DIR, input, parseAudio(url), startAt, viewer, prewarm, watcherOf(url), identityOf(url));
       return send(res, 200, JSON.stringify(info), "application/json");
     }
     const src = url.pathname.match(/^\/src\/([a-f0-9]{24})$/);
@@ -116,7 +130,8 @@ const server = createServer(async (req, res) => {
     const [, id, file, sliced, number] = match;
     if (file === "index.m3u8") return send(res, 200, vodPlaylist(id!), "application/vnd.apple.mpegurl");
     if (file === "slices.m3u8") return send(res, 200, vodPlaylist(id!, true), "application/vnd.apple.mpegurl");
-    if (file === "init.mp4") return send(res, 200, await vodInit(id!), "video/mp4");
+    const watcher = watcherOf(url);
+    if (file === "init.mp4") return send(res, 200, await vodInit(id!, watcher), "video/mp4");
     // Streamed: each keyframe group is sent as soon as it exists, so the
     // player can start decoding before the whole segment has been produced.
     let started = false;
@@ -127,7 +142,7 @@ const server = createServer(async (req, res) => {
       resume();
     });
     try {
-      const fragments = sliced ? vodSlice(id!, Number(number), () => gone) : vodSegment(id!, Number(number), () => gone);
+      const fragments = sliced ? vodSlice(id!, Number(number), () => gone, watcher) : vodSegment(id!, Number(number), () => gone, watcher);
       for await (const path of fragments) {
         if (gone) break;
         if (!started) {

@@ -5,7 +5,7 @@ import { isRefusedLink, refuseSource } from "@/lib/playback/debrid/refused-relea
 import { assessMediaDuration } from "@/lib/playback/media-duration";
 import { resolveRemuxSourceUrl } from "@/lib/playback/remux-source";
 import { rememberRemuxSession } from "@/lib/playback/remux-sessions";
-import { REMUXER_URL, UNUSABLE_HEADER } from "@/lib/playback/remuxer";
+import { REMUXER_URL, UNUSABLE_HEADER, watcherOf } from "@/lib/playback/remuxer";
 import { titleRuntimeMinutes, type RuntimeQuestion } from "@/lib/playback/title-runtime";
 
 export const dynamic = "force-dynamic";
@@ -64,6 +64,9 @@ export async function GET(req: NextRequest) {
   if (isRefusedLink(url)) return NextResponse.json({ error: "Source does not play" }, { status: 415 });
 
   const worker = new URLSearchParams({ u: url, startAt: String(Math.max(0, optionalInt("startAt") ?? 0)) });
+  worker.set("w", watcherOf(userId));
+  // The link changes with every answer; the source does not, so a prewarm and Play meet in one session.
+  worker.set("k", sourceId);
   const pref = params.get("audioPreference");
   worker.set("audioPreference", pref === "english" || pref === "preferred" ? pref : "original");
   for (const name of ["originalLanguage", "audioLanguage"]) {
@@ -91,6 +94,7 @@ export async function GET(req: NextRequest) {
   const body = (await res.json().catch(() => ({}))) as {
     id?: string;
     durationS?: number;
+    bitrateBps?: number | null;
     seekPoints?: number[];
     dynamicRange?: string;
     audio?: unknown;
@@ -119,6 +123,8 @@ export async function GET(req: NextRequest) {
       slicedPlaylistUrl: `/api/vod/${body.id}/slices.m3u8`,
       seekPoints: body.seekPoints ?? [],
       durationS: body.durationS,
+      // The file's average bitrate: the player sizes its buffer's seconds from it.
+      bitrateBps: body.bitrateBps ?? null,
       dynamicRange: body.dynamicRange ?? "SDR",
       audio: body.audio ?? null,
       audioIndex: body.audioIndex ?? null,

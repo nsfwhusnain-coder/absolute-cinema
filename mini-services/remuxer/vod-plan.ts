@@ -50,6 +50,17 @@ export function segmentForTime(bounds: readonly number[], t: number): number {
   return lo;
 }
 
+/**
+ * The average bitrate of a file in bits per second: its size in bits over its
+ * length. A player needs it to turn a byte budget into seconds. Null when the
+ * size or the length is not known.
+ */
+export function averageBitrateBps(totalSizeBytes: number, durationS: number): number | null {
+  if (!Number.isFinite(totalSizeBytes) || !Number.isFinite(durationS)) return null;
+  if (totalSizeBytes <= 0 || durationS <= 0) return null;
+  return Math.round((totalSizeBytes * 8) / durationS);
+}
+
 /** Nominal length of the slices a segment is cut into for players that can start between keyframes. */
 export const TARGET_SLICE_S = 2;
 /** URI prefix of a slice, beside the segments' bare numbers. */

@@ -20,6 +20,7 @@ import {
   type AudioTrackSelection,
   type SelectableMediaTrack,
 } from "../../src/lib/playback/track-selection";
+import { totalSizeFromContentRange } from "./content-range";
 import { httpRangeFetcher, readMkvKeyframes, type MkvAudioTrack, type MkvSubtitleTrack } from "./mkv-cues";
 import { deliveredRange, dolbyVisionDelivery, type DeliveredRange } from "./dolby-vision";
 import { VttStreamParser, type VttCue } from "./vtt-stream";
@@ -29,6 +30,7 @@ import {
   Fmp4StreamSplitter,
   KEYFRAME_MATCH_TOLERANCE_S,
   SLICE_PREFIX,
+  averageBitrateBps,
   buildVodPlaylist,
   computeSegmentBounds,
   computeSlicePlan,
@@ -47,6 +49,8 @@ const RANGE_TIMEOUT_MS = 15_000;
 /** How far ahead of the newest requested segment a run may produce before pausing. */
 const AHEAD_PAUSE_S = 240;
 const AHEAD_RESUME_S = 120;
+/** A run nobody has taken from this long, while another is being watched, is left asleep. */
+const ABANDONED_RUN_MS = 30_000;
 /** A run within this distance (behind the requested segment) will get there soon. */
 const REACH_S = 40;
 /** Runs of a session nobody has requested from recently are stopped. */
@@ -121,7 +125,9 @@ export const UNUSABLE_ENTRY = "source cannot be started at this position";
 export class VodError extends Error {
   constructor(
     message: string,
-    readonly status: number
+    readonly status: number,
+    /** True of the file itself, for every viewer: the app stops offering it. */
+    readonly permanent = false
   ) {
     super(message);
   }
@@ -143,6 +149,12 @@ interface Run {
    */
   unusable: boolean;
   dir: string;
+  /** Who started it. A viewer's own runs are the ones their seeks replace. */
+  watcher: string;
+  /** When a player last took from it. */
+  servedAt: number;
+  /** Where the player it serves last asked: how far ahead of that it may run is its own business. */
+  wanted: number;
 }
 
 interface Session {
@@ -175,6 +187,8 @@ interface Session {
 export interface VodSessionInfo {
   id: string;
   durationS: number;
+  /** The file's average bitrate in bits per second, or null when its size or length is not known. */
+  bitrateBps: number | null;
   segments: number;
   /** Where each segment starts: the times playback can begin from. */
   seekPoints: number[];
@@ -218,12 +232,13 @@ function log(message: string): void {
   recordEvent("remux", "vod", { message, ...vodStats() });
 }
 
-function sessionId(url: string, audio: VodAudioRequest, viewer: VodViewer): string {
+function sessionId(url: string, audio: VodAudioRequest, viewer: VodViewer, identity: string): string {
   return createHash("sha256")
     .update(
       [
         VOD_VERSION,
-        url,
+        // A debrid link is made anew for every answer: the same file has a different one each time it is asked for.
+        identity ? `source:${identity}` : url,
         audio.preference,
         audio.originalLanguage ?? "",
         audio.preferredLanguage ?? "",
@@ -261,10 +276,13 @@ export async function openVodSession(
   audio: VodAudioRequest,
   startAtS = 0,
   viewer: VodViewer = BASELINE_VIEWER,
-  prewarm = false
+  prewarm = false,
+  watcher = "",
+  identity = ""
 ): Promise<VodSessionInfo> {
-  const id = sessionId(url, audio, viewer);
+  const id = sessionId(url, audio, viewer, identity);
   let session = sessions.get(id);
+  if (session && session.url !== url) session = await adoptLink(session, url);
   if (!session) {
     let pending = opening.get(id);
     if (!pending) {
@@ -283,7 +301,7 @@ export async function openVodSession(
   session.wantedTime = session.bounds[startSegment]!;
   if (!runReaching(session, segmentWindow(session.bounds, startSegment))) {
     try {
-      startRun(session, startSegment);
+      startRun(session, startSegment, watcher);
     } catch (err) {
       // No room or no disk: the session is indexed, which is most of the wait.
       if (!prewarm) throw err;
@@ -292,13 +310,40 @@ export async function openVodSession(
   return session.info;
 }
 
+/**
+ * The same source arrives under a new link (a prewarm, then Play, each with
+ * its own). The session carries on under the newer one, which outlives the
+ * older, once a one-byte read shows it is the same file; a file of another
+ * size starts a session of its own.
+ */
+async function adoptLink(session: Session, url: string): Promise<Session | undefined> {
+  const size = await probeTotalSize(url);
+  if (size !== null && size === session.source.totalSize) {
+    session.url = url;
+    session.source.url = url;
+    return session;
+  }
+  removeSession(session, "source changed");
+  return undefined;
+}
+
+async function probeTotalSize(url: string): Promise<number | null> {
+  try {
+    const res = await fetch(url, { headers: { Range: "bytes=0-0" }, signal: AbortSignal.timeout(RANGE_TIMEOUT_MS) });
+    await res.body?.cancel().catch(() => {});
+    return res.status === 206 ? totalSizeFromContentRange(res.headers.get("content-range")) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function createSession(cacheRoot: string, id: string, url: string, audio: VodAudioRequest, viewer: VodViewer): Promise<Session> {
   const fetcher = httpRangeFetcher(url, RANGE_TIMEOUT_MS);
   const index = await readMkvKeyframes(fetcher).catch((err: unknown) => {
     throw new VodError(`index read failed: ${err instanceof Error ? err.message : String(err)}`, 502);
   });
   if (!index) throw new VodError("source has no keyframe index", 415);
-  if (index.videoUndecodable) throw new VodError("10-bit H.264 video cannot play in browsers", 415);
+  if (index.videoUndecodable) throw new VodError(`${index.videoCodecId ?? "video"} cannot play in browsers`, 415, true);
   const delivery = dolbyVisionDelivery(index.dolbyVision, viewer.decodesDolbyVision);
   if (delivery === "unplayable") throw new VodError("Dolby Vision without an HDR10 layer needs a Dolby Vision screen", 415);
   const asDolbyVision = delivery === "dolby-vision";
@@ -334,6 +379,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
     info: {
       id,
       durationS: index.durationS,
+      bitrateBps: averageBitrateBps(totalSize, index.durationS),
       segments: bounds.length - 1,
       seekPoints: bounds.slice(0, -1).map((t) => Number(t.toFixed(SEEK_POINT_DECIMALS))),
       videoCodecId: index.videoCodecId,
@@ -445,16 +491,26 @@ function stopRun(run: Run, reason: string): void {
 /** A session that asked for a segment this recently is someone watching right now. */
 const ACTIVE_VIEWER_MS = 20_000;
 
-function makeRoom(session: Session): void {
-  const own = aliveRuns(session).sort((a, b) => lastTime(a) - lastTime(b));
+function makeRoom(session: Session, watcher: string): void {
+  // Each viewer's seeks replace that viewer's own runs. Others on the same
+  // file keep theirs: with one limit for the whole session they took turns
+  // stopping each other's, and all but two waited for ever.
+  const own = aliveRuns(session)
+    .filter((run) => run.watcher === watcher)
+    .sort((a, b) => lastTime(a) - lastTime(b));
   while (own.length >= MAX_RUNS_PER_SESSION) stopRun(own.shift()!, "session run limit");
   if (totalAliveRuns() < MAX_RUNS_TOTAL) return;
+  const now = Date.now();
+  for (const run of aliveRuns(session)) {
+    if (run.watcher === watcher || now - run.servedAt <= ACTIVE_VIEWER_MS) continue;
+    stopRun(run, "idle run of another viewer");
+    if (totalAliveRuns() < MAX_RUNS_TOTAL) return;
+  }
   // Only other viewers who have gone quiet give up their runs. Taking runs
   // from someone mid-film just moved the stall to them, and with a few
   // viewers at once they took turns stalling each other.
   // A prewarm takes nothing from anyone: it only uses a free run.
   if (!session.demanded) throw new VodError("remux capacity reached", 503);
-  const now = Date.now();
   const idleOthers = [...sessions.values()]
     .filter((s) => s !== session && (!s.demanded || now - s.lastRequestAt > ACTIVE_VIEWER_MS))
     .sort((a, b) => Number(a.demanded) - Number(b.demanded) || a.lastRequestAt - b.lastRequestAt);
@@ -472,7 +528,7 @@ function demand(session: Session): void {
   delete session.source.windowBytes;
 }
 
-function startRun(session: Session, segment: number): Run {
+function startRun(session: Session, segment: number, watcher: string): Run {
   if (session.pictureless) throw new VodError(UNUSABLE_ENTRY, 502);
   if (freeBytes(session.dir) < MIN_FREE_BYTES) {
     // A prewarm does not clear anyone's cache to make its own.
@@ -480,7 +536,7 @@ function startRun(session: Session, segment: number): Run {
     reclaimDisk(session);
     if (freeBytes(session.dir) < MIN_FREE_BYTES) throw new VodError("not enough free disk space to remux", 507);
   }
-  makeRoom(session);
+  makeRoom(session, watcher);
   const startTime = session.bounds[segment]!;
   const id = session.nextRunId++;
   const dir = join(session.dir, `run-${id}`);
@@ -488,7 +544,7 @@ function startRun(session: Session, segment: number): Run {
   const proc = spawn("ffmpeg", ffmpegArgs(session, startTime), {
     stdio: ["ignore", "pipe", "pipe", ...session.subtitles.map(() => "pipe" as const)],
   });
-  const run: Run = { id, startSegment: segment, proc, startTime, fragments: [], finished: false, failed: false, paused: false, unusable: false, dir };
+  const run: Run = { id, startSegment: segment, proc, startTime, fragments: [], finished: false, failed: false, paused: false, unusable: false, dir, watcher, servedAt: Date.now(), wanted: startTime };
   session.runs.push(run);
   const giveUp = (reason: string) => {
     run.unusable = true;
@@ -592,14 +648,22 @@ function snapToKeyframe(keyframes: readonly number[], t: number): number {
 
 /** Pause a run that has raced far ahead of the viewer; resume it as they catch up. */
 function throttle(session: Session, run: Run): void {
-  const lead = lastTime(run) - session.wantedTime;
+  const lead = lastTime(run) - run.wanted;
   const pauseAt = session.demanded ? AHEAD_PAUSE_S : PREWARM_AHEAD_S;
-  if (!run.paused && lead > pauseAt) {
+  const abandoned = session.demanded && Date.now() - run.servedAt > ABANDONED_RUN_MS && Date.now() - session.lastRequestAt < ABANDONED_RUN_MS;
+  if (!run.paused && (lead > pauseAt || abandoned)) {
     run.paused = true;
     run.proc.kill("SIGSTOP");
-  } else if (session.demanded && lead < AHEAD_RESUME_S) {
+  } else if (session.demanded && lead < AHEAD_RESUME_S && !abandoned) {
     wake(run);
   }
+}
+
+/** A player took from this run, asking about `at`: it is being watched, from there. */
+function served(session: Session, run: Run, at: number): void {
+  run.servedAt = Date.now();
+  run.wanted = at;
+  throttle(session, run);
 }
 
 /** Sets a paused run going again. A viewer waiting on one is never left waiting on a run that sleeps. */
@@ -629,12 +693,12 @@ export function vodPlaylist(id: string, sliced = false): string {
   return sliced ? buildVodPlaylist(session.slices.bounds, SLICE_PREFIX, false) : buildVodPlaylist(session.bounds);
 }
 
-export async function vodInit(id: string): Promise<Uint8Array> {
+export async function vodInit(id: string, watcher = ""): Promise<Uint8Array> {
   const session = sessionOrThrow(id);
   const deadline = Date.now() + INIT_WAIT_MS;
   while (!session.init) {
     if (session.runs.some((run) => run.unusable)) throw new VodError(UNUSABLE_ENTRY, 502);
-    if (!aliveRuns(session).length) startRun(session, segmentForTime(session.bounds, session.wantedTime));
+    if (!aliveRuns(session).length) startRun(session, segmentForTime(session.bounds, session.wantedTime), watcher);
     if (Date.now() > deadline) throw new VodError("init not ready", 504);
     await sleep(POLL_MS);
   }
@@ -646,21 +710,21 @@ export async function vodInit(id: string): Promise<Uint8Array> {
  * the player hung up: the wait then ends instead of polling (and starting new
  * ffmpeg runs) for a segment nobody will receive.
  */
-export function vodSegment(id: string, segment: number, gone: () => boolean = () => false): AsyncGenerator<string> {
+export function vodSegment(id: string, segment: number, gone: () => boolean = () => false, watcher = ""): AsyncGenerator<string> {
   const session = sessionOrThrow(id);
   if (!Number.isInteger(segment) || segment < 0 || segment >= session.bounds.length - 1) {
     throw new VodError("segment out of range", 404);
   }
-  return windowFragments(session, segmentWindow(session.bounds, segment), segment, gone);
+  return windowFragments(session, segmentWindow(session.bounds, segment), segment, gone, watcher);
 }
 
 /** The same for one slice of a segment (see `computeSlicePlan`). */
-export function vodSlice(id: string, slice: number, gone: () => boolean = () => false): AsyncGenerator<string> {
+export function vodSlice(id: string, slice: number, gone: () => boolean = () => false, watcher = ""): AsyncGenerator<string> {
   const session = sessionOrThrow(id);
   if (!Number.isInteger(slice) || slice < 0 || slice >= session.slices.segmentOf.length) {
     throw new VodError("slice out of range", 404);
   }
-  return windowFragments(session, sliceWindow(session.bounds, session.slices, slice), session.slices.segmentOf[slice]!, gone);
+  return windowFragments(session, sliceWindow(session.bounds, session.slices, slice), session.slices.segmentOf[slice]!, gone, watcher);
 }
 
 /**
@@ -670,14 +734,17 @@ export function vodSlice(id: string, slice: number, gone: () => boolean = () => 
  * when none will reach it) and each fragment is yielded the moment it is
  * written, so playback can begin before the window ends.
  */
-async function* windowFragments(session: Session, window: PlanWindow, segment: number, gone: () => boolean): AsyncGenerator<string> {
+async function* windowFragments(session: Session, window: PlanWindow, segment: number, gone: () => boolean, watcher: string): AsyncGenerator<string> {
   demand(session);
   session.wantedTime = window.start;
+  const reached = runReaching(session, window);
+  if (reached) served(session, reached, window.start);
   for (const run of aliveRuns(session)) throttle(session, run);
 
   for (const run of [...session.runs].reverse()) {
     const complete = fragmentsInWindow(window, run.fragments, run.finished);
     if (complete) {
+      if (!run.finished && !run.failed) served(session, run, window.start);
       for (const fragment of complete) yield fragment.path;
       return;
     }
@@ -705,7 +772,7 @@ async function* windowFragments(session: Session, window: PlanWindow, segment: n
     else {
       const failed = session.runs.filter((r) => r.failed && r.startSegment === segment).length;
       if (failed >= MAX_FAILED_RUNS_PER_SEGMENT) throw new VodError("source failed to remux", 502);
-      startRun(session, segment);
+      startRun(session, segment, watcher);
     }
     await sleep(POLL_MS);
   }
@@ -721,6 +788,8 @@ async function* windowFragments(session: Session, window: PlanWindow, segment: n
     if (run.failed) throw new VodError("remux run failed mid-segment", 502);
     if (Date.now() > deadline) throw new VodError("segment stalled", 504);
     session.lastRequestAt = Date.now();
+    run.servedAt = Date.now();
+    run.wanted = window.start;
     wake(run);
     await sleep(POLL_MS);
   }

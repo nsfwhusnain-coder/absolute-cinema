@@ -27,6 +27,7 @@ import {
   TRACK_TYPE_ID,
   parseCueTimes,
   parseSegmentLayout,
+  isVideoUndecodable,
   readMkvKeyframes,
   readVint,
 } from "./mkv-cues";
@@ -172,5 +173,24 @@ describe("Matroska index", () => {
 
   it("returns null for data that is not Matroska", async () => {
     expect(await readMkvKeyframes(async () => new Uint8Array(64))).toBeNull();
+  });
+});
+
+describe("isVideoUndecodable", () => {
+  it("turns away the codecs no browser decodes", () => {
+    for (const id of ["V_MS/VFW/FOURCC", "V_MPEG2", "V_MPEG4/ISO/ASP", "V_MPEG4/ISO/SP", "V_MPEG4/MS/V3", "V_REAL/RV40"]) {
+      expect(isVideoUndecodable(id, null)).toBe(true);
+    }
+  });
+
+  it("keeps the codecs browsers play", () => {
+    for (const id of ["V_MPEGH/ISO/HEVC", "V_AV1", "V_VP9", "V_MPEG4/ISO/AVC"]) {
+      expect(isVideoUndecodable(id, null)).toBe(false);
+    }
+  });
+
+  it("turns away the AVC profiles browsers cannot decode, and only those", () => {
+    expect(isVideoUndecodable("V_MPEG4/ISO/AVC", 110)).toBe(true);
+    expect(isVideoUndecodable("V_MPEG4/ISO/AVC", 100)).toBe(false);
   });
 });

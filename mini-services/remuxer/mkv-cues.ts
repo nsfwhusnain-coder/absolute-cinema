@@ -69,6 +69,19 @@ const AUDIO_TRACK_TYPE = 2;
 const SUBTITLE_TRACK_TYPE = 0x11;
 /** AVC profile_idc values browsers cannot decode: High 10, High 4:2:2, High 4:4:4. */
 const UNDECODABLE_AVC_PROFILES = new Set([110, 122, 244]);
+/**
+ * Video codecs no browser decodes, whatever container carries them: VC-1 (and
+ * anything else kept under the generic Video-for-Windows id), MPEG-2, MPEG-4
+ * part 2 (DivX, Xvid) and RealVideo. A copy into fragmented MP4 gives a
+ * stream the player cannot show, so the file is turned away on opening.
+ */
+const UNDECODABLE_VIDEO_CODECS = /^V_(MS\/VFW\/FOURCC|MPEG2|MPEG4\/ISO\/(ASP|SP|AP)|MPEG4\/MS|REAL\/)/;
+
+/** Whether a browser cannot decode the video track, from its codec id and (for AVC) profile. */
+export function isVideoUndecodable(codecId: string, avcProfile: number | null): boolean {
+  if (codecId === "V_MPEG4/ISO/AVC") return avcProfile !== null && UNDECODABLE_AVC_PROFILES.has(avcProfile);
+  return UNDECODABLE_VIDEO_CODECS.test(codecId);
+}
 /** Text subtitle codecs ffmpeg converts to WebVTT (image formats like PGS are skipped). */
 const TEXT_SUBTITLE_CODECS = /^S_TEXT\/(UTF8|ASS|SSA|WEBVTT)$|^S_(ASS|SSA)$/;
 const DEFAULT_TIMESTAMP_SCALE_NS = 1_000_000;
@@ -295,8 +308,7 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
           layout.videoCodecId = codecId || null;
           layout.dynamicRange = dynamicRangeFromTransfer(transfer);
           layout.dolbyVision = dolbyVision;
-          layout.videoUndecodable =
-            codecId === "V_MPEG4/ISO/AVC" && avcProfile !== null && UNDECODABLE_AVC_PROFILES.has(avcProfile);
+          layout.videoUndecodable = isVideoUndecodable(codecId, avcProfile);
         }
         if (type === SUBTITLE_TRACK_TYPE) {
           layout.subtitleTracks.push({

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   Fmp4StreamSplitter,
+  averageBitrateBps,
   buildVodPlaylist,
   computeSegmentBounds,
   computeSlicePlan,
@@ -13,6 +14,22 @@ import {
 
 const keyframesEvery = (step: number, until: number) =>
   Array.from({ length: Math.floor(until / step) + 1 }, (_, i) => +(i * step).toFixed(3));
+
+describe("averageBitrateBps", () => {
+  it("is the file's size in bits over its length, rounded", () => {
+    // 62,910,411,606 bytes over two hours.
+    expect(averageBitrateBps(62_910_411_606, 7200)).toBe(69_900_457);
+    expect(averageBitrateBps(1_000_000, 8)).toBe(1_000_000);
+  });
+
+  it("is null when the size or the length is not known", () => {
+    expect(averageBitrateBps(0, 7200)).toBeNull();
+    expect(averageBitrateBps(1_000_000, 0)).toBeNull();
+    expect(averageBitrateBps(-1, 7200)).toBeNull();
+    expect(averageBitrateBps(Number.NaN, 7200)).toBeNull();
+    expect(averageBitrateBps(1_000_000, Number.POSITIVE_INFINITY)).toBeNull();
+  });
+});
 
 describe("computeSegmentBounds", () => {
   it("starts segments on the first keyframe at least the target length after the last", () => {
