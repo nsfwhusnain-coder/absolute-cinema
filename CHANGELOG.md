@@ -2,6 +2,36 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.6.3] - 2026-10-17
+
+### Changed
+- **Play goes full screen.** Pressing Play or Resume fills the screen (and
+  shows HDR as HDR, which a windowed page does not); a double click leaves
+  full screen. Not on iPhone or on TVs. The player's controls hide after
+  2.2 s of no movement instead of 3.2 s.
+- **Your audio and subtitle settings hold at every start.** With the
+  original language chosen, a title plays in the language it was made in,
+  even if another track was picked on it before; a dub whose track is named
+  for its language ("Castellano", "Italiano") is never taken for English,
+  whatever its tag says. Subtitles set to off stay off, even on a title
+  where they were turned on once (unless the audio is in a language you do
+  not speak).
+- **A 4K file comes before a web stream even when its service has just
+  failed a few starts,** and for a viewer who chose 4K, before a 1080p file.
+  After 2.6.1, Avengers: Endgame started on a 1080p web stream with three 4K
+  files on offer.
+
+### Fixed
+- **A slow start got a release refused to every viewer for 90 days,** and
+  2.6.1's failures refused Avengers: Infinity War's 4K release that way. A
+  run that is merely slow no longer condemns the file.
+- A stretch of a film where a run had stopped or failed could never be
+  played again in that session, or was served short.
+- A connection that went silent without closing could hold a film still for
+  good; it is now asked again from where it stopped. A CDN answering a
+  different byte range than asked is caught instead of corrupting the film.
+- Opening a film no longer asks the CDN for data ffmpeg is about to skip.
+
 ## [2.6.2] - 2026-10-17
 
 ### Fixed
