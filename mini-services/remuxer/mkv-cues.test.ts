@@ -170,6 +170,28 @@ describe("Matroska index", () => {
     expect(index!.fetched[0]!.bytes).toEqual(big.subarray(0, HEAD_BYTES));
   });
 
+  it("asks for the Cues as soon as the head's first part is in, not after the whole head", async () => {
+    const big = buildMkv([0, 3420, 6840, 10302], [], 3 * 1024 * 1024);
+    const part = HEAD_BYTES / 4;
+    const events: string[] = [];
+    const fetcher = Object.assign(
+      async (start: number, end: number) => {
+        if (end === big.length - 1) throw new Error("tail refused");
+        const slow = start >= part && start < HEAD_BYTES;
+        if (start >= HEAD_BYTES) events.push("cues asked");
+        if (slow) await new Promise((resolve) => setTimeout(resolve, 150));
+        if (slow) events.push("head part in");
+        return big.subarray(start, Math.min(end + 1, big.length));
+      },
+      { whenSized: Promise.resolve(big.length) }
+    );
+    const index = await readMkvKeyframes(fetcher);
+    expect(index?.keyframes).toEqual([0, 3.42, 6.84, 10.302]);
+    expect(events[0]).toBe("cues asked");
+    // The whole head is still kept.
+    expect(index!.fetched[0]!.bytes.length).toBe(HEAD_BYTES);
+  });
+
   it("asks for the Cues by offset when the tail read fails", async () => {
     let calls = 0;
     const fetcher = Object.assign(
@@ -259,6 +281,18 @@ describe("httpRangeFetcher", () => {
     });
     await expect(httpRangeFetcher(url, 5_000)(0, 9)).rejects.toThrow("refused");
     expect(asked).toBe(4);
+  });
+
+  it("plans its reads from a size it was given, and reports the size the file is served at", async () => {
+    const url = await serve((_req, res) => {
+      res.writeHead(206, { "Content-Range": "bytes 0-9/5000", "Content-Length": "10" }).end(Buffer.alloc(10, 1));
+    });
+    const fetcher = httpRangeFetcher(url, 5_000, 4_096);
+    // Known before anything was asked for.
+    expect(await fetcher.whenSized).toBe(4_096);
+    expect(fetcher.size()).toBeNull();
+    await fetcher(0, 9);
+    expect(fetcher.size()).toBe(5_000);
   });
 
   it("does not ask again when the range was ignored", async () => {

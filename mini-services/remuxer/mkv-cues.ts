@@ -479,14 +479,25 @@ function concat(parts: readonly Uint8Array[]): Uint8Array {
   return out;
 }
 
+interface HeadRead {
+  /** The head's first part, as soon as it arrives: what the index needs is nearly always in it. */
+  first: Promise<Uint8Array>;
+  /** The whole head. */
+  whole: Promise<Uint8Array>;
+}
+
 /**
  * Reads the first HEAD_BYTES of the file. With a fetcher that reports the
- * size, the first part is asked for alone and the rest the moment its answer
- * gives the size, only as far as the file goes. A later part that fails ends
- * the head there: what it held is read through the proxy if ffmpeg wants it.
+ * size, the first part is asked for at once and the rest the moment the size
+ * is known (at once too, when the caller knew it), only as far as the file
+ * goes. A later part that fails ends the head there: what it held is read
+ * through the proxy if ffmpeg wants it.
  */
-async function readHead(fetchRange: SizedRangeFetcher): Promise<Uint8Array> {
-  if (!fetchRange.whenSized) return fetchRange(0, HEAD_BYTES - 1);
+function readHead(fetchRange: SizedRangeFetcher): HeadRead {
+  if (!fetchRange.whenSized) {
+    const whole = fetchRange(0, HEAD_BYTES - 1);
+    return { first: whole, whole };
+  }
   const partBytes = HEAD_BYTES / HEAD_PARTS;
   const first = fetchRange(0, partBytes - 1);
   const rest = fetchRange.whenSized.then(
@@ -499,14 +510,24 @@ async function readHead(fetchRange: SizedRangeFetcher): Promise<Uint8Array> {
     },
     () => []
   );
-  const parts = [await first];
-  if (parts[0]!.length < partBytes) return parts[0]!;
-  for (const part of await rest) {
-    if (!part?.length) break;
-    parts.push(part);
-    if (part.length < partBytes) break;
-  }
-  return concat(parts);
+  const whole = (async () => {
+    const parts = [await first];
+    if (parts[0]!.length < partBytes) return parts[0]!;
+    for (const part of await rest) {
+      if (!part?.length) break;
+      parts.push(part);
+      if (part.length < partBytes) break;
+    }
+    return concat(parts);
+  })();
+  // Its failure is the first part's, reported by whoever waits on that.
+  whole.catch(() => undefined);
+  return { first, whole };
+}
+
+/** A layout with everything the index needs: the video track, the duration, and where the Cues are. */
+function complete(layout: SegmentLayout | null): layout is SegmentLayout & { videoTrack: number; cuesOffset: number; durationS: number } {
+  return layout !== null && layout.videoTrack !== null && layout.cuesOffset !== null && Boolean(layout.durationS);
 }
 
 /**
@@ -516,12 +537,13 @@ async function readHead(fetchRange: SizedRangeFetcher): Promise<Uint8Array> {
 export async function readMkvKeyframes(fetchRange: SizedRangeFetcher): Promise<KeyframeIndex | null> {
   const fetched: Array<{ start: number; bytes: Uint8Array }> = [];
   const tail = readTail(fetchRange);
-  const head = await readHead(fetchRange);
-  fetched.push({ start: 0, bytes: head });
-  const layout = parseSegmentLayout(head);
-  if (!layout || layout.videoTrack === null || layout.cuesOffset === null || !layout.durationS) {
-    return null;
-  }
+  const head = readHead(fetchRange);
+  // The layout is read from the head's first part the moment it arrives, so
+  // the Cues are asked for while the rest of the head is still coming; the
+  // whole head is parsed only when its first part was not enough.
+  let layout = parseSegmentLayout(await head.first);
+  if (!complete(layout)) layout = parseSegmentLayout(await head.whole);
+  if (!complete(layout)) return null;
   // One speculative request usually holds the whole Cues element; a second
   // is made only when it is larger than the guess.
   let cues = (await cuesFromTail(tail, layout.cuesOffset)) ?? (await fetchRange(layout.cuesOffset, layout.cuesOffset + CUES_GUESS_BYTES - 1));
@@ -537,6 +559,7 @@ export async function readMkvKeyframes(fetchRange: SizedRangeFetcher): Promise<K
   if (cues.length < cuesEnd) {
     cues = await fetchRange(layout.cuesOffset, layout.cuesOffset + cuesEnd - 1);
   }
+  fetched.unshift({ start: 0, bytes: await head.whole });
   fetched.push({ start: layout.cuesOffset, bytes: cues });
   const keyframes = parseCueTimes(cues, layout.videoTrack, layout.timestampScaleNs);
   if (keyframes.length < 2) return null;
@@ -577,10 +600,17 @@ class RangeRequestError extends Error {
   }
 }
 
-export function httpRangeFetcher(url: string, timeoutMs: number): SizedRangeFetcher & { size(): number | null } {
+export function httpRangeFetcher(url: string, timeoutMs: number, sizeHint?: number): SizedRangeFetcher & { size(): number | null } {
   let totalSize: number | null = null;
   let sized: (total: number) => void = () => {};
-  const whenSized = new Promise<number>((resolve) => (sized = resolve));
+  // A size the caller already knew (the debrid service's, for its file) lets the
+  // tail and the rest of the head be asked for alongside the first request
+  // instead of a round trip after it: about a second on AllDebrid. Only reads
+  // are planned from it; the size the file is served at is the response's own.
+  const whenSized =
+    sizeHint !== undefined && Number.isSafeInteger(sizeHint) && sizeHint > 0
+      ? Promise.resolve(sizeHint)
+      : new Promise<number>((resolve) => (sized = resolve));
   const request = async (start: number, end: number) => {
     await linkTurn(url);
     const res = await fetch(url, {

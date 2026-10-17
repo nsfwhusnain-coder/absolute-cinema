@@ -159,6 +159,8 @@ export function remuxOpenQuery(source: PlaybackSource, title: TitleContext, audi
   });
   if (audio.index !== undefined) params.set("audioIndex", String(audio.index));
   if (source.remuxTicket) params.set("ticket", source.remuxTicket);
+  // The file's size lets the remuxer ask for the end of the file with its start, a round trip sooner.
+  if (source.sizeBytes && Number.isFinite(source.sizeBytes) && source.sizeBytes > 0) params.set("size", String(Math.round(source.sizeBytes)));
   if (title.season != null) params.set("season", String(title.season));
   if (title.episode != null) params.set("episode", String(title.episode));
   if (title.originalLanguage) params.set("originalLanguage", title.originalLanguage);

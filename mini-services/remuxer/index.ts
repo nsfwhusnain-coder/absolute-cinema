@@ -110,7 +110,10 @@ const server = createServer(async (req, res) => {
       const startAt = Math.min(MAX_START_AT_S, Math.max(0, Number(url.searchParams.get("startAt")) || 0));
       const viewer = { decodesDolbyVision: url.searchParams.get("dolbyVision") === "1", audio: parseAudioCaps(url.searchParams.get("audioCaps")) };
       const prewarm = url.searchParams.get("prewarm") === "1";
-      const info = await openVodSession(CACHE_DIR, input, parseAudio(url), startAt, viewer, prewarm, watcherOf(url), identityOf(url));
+      // The file's size as the debrid service gave it, when the app knew it (see httpRangeFetcher).
+      const size = Number(url.searchParams.get("size"));
+      const sizeHint = Number.isSafeInteger(size) && size > 0 ? size : undefined;
+      const info = await openVodSession(CACHE_DIR, input, parseAudio(url), startAt, viewer, prewarm, watcherOf(url), identityOf(url), sizeHint);
       return send(res, 200, JSON.stringify(info), "application/json");
     }
     const src = url.pathname.match(/^\/src\/([a-f0-9]{24})$/);

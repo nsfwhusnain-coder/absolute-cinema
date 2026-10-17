@@ -83,6 +83,9 @@ export async function GET(req: NextRequest) {
   if (AUDIO_CAPS.test(audioCaps)) worker.set("audioCaps", audioCaps);
   // Asked for ahead of Play: made ready, but never at a viewer's expense.
   if (params.get("prewarm") === "1") worker.set("prewarm", "1");
+  // The file's size, when the source said it: the remuxer plans its first reads from it.
+  const size = params.get("size") ?? "";
+  if (/^[1-9]\d{0,14}$/.test(size)) worker.set("size", size);
 
   const asked = Date.now();
   /** How long the open took and how it ended: the largest part of a start that is not the search. */

@@ -300,7 +300,8 @@ export async function openVodSession(
   viewer: VodViewer = BASELINE_VIEWER,
   prewarm = false,
   watcher = "",
-  identity = ""
+  identity = "",
+  sizeHint?: number
 ): Promise<VodSessionInfo> {
   const id = sessionId(url, audio, viewer, identity);
   let session = sessions.get(id);
@@ -308,7 +309,7 @@ export async function openVodSession(
   if (!session) {
     let pending = opening.get(id);
     if (!pending) {
-      pending = createSession(cacheRoot, id, url, audio, viewer).finally(() => opening.delete(id));
+      pending = createSession(cacheRoot, id, url, audio, viewer, sizeHint).finally(() => opening.delete(id));
       opening.set(id, pending);
     }
     session = await pending;
@@ -368,8 +369,8 @@ async function probeTotalSize(url: string): Promise<number | null> {
   return null;
 }
 
-async function createSession(cacheRoot: string, id: string, url: string, audio: VodAudioRequest, viewer: VodViewer): Promise<Session> {
-  const fetcher = httpRangeFetcher(url, RANGE_TIMEOUT_MS);
+async function createSession(cacheRoot: string, id: string, url: string, audio: VodAudioRequest, viewer: VodViewer, sizeHint?: number): Promise<Session> {
+  const fetcher = httpRangeFetcher(url, RANGE_TIMEOUT_MS, sizeHint);
   const index = await readMkvKeyframes(fetcher).catch((err: unknown) => {
     throw new VodError(`index read failed: ${err instanceof Error ? err.message : String(err)}`, 502);
   });
