@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AudioCaps } from "../../src/lib/playback/decode-capability";
 import { audioDelivery } from "./audio-delivery";
-import { sessionId, videoBitstreamArgs, type VodAudioRequest, type VodViewer } from "./vod";
+import { openOutcome, sessionId, videoBitstreamArgs, VodError, type VodAudioRequest, type VodViewer } from "./vod";
 
 const URL = "https://cdn.example/d/ABC/Movie.2024.2160p.REMUX.mkv";
 const AUDIO: VodAudioRequest = { preference: "original", originalLanguage: "en", preferredLanguage: "en" };
@@ -44,5 +44,14 @@ describe("videoBitstreamArgs", () => {
   it("leaves a stream whose header has its parameter sets exactly as it is", () => {
     expect(videoBitstreamArgs("V_MPEGH/ISO/HEVC", false)).toEqual([]);
     expect(videoBitstreamArgs("V_MPEG4/ISO/AVC", false)).toEqual([]);
+  });
+});
+
+describe("openOutcome", () => {
+  it("counts a failed open by the status of its error, and anything else as error", () => {
+    expect(openOutcome(new VodError("source has no keyframe index", 415))).toBe("415");
+    expect(openOutcome(new VodError("index read failed", 502))).toBe("502");
+    expect(openOutcome(new Error("unexpected"))).toBe("error");
+    expect(openOutcome("not an error")).toBe("error");
   });
 });

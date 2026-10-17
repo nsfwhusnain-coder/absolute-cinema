@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { metrics } from "../../src/lib/metrics";
 import { __setLinkPacingForTests, isRefusal, linkRefused, linkTurn } from "./link-pacer";
 
 afterEach(() => __setLinkPacingForTests(null));
@@ -95,5 +96,26 @@ describe("isRefusal", () => {
     expect(isRefusal(200)).toBe(false);
     expect(isRefusal(500)).toBe(false);
     expect(isRefusal(404)).toBe(false);
+  });
+});
+
+describe("linkTurn's wait metric", () => {
+  /** The count of one series in the scrape text, or 0 before it has been written. */
+  function waitsCounted(cdn: string): number {
+    const series = `ac_proxy_turn_wait_seconds_count{cdn="${cdn}"}`;
+    const line = metrics().render().split("\n").find((l) => l.startsWith(`${series} `));
+    return line ? Number(line.slice(series.length + 1)) : 0;
+  }
+
+  it("times each turn on a paced link, and none on a link that is not paced", async () => {
+    __setLinkPacingForTests({ burst: 1, ratePerS: 50 });
+    const paced = waitsCounted("debrid.it");
+    await linkTurn("https://metrics-pacer.debrid.it/1");
+    await linkTurn("https://metrics-pacer.debrid.it/1");
+    expect(waitsCounted("debrid.it") - paced).toBe(2);
+
+    const unpaced = waitsCounted("unpaced-pacer.example");
+    await linkTurn("https://metrics-pacer.unpaced-pacer.example/1");
+    expect(waitsCounted("unpaced-pacer.example")).toBe(unpaced);
   });
 });

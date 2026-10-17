@@ -19,6 +19,9 @@
  * Links on other CDNs are not held at all (see `paced`).
  */
 
+import { proxyTurnWaitSeconds } from "./remux-metrics";
+import { telemetry } from "./remux-stats";
+
 export interface LinkPacing {
   /** Requests a link may start at once, after a quiet spell. */
   burst: number;
@@ -123,6 +126,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export function linkTurn(link: string, cancelled: () => boolean = () => false): Promise<boolean> {
   if (!paced(link, Date.now())) return Promise.resolve(!cancelled());
   const bucket = bucketFor(link, Date.now());
+  const asked = Date.now();
   const turn = bucket.queue.then(async () => {
     for (;;) {
       if (cancelled()) return false;
@@ -139,7 +143,11 @@ export function linkTurn(link: string, cancelled: () => boolean = () => false): 
     }
   });
   bucket.queue = turn.catch(() => false);
-  return turn;
+  // Timed for paced links only (an unpaced turn returns at once, above). The wait includes the turns asked before this one.
+  return turn.then((ready) => {
+    telemetry(() => proxyTurnWaitSeconds.observe({ cdn: cdnDomainOf(link) }, (Date.now() - asked) / 1000));
+    return ready;
+  });
 }
 
 /** Requests a second this link may start once its burst is spent: half the usual for a while after a refusal, and no limit off a CDN that refuses. */

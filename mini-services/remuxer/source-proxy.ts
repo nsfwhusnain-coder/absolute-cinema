@@ -16,6 +16,8 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { cdnDomainOf, isRefusal, linkRate, linkRefused, linkTurn } from "./link-pacer";
+import { proxyFirstByteSeconds, proxyLaneBits, proxyOpenRequests, proxyUpstreamBytes, proxyUpstreamRequests } from "./remux-metrics";
+import { noteLaneSample, noteOutcome, telemetry, totals, type ProxyOutcome, type SessionStats } from "./remux-stats";
 
 export { cdnDomainOf };
 
@@ -38,6 +40,8 @@ export interface ProxySource {
   laneBps?: number;
   /** Until then (epoch ms) the connections may fall but not rise: the CDN refused one with 429 or 503. */
   lanesHeldUntil?: number;
+  /** What the session has done so far, counted here as the proxy reads (see remux-stats.ts). Absent for a file nobody summarises. */
+  stats?: SessionStats;
 }
 
 /** The sizes the connection logic works in. Tests use smaller ones. */
@@ -87,7 +91,7 @@ export function __setReadIdleForTests(ms: number | null): void {
 }
 
 /** A body that went silent (see readIdleMs). */
-class SilentError extends Error {
+export class SilentError extends Error {
   constructor() {
     super("upstream went silent");
   }
@@ -217,9 +221,16 @@ export function recentDomainSpeed(url: string, now = Date.now()): number | null 
 }
 
 /** A request the CDN would not serve just now (see link-pacer.ts): waited out rather than counted as a failure. */
-class RefusedError extends Error {
+export class RefusedError extends Error {
   constructor(readonly status: number) {
     super(`upstream refused (HTTP ${status})`);
+  }
+}
+
+/** A 206 whose Content-Range starts somewhere other than the one asked for (see rangeStartsAt). */
+export class WrongRangeError extends Error {
+  constructor(contentRange: string | null) {
+    super(`upstream answered another range (${contentRange})`);
   }
 }
 
@@ -230,6 +241,59 @@ const MAX_REFUSALS = 8;
 function refused(url: string, status: number): RefusedError {
   if (linkRefused(url)) console.log(`[proxy] ${cdnDomainOf(url)} refused a request (HTTP ${status}); waiting before the next`);
   return new RefusedError(status);
+}
+
+/**
+ * How a request that failed is counted. Anything the CDN did not answer as
+ * asked is an error, unless it is one of the kinds the metrics name: a refusal,
+ * a silence, or a range it did not start at.
+ */
+export function outcomeOf(err: unknown): ProxyOutcome {
+  if (err instanceof RefusedError) return "refused";
+  if (err instanceof SilentError) return "silent";
+  if (err instanceof WrongRangeError) return "wrong_range";
+  return "error";
+}
+
+/**
+ * One upstream request, as the metrics count it: in flight from the moment it
+ * is sent until it ends however it ends, and counted once, by how it ended.
+ * Its `end` belongs in a `finally`, so the open-requests gauge cannot be left up.
+ */
+class ProxyRequest {
+  private readonly cdn: string;
+  private readonly sentAt = performance.now();
+  private open = true;
+
+  constructor(private readonly source: ProxySource) {
+    this.cdn = cdnDomainOf(source.url);
+    telemetry(() => proxyOpenRequests.inc({ cdn: this.cdn }));
+  }
+
+  /** The response's headers have arrived: the time to first byte. */
+  answered(): void {
+    telemetry(() => proxyFirstByteSeconds.observe({ cdn: this.cdn }, (performance.now() - this.sentAt) / 1000));
+  }
+
+  /** Bytes read from the CDN. Counted as they are read, whether or not they are handed on. */
+  read(bytes: number): void {
+    telemetry(() => {
+      proxyUpstreamBytes.inc({ cdn: this.cdn }, bytes);
+      totals.upstreamBytes += bytes;
+      if (this.source.stats) this.source.stats.bytesUpstream += bytes;
+    });
+  }
+
+  /** The request has ended. Only the first call counts. */
+  end(outcome: ProxyOutcome): void {
+    if (!this.open) return;
+    this.open = false;
+    telemetry(() => {
+      proxyOpenRequests.dec({ cdn: this.cdn });
+      proxyUpstreamRequests.inc({ cdn: this.cdn, outcome });
+      noteOutcome(this.source.stats, outcome);
+    });
+  }
 }
 
 /** Test seam: the domain memory is module state that would otherwise leak between cases. */
@@ -451,55 +515,68 @@ interface WindowReport {
  */
 async function copyWindow(
   res: ServerResponse,
-  url: string,
+  source: ProxySource,
   start: number,
   end: number,
   client: Client,
   report: WindowReport
 ): Promise<void> {
+  const url = source.url;
   if (!(await linkTurn(url, () => client.gone))) return;
   const waiting = new AbortController();
   const headerTimer = setTimeout(() => waiting.abort(), UPSTREAM_TIMEOUT_MS);
   client.release = () => waiting.abort();
-  const upstream = await fetch(url, {
-    headers: { Range: `bytes=${start}-${end}` },
-    signal: waiting.signal,
-  }).finally(() => {
-    clearTimeout(headerTimer);
-    client.release = NOTHING;
-  });
-  if (upstream.status !== 206 || !upstream.body) {
-    await upstream.body?.cancel().catch(() => {});
-    if (isRefusal(upstream.status)) throw refused(url, upstream.status);
-    throw new Error(`upstream HTTP ${upstream.status}`);
-  }
-  if (!rangeStartsAt(upstream, start)) {
-    await upstream.body.cancel().catch(() => {});
-    throw new Error(`upstream answered another range (${upstream.headers.get("content-range")})`);
-  }
-  const reader = upstream.body.getReader();
-  client.release = () => void reader.cancel().catch(() => {});
-  if (client.gone) client.release();
-  let first = true;
-  let left = end - start + 1;
+  const request = new ProxyRequest(source);
+  let outcome: ProxyOutcome = "ok";
   try {
-    while (left > 0 && !client.gone && !report.superseded()) {
-      const started = performance.now();
-      const { done, value } = await readWithin(reader);
-      if (done || client.gone) break;
-      // The first read is not timed: its wait is the time to first byte, and its bytes may have
-      // been sent before anyone asked, so they would make the connection look faster than it is.
-      if (!first) report.read(value.length, performance.now() - started);
-      first = false;
-      // Never more than was asked for: a CDN that sends past the range would shift the rest of the file.
-      const part = value.length > left ? value.subarray(0, left) : value;
-      await write(res, part, client);
-      left -= part.length;
-      report.written(part.length);
+    const upstream = await fetch(url, {
+      headers: { Range: `bytes=${start}-${end}` },
+      signal: waiting.signal,
+    }).finally(() => {
+      clearTimeout(headerTimer);
+      client.release = NOTHING;
+    });
+    request.answered();
+    if (upstream.status !== 206 || !upstream.body) {
+      await upstream.body?.cancel().catch(() => {});
+      if (isRefusal(upstream.status)) throw refused(url, upstream.status);
+      throw new Error(`upstream HTTP ${upstream.status}`);
     }
+    if (!rangeStartsAt(upstream, start)) {
+      await upstream.body.cancel().catch(() => {});
+      throw new WrongRangeError(upstream.headers.get("content-range"));
+    }
+    const reader = upstream.body.getReader();
+    client.release = () => void reader.cancel().catch(() => {});
+    if (client.gone) client.release();
+    let first = true;
+    let left = end - start + 1;
+    try {
+      while (left > 0 && !client.gone && !report.superseded()) {
+        const started = performance.now();
+        const { done, value } = await readWithin(reader);
+        if (done) break;
+        request.read(value.length);
+        if (client.gone) break;
+        // The first read is not timed: its wait is the time to first byte, and its bytes may have
+        // been sent before anyone asked, so they would make the connection look faster than it is.
+        if (!first) report.read(value.length, performance.now() - started);
+        first = false;
+        // Never more than was asked for: a CDN that sends past the range would shift the rest of the file.
+        const part = value.length > left ? value.subarray(0, left) : value;
+        await write(res, part, client);
+        left -= part.length;
+        report.written(part.length);
+      }
+    } finally {
+      client.release = NOTHING;
+      await reader.cancel().catch(() => {});
+    }
+  } catch (err) {
+    outcome = outcomeOf(err);
+    throw err;
   } finally {
-    client.release = NOTHING;
-    await reader.cancel().catch(() => {});
+    request.end(outcome);
   }
 }
 
@@ -550,7 +627,7 @@ async function streamUpstream(
     const cap = windowCap(source, windowBytes);
     const last = windowEnd(offset, end, probing ? Math.min(tuning.probeBytes, cap) : cap);
     try {
-      await copyWindow(res, source.url, offset, last, client, {
+      await copyWindow(res, source, offset, last, client, {
         written,
         read: (bytes, waitedMs) => {
           if (!probing) return measure(source, tuning, bytes, waitedMs);
@@ -807,45 +884,56 @@ async function fetchPiece(piece: Piece, source: ProxySource, client: Client, tun
   const waiting = new AbortController();
   const headerTimer = setTimeout(() => waiting.abort(), UPSTREAM_TIMEOUT_MS);
   piece.cancel = () => waiting.abort();
-  const upstream = await fetch(url, {
-    headers: { Range: `bytes=${piece.next}-${piece.end}` },
-    signal: waiting.signal,
-  }).finally(() => {
-    clearTimeout(headerTimer);
-    piece.cancel = NOTHING;
-  });
-  if (upstream.status !== 206 || !upstream.body) {
-    await upstream.body?.cancel().catch(() => {});
-    if (isRefusal(upstream.status)) {
-      // A 429 or 503 may be a CDN limiting connections as well as requests.
-      if (upstream.status === 429 || upstream.status === 503) backOff(source, lanesWhenAsked);
-      throw refused(url, upstream.status);
-    }
-    throw new Error(`upstream HTTP ${upstream.status}`);
-  }
-  if (!rangeStartsAt(upstream, piece.next)) {
-    await upstream.body.cancel().catch(() => {});
-    throw new Error(`upstream answered another range (${upstream.headers.get("content-range")})`);
-  }
-  const reader = upstream.body.getReader();
-  piece.cancel = () => void reader.cancel().catch(() => {});
-  let first = true;
+  const request = new ProxyRequest(source);
+  let outcome: ProxyOutcome = "ok";
   try {
-    while (!piece.stopped && !client.gone && piece.next <= piece.end) {
-      const started = performance.now();
-      const { done, value } = await readWithin(reader);
-      if (done) break;
-      if (!first) measure(source, tuning, value.length, performance.now() - started);
-      first = false;
-      const part = value.subarray(0, piece.end - piece.next + 1);
-      piece.parts.push(part);
-      piece.next += part.length;
-      piece.wake();
+    const upstream = await fetch(url, {
+      headers: { Range: `bytes=${piece.next}-${piece.end}` },
+      signal: waiting.signal,
+    }).finally(() => {
+      clearTimeout(headerTimer);
+      piece.cancel = NOTHING;
+    });
+    request.answered();
+    if (upstream.status !== 206 || !upstream.body) {
+      await upstream.body?.cancel().catch(() => {});
+      if (isRefusal(upstream.status)) {
+        // A 429 or 503 may be a CDN limiting connections as well as requests.
+        if (upstream.status === 429 || upstream.status === 503) backOff(source, lanesWhenAsked);
+        throw refused(url, upstream.status);
+      }
+      throw new Error(`upstream HTTP ${upstream.status}`);
+    }
+    if (!rangeStartsAt(upstream, piece.next)) {
+      await upstream.body.cancel().catch(() => {});
+      throw new WrongRangeError(upstream.headers.get("content-range"));
+    }
+    const reader = upstream.body.getReader();
+    piece.cancel = () => void reader.cancel().catch(() => {});
+    let first = true;
+    try {
+      while (!piece.stopped && !client.gone && piece.next <= piece.end) {
+        const started = performance.now();
+        const { done, value } = await readWithin(reader);
+        if (done) break;
+        request.read(value.length);
+        if (!first) measure(source, tuning, value.length, performance.now() - started);
+        first = false;
+        const part = value.subarray(0, piece.end - piece.next + 1);
+        piece.parts.push(part);
+        piece.next += part.length;
+        piece.wake();
+      }
+    } finally {
+      piece.cancel = NOTHING;
+      await reader.cancel().catch(() => {});
     }
     if (piece.next <= piece.end && !piece.stopped && !client.gone) throw new Error("upstream ended early");
+  } catch (err) {
+    outcome = outcomeOf(err);
+    throw err;
   } finally {
-    piece.cancel = NOTHING;
-    await reader.cancel().catch(() => {});
+    request.end(outcome);
   }
 }
 
@@ -882,6 +970,11 @@ function measure(source: ProxySource, tuning: LaneTuning, bytes: number, waitedM
   tally.ms += waitedMs;
   if (tally.bytes < tuning.chunkBytes) return;
   const sample = bytesPerSecond(tally);
+  // Each measured speed, as bits per second for the histogram; the session keeps its own bounded sample of it.
+  telemetry(() => {
+    proxyLaneBits.observe({ cdn: cdnDomainOf(source.url) }, sample * 8);
+    if (source.stats) noteLaneSample(source.stats, sample);
+  });
   tally.bytes = 0;
   tally.ms = 0;
   tally.chunks++;
@@ -906,6 +999,9 @@ function decide(source: ProxySource, laneBps: number): void {
 function setLanes(source: ProxySource, lanes: number): void {
   if (lanes === source.lanes) return;
   source.lanes = lanes;
+  telemetry(() => {
+    if (source.stats) source.stats.maxLanes = Math.max(source.stats.maxLanes, lanes);
+  });
   const speed = source.laneBps === undefined ? "" : `${((source.laneBps * 8) / 1_000_000).toFixed(1)} Mbit/s per connection; `;
   console.log(`[proxy] ${speed}using ${lanes} connection${lanes === 1 ? "" : "s"}`);
 }

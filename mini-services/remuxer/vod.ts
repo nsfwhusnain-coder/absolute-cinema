@@ -25,7 +25,17 @@ import { audioCapsParam, DEFAULT_AUDIO_CAPS, type AudioCaps } from "../../src/li
 import { audioArgs, audioDelivery, type AudioDelivery } from "./audio-delivery";
 import { totalSizeFromContentRange } from "./content-range";
 import { httpRangeFetcher, readMkvKeyframes, type MkvAudioTrack, type MkvSubtitleTrack } from "./mkv-cues";
-import { isRefusal, linkRefused, linkTurn } from "./link-pacer";
+import { cdnDomainOf, isRefusal, linkRefused, linkTurn } from "./link-pacer";
+import {
+  remuxBytesServed,
+  remuxFirstFragmentSeconds,
+  remuxIndexSeconds,
+  remuxRunsEnded,
+  remuxRunsStarted,
+  remuxSessionOpens,
+  runEndReason,
+} from "./remux-metrics";
+import { newSessionStats, noteFirstFragment, noteViewer, sessionSummary, telemetry, totals, type SessionStats } from "./remux-stats";
 import { deliveredRange, dolbyVisionDelivery, type DeliveredRange } from "./dolby-vision";
 import { VttStreamParser, type VttCue } from "./vtt-stream";
 import type { ProxySource } from "./source-proxy";
@@ -145,6 +155,11 @@ export class VodError extends Error {
   }
 }
 
+/** How a failed open is counted in ac_remux_session_opens_total: the error's HTTP status, or "error" for anything else. */
+export function openOutcome(err: unknown): string {
+  return err instanceof VodError ? String(err.status) : "error";
+}
+
 interface Run {
   id: number;
   startSegment: number;
@@ -170,6 +185,10 @@ interface Run {
   servedAt: number;
   /** Where the player it serves last asked: how far ahead of that it may run is its own business. */
   wanted: number;
+  /** Counted as ended already: a run ends once, whether it is stopped or its process closes first. */
+  ended: boolean;
+  /** The session's own tally, which this run's counts go to. */
+  stats: SessionStats;
 }
 
 interface Session {
@@ -200,6 +219,8 @@ interface Session {
   demanded: boolean;
   /** The file gives up no picture, wherever it is started: no run of it is worth starting or waiting on. */
   pictureless: boolean;
+  /** Counted as the session goes; its summary is written when the session is removed. */
+  stats: SessionStats;
   info: VodSessionInfo;
 }
 
@@ -239,9 +260,12 @@ export interface VodAudioRequest extends AudioTrackSelection {
 const sessions = new Map<string, Session>();
 /** Base URL of this process's /src proxy; ffmpeg reads sources through it. */
 let proxyBase = "";
+/** The remux cache's root folder, whose disk the capacity numbers read the free space of. */
+let configuredCacheRoot = "";
 
-export function configureVod(options: { proxyBase: string }): void {
+export function configureVod(options: { proxyBase: string; cacheRoot?: string }): void {
   proxyBase = options.proxyBase;
+  configuredCacheRoot = options.cacheRoot ?? "";
 }
 
 export function vodSource(id: string): ProxySource | null {
@@ -322,6 +346,7 @@ export async function openVodSession(
     session = await pending;
   }
   session.lastRequestAt = Date.now();
+  noteViewer(session.stats, watcher);
   if (!prewarm) demand(session);
   // Start where the viewer will, so the init and first segment are already
   // being produced when the player asks.
@@ -379,8 +404,36 @@ async function probeTotalSize(url: string): Promise<number | null> {
   return null;
 }
 
+/**
+ * Indexes a file and makes its session. Every attempt is counted once, by its
+ * outcome, with the time its index took, however the attempt ends.
+ */
 async function createSession(cacheRoot: string, id: string, url: string, audio: VodAudioRequest, viewer: VodViewer, sizeHint?: number): Promise<Session> {
   const indexStarted = Date.now();
+  const cdn = cdnDomainOf(url);
+  let outcome = "ok";
+  try {
+    return await buildSession(cacheRoot, id, url, audio, viewer, sizeHint, indexStarted);
+  } catch (err) {
+    outcome = openOutcome(err);
+    throw err;
+  } finally {
+    telemetry(() => {
+      remuxSessionOpens.inc({ outcome, cdn });
+      remuxIndexSeconds.observe({ cdn }, (Date.now() - indexStarted) / 1000);
+    });
+  }
+}
+
+async function buildSession(
+  cacheRoot: string,
+  id: string,
+  url: string,
+  audio: VodAudioRequest,
+  viewer: VodViewer,
+  sizeHint: number | undefined,
+  indexStarted: number
+): Promise<Session> {
   const fetcher = httpRangeFetcher(url, RANGE_TIMEOUT_MS, sizeHint);
   const index = await readMkvKeyframes(fetcher).catch((err: unknown) => {
     throw new VodError(`index read failed: ${err instanceof Error ? err.message : String(err)}`, 502);
@@ -400,10 +453,13 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
   const dir = join(cacheRoot, `vod-${id}`);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
+  const stats = newSessionStats(Date.now());
+  stats.openMs = Date.now() - indexStarted;
+  stats.indexReads = fetcher.requests();
   const session: Session = {
     id,
     url,
-    source: { url, totalSize, cached: index.fetched, windowBytes: PREWARM_WINDOW_BYTES, targetBps: bitrateBps ?? undefined },
+    source: { url, totalSize, cached: index.fetched, windowBytes: PREWARM_WINDOW_BYTES, targetBps: bitrateBps ?? undefined, stats },
     dir,
     bounds,
     slices: computeSlicePlan(bounds),
@@ -423,6 +479,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
     wantedTime: 0,
     demanded: false,
     pictureless: false,
+    stats,
     info: {
       id,
       durationS: index.durationS,
@@ -560,9 +617,24 @@ function totalAliveRuns(): number {
   return count;
 }
 
+/**
+ * Counts a run's end once, by its reason label, in the metrics and in its
+ * session's tally. A run can be stopped and then its process closes: whichever
+ * comes first is the end, and the other does not count again.
+ */
+function countRunEnd(run: Run, reason: string): void {
+  if (run.ended) return;
+  run.ended = true;
+  telemetry(() => {
+    remuxRunsEnded.inc({ reason });
+    run.stats.runEnds[reason] = (run.stats.runEnds[reason] ?? 0) + 1;
+  });
+}
+
 function stopRun(run: Run, reason: string): void {
   if (run.finished || run.failed) return;
   run.finished = true;
+  countRunEnd(run, runEndReason(reason));
   if (run.paused) run.proc.kill("SIGCONT");
   run.proc.kill("SIGKILL");
   log(`run ${run.id} stopped: ${reason}`);
@@ -624,8 +696,30 @@ function startRun(session: Session, segment: number, watcher: string): Run {
   const proc = spawn("ffmpeg", ffmpegArgs(session, startTime), {
     stdio: ["ignore", "pipe", "pipe", ...session.subtitles.map(() => "pipe" as const)],
   });
-  const run: Run = { id, startSegment: segment, proc, startTime, fragments: [], finished: false, completed: false, failed: false, paused: false, unusable: false, dir, watcher, servedAt: Date.now(), wanted: startTime };
+  const cdn = cdnDomainOf(session.source.url);
+  const run: Run = {
+    id,
+    startSegment: segment,
+    proc,
+    startTime,
+    fragments: [],
+    finished: false,
+    completed: false,
+    failed: false,
+    paused: false,
+    unusable: false,
+    dir,
+    watcher,
+    servedAt: Date.now(),
+    wanted: startTime,
+    ended: false,
+    stats: session.stats,
+  };
   session.runs.push(run);
+  telemetry(() => {
+    remuxRunsStarted.inc({ cdn });
+    session.stats.runs++;
+  });
   const giveUp = (reason: string) => {
     run.unusable = true;
     stopRun(run, reason);
@@ -693,6 +787,13 @@ function startRun(session: Session, segment: number, watcher: string): Run {
       const path = join(dir, `${seq++}.m4s`);
       writeFileSync(path, part.bytes);
       run.fragments.push({ time, path, bytes: part.bytes.length });
+      if (run.fragments.length === 1) {
+        const ms = Date.now() - runStartedAt;
+        telemetry(() => {
+          remuxFirstFragmentSeconds.observe({ cdn }, ms / 1000);
+          noteFirstFragment(session.stats, run.id, ms);
+        });
+      }
       throttle(session, run);
     }
   });
@@ -717,13 +818,16 @@ function startRun(session: Session, segment: number, watcher: string): Run {
     if (code === 0) {
       run.finished = true;
       run.completed = true;
+      countRunEnd(run, "completed");
     } else {
       run.failed = true;
+      countRunEnd(run, "failed");
       log(`run ${run.id} of ${session.id} failed (${code ?? signal}): ${stderr.trim().slice(0, 300)}`);
     }
   });
   proc.on("error", () => {
     run.failed = true;
+    countRunEnd(run, "failed");
   });
   log(`run ${id} of ${session.id} from segment ${segment} (${startTime.toFixed(1)}s)`);
   return run;
@@ -793,6 +897,7 @@ export function vodPlaylist(id: string, sliced = false): string {
 
 export async function vodInit(id: string, watcher = ""): Promise<Uint8Array> {
   const session = sessionOrThrow(id);
+  noteViewer(session.stats, watcher);
   const deadline = Date.now() + INIT_WAIT_MS;
   while (!session.init) {
     if (session.runs.some((run) => run.unusable)) throw new VodError(UNUSABLE_ENTRY, 502);
@@ -838,6 +943,7 @@ export function vodSlice(id: string, slice: number, gone: () => boolean = () => 
  * written, so playback can begin before the window ends.
  */
 async function* windowFragments(session: Session, window: PlanWindow, segment: number, gone: () => boolean, watcher: string): AsyncGenerator<string> {
+  noteViewer(session.stats, watcher);
   demand(session);
   session.wantedTime = window.start;
   const reached = runReaching(session, window);
@@ -926,6 +1032,27 @@ function dirBytes(dir: string): number {
 
 function removeSession(session: Session, reason: string): void {
   for (const run of session.runs) stopRun(run, reason);
+  // After the runs stop, so their ends are in it. Names the file's facts and its CDN's domain, never its link.
+  telemetry(() =>
+    recordEvent(
+      "remux",
+      "remux_session_summary",
+      sessionSummary(
+        {
+          session: session.id,
+          cdn: cdnDomainOf(session.source.url),
+          durationS: session.durationS,
+          sizeBytes: session.source.totalSize,
+          bitrateBps: session.info.bitrateBps,
+          videoCodec: session.info.videoCodecId,
+          dynamicRange: session.info.dynamicRange,
+          audioDelivery: session.audioDelivery,
+        },
+        session.stats,
+        Date.now()
+      )
+    )
+  );
   sessions.delete(session.id);
   rmSync(session.dir, { recursive: true, force: true });
   log(`session ${session.id} removed: ${reason}`);
@@ -1000,4 +1127,50 @@ export function isLiveVodDir(name: string): boolean {
 
 export function vodStats(): { sessions: number; runs: number } {
   return { sessions: sessions.size, runs: totalAliveRuns() };
+}
+
+/** Bytes handed to a player: a fragment or an init segment of session `id`. Counted in the metric and the session's tally. */
+export function noteServed(id: string, kind: "fragment" | "init", bytes: number): void {
+  telemetry(() => {
+    remuxBytesServed.inc({ kind }, bytes);
+    totals.servedBytes += bytes;
+    const session = sessions.get(id);
+    if (session) session.stats.bytesServed += bytes;
+  });
+}
+
+/** What the scrape gauges are set from, read at the scrape: the sessions, the runs by pause, and each CDN's connections in use. */
+export function vodLiveState(): { sessions: number; pausedRuns: number; runningRuns: number; lanesByCdn: Map<string, number> } {
+  const lanesByCdn = new Map<string, number>();
+  let pausedRuns = 0;
+  let runningRuns = 0;
+  for (const session of sessions.values()) {
+    const alive = aliveRuns(session);
+    if (!alive.length) continue;
+    const cdn = cdnDomainOf(session.source.url);
+    lanesByCdn.set(cdn, (lanesByCdn.get(cdn) ?? 0) + (session.source.lanes ?? 1));
+    for (const run of alive) {
+      if (run.paused) pausedRuns++;
+      else runningRuns++;
+    }
+  }
+  return { sessions: sessions.size, pausedRuns, runningRuns, lanesByCdn };
+}
+
+/** How long the cache's size and its disk's free space are kept: walking the cache is not free. */
+const STORAGE_CACHE_MS = 60_000;
+let storage = { at: Number.NEGATIVE_INFINITY, cacheBytes: 0, freeBytes: Number.POSITIVE_INFINITY };
+
+/**
+ * The remux cache's bytes (the janitor's own count, by session folder) and its
+ * disk's free space, kept for a minute at a time.
+ */
+export function cacheStorage(now = Date.now()): { cacheBytes: number; diskFreeBytes: number } {
+  if (now - storage.at >= STORAGE_CACHE_MS) {
+    let cacheBytes = 0;
+    for (const session of sessions.values()) cacheBytes += dirBytes(session.dir);
+    const disk = configuredCacheRoot ? freeBytes(configuredCacheRoot) : Number.POSITIVE_INFINITY;
+    storage = { at: now, cacheBytes, freeBytes: disk };
+  }
+  return { cacheBytes: storage.cacheBytes, diskFreeBytes: storage.freeBytes };
 }

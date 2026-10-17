@@ -2,8 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createServer, type Server } from "node:http";
 import { connect, type AddressInfo } from "node:net";
-import { cachedAt, lanesFor, parseRange, rampedPieceBytes, serveRange, steadyPieceBytes, windowEnd, __setReadIdleForTests, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf } from "./source-proxy";
+import { cachedAt, lanesFor, outcomeOf, parseRange, rampedPieceBytes, RefusedError, serveRange, SilentError, steadyPieceBytes, windowEnd, WrongRangeError, __setReadIdleForTests, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf } from "./source-proxy";
 import { __setLinkPacingForTests, linkRefused } from "./link-pacer";
+import { metrics } from "../../src/lib/metrics";
+import { newSessionStats } from "./remux-stats";
 
 /** Byte `i` of the pretend source file, so any slice can be checked without keeping the file. */
 const byteAt = (i: number): number => (i * 7 + (i >> 9)) % 251;
@@ -581,5 +583,48 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     // The first round: six seconds of a 16 Mbit/s file across the twelve, 1 MB each.
     expect(rampedPieceBytes({ ...source, targetBps: 16_000_000 }, 128 * 1024 * KB, tuning, 1)).toBe(1_000_000);
     expect(rampedPieceBytes({ ...source, targetBps: 16_000_000 }, 128 * 1024 * KB, tuning, 12)).toBe(1_000_000);
+  });
+});
+
+describe("outcomeOf", () => {
+  it("names how an upstream request failed, by the kinds the metrics count", () => {
+    expect(outcomeOf(new RefusedError(503))).toBe("refused");
+    expect(outcomeOf(new SilentError())).toBe("silent");
+    expect(outcomeOf(new WrongRangeError("bytes 5-9/10"))).toBe("wrong_range");
+    expect(outcomeOf(new Error("upstream HTTP 404"))).toBe("error");
+    expect(outcomeOf("not even an error")).toBe("error");
+  });
+});
+
+/** The value of one series in the scrape text, or 0 before it has been written. */
+function seriesValue(series: string): number {
+  const line = metrics().render().split("\n").find((l) => l.startsWith(`${series} `));
+  return line ? Number(line.slice(series.length + 1)) : 0;
+}
+
+describe("serveRange's upstream metrics", () => {
+  it("counts a refused request as refused and each answered one as ok, bytes as read, and leaves nothing open", async () => {
+    const total = 300 * KB;
+    const stats = newSessionStats(Date.now());
+    const source: ProxySource = { url: "", totalSize: total, cached: [], stats };
+    const up = await upstream(total, { refuse: (request) => request === 1 });
+    source.url = up.url;
+    const cdn = cdnDomainOf(up.url);
+    const before = {
+      refused: seriesValue(`ac_proxy_upstream_requests_total{cdn="${cdn}",outcome="refused"}`),
+      ok: seriesValue(`ac_proxy_upstream_requests_total{cdn="${cdn}",outcome="ok"}`),
+      bytes: seriesValue(`ac_proxy_upstream_bytes_total{cdn="${cdn}"}`),
+      open: seriesValue(`ac_proxy_open_requests{cdn="${cdn}"}`),
+    };
+    const port = await proxy(source, 64 * KB);
+    const res = await fetch(`http://127.0.0.1:${port}/src`);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+
+    expect(seriesValue(`ac_proxy_upstream_requests_total{cdn="${cdn}",outcome="refused"}`) - before.refused).toBe(1);
+    expect(seriesValue(`ac_proxy_upstream_requests_total{cdn="${cdn}",outcome="ok"}`) - before.ok).toBe(up.asked.length - 1);
+    expect(seriesValue(`ac_proxy_upstream_bytes_total{cdn="${cdn}"}`) - before.bytes).toBeGreaterThanOrEqual(total);
+    expect(seriesValue(`ac_proxy_open_requests{cdn="${cdn}"}`)).toBe(before.open);
+    expect(stats.refusals).toBe(1);
+    expect(stats.bytesUpstream).toBe(total);
   });
 });

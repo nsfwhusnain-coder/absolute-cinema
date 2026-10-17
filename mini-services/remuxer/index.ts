@@ -18,22 +18,47 @@
 
 import { createServer, type ServerResponse } from "node:http";
 import { mkdirSync } from "node:fs";
+import { loadavg } from "node:os";
 import type { AudioPreference } from "../../src/lib/profile-preferences";
 import { UNUSABLE_HEADER } from "../../src/lib/playback/remuxer";
 import { parseAudioCaps } from "../../src/lib/playback/decode-capability";
+import { recordEvent } from "../../src/lib/event-log";
+import { metrics } from "../../src/lib/metrics";
 import { onClientGone, serveRange } from "./source-proxy";
 import { removeCacheLeftovers } from "./cache-leftovers";
 import {
+  capacityRates,
+  capacitySnapshotFields,
+  readContainerNetwork,
+  ViewerTracker,
+  type CapacitySample,
+} from "./capacity";
+import {
+  containerNetworkBytes,
+  processCpuSeconds,
+  processResidentBytes,
+  proxyLanes,
+  remuxCacheBytes,
+  remuxDiskFreeBytes,
+  remuxRuns,
+  remuxSessions,
+  remuxViewers,
+} from "./remux-metrics";
+import { telemetry, totals } from "./remux-stats";
+import {
   UNUSABLE_ENTRY,
   VodError,
+  cacheStorage,
   configureVod,
   isLiveVodDir,
   leaveVodSession,
+  noteServed,
   openVodSession,
   readFragment,
   startVodJanitor,
   stopAllVodRuns,
   vodInit,
+  vodLiveState,
   vodPlaylist,
   vodSubtitleCues,
   type VodAudioRequest,
@@ -91,18 +116,104 @@ function sendError(res: ServerResponse, err: unknown): void {
 }
 
 mkdirSync(CACHE_DIR, { recursive: true });
-configureVod({ proxyBase: `http://127.0.0.1:${PORT}` });
+configureVod({ proxyBase: `http://127.0.0.1:${PORT}`, cacheRoot: CACHE_DIR });
 // Nothing can reach what the process before this one made.
 void removeCacheLeftovers(CACHE_DIR, isLiveVodDir).then((removed) => {
   if (removed) console.log(`[vod] removed ${removed} folder(s) left in the cache by an earlier run`);
 });
 startVodJanitor();
 
+/**
+ * Viewers heard from lately: any request that names its watcher. Kept here,
+ * not in a session, since a viewer can ask for a file before it has a session.
+ */
+const viewers = new ViewerTracker();
+
+// The gauges of a scrape, set from the state at the moment of the scrape. Each
+// collector stands alone, so one that fails leaves the others to report.
+metrics().onCollect(() => {
+  const live = vodLiveState();
+  remuxSessions.set(undefined, live.sessions);
+  // Rebuilt each time, so a CDN that has no connections in use any more is not left reporting its last count.
+  remuxRuns.reset();
+  remuxRuns.set({ paused: "true" }, live.pausedRuns);
+  remuxRuns.set({ paused: "false" }, live.runningRuns);
+  proxyLanes.reset();
+  for (const [cdn, lanes] of live.lanesByCdn) proxyLanes.set({ cdn }, lanes);
+});
+metrics().onCollect(() => remuxViewers.set(undefined, viewers.count(Date.now())));
+metrics().onCollect(() => {
+  const storage = cacheStorage();
+  remuxCacheBytes.set(undefined, storage.cacheBytes);
+  remuxDiskFreeBytes.set(undefined, storage.diskFreeBytes);
+});
+metrics().onCollect(() => {
+  const net = readContainerNetwork();
+  if (!net) return;
+  containerNetworkBytes.set({ direction: "rx" }, net.rxBytes);
+  containerNetworkBytes.set({ direction: "tx" }, net.txBytes);
+});
+metrics().onCollect(() => {
+  processResidentBytes.set({ process: "remuxer" }, process.memoryUsage().rss);
+  processCpuSeconds.set({ process: "remuxer" }, cpuSecondsUsed());
+});
+
+/** The process's CPU time so far, user and system together, in seconds. */
+function cpuSecondsUsed(): number {
+  const cpu = process.cpuUsage();
+  return (cpu.user + cpu.system) / 1_000_000;
+}
+
+function capacitySample(at: number): CapacitySample {
+  const net = readContainerNetwork();
+  return {
+    at,
+    rxBytes: net?.rxBytes ?? null,
+    txBytes: net?.txBytes ?? null,
+    upstreamBytes: totals.upstreamBytes,
+    servedBytes: totals.servedBytes,
+    cpuSeconds: cpuSecondsUsed(),
+  };
+}
+
+/** Once a minute, the capacity snapshot: how busy the process and its container were over the minute before. */
+const CAPACITY_INTERVAL_MS = 60_000;
+let capacityBefore = capacitySample(Date.now());
+const capacityTimer = setInterval(() => {
+  telemetry(() => {
+    const now = capacitySample(Date.now());
+    const rates = capacityRates(capacityBefore, now);
+    capacityBefore = now;
+    const live = vodLiveState();
+    const storage = cacheStorage(now.at);
+    recordEvent(
+      "remux",
+      "capacity_snapshot",
+      capacitySnapshotFields({
+        sessions: live.sessions,
+        runs: live.pausedRuns + live.runningRuns,
+        pausedRuns: live.pausedRuns,
+        viewers: viewers.count(now.at),
+        rates,
+        loadAvg1: loadavg()[0] ?? 0,
+        rssBytes: process.memoryUsage().rss,
+        cacheBytes: storage.cacheBytes,
+        diskFreeBytes: storage.diskFreeBytes,
+      })
+    );
+  });
+}, CAPACITY_INTERVAL_MS);
+capacityTimer.unref();
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://127.0.0.1:${PORT}`);
+  telemetry(() => viewers.touch(watcherOf(url), Date.now()));
   try {
     if (url.pathname === "/health") {
       return send(res, 200, JSON.stringify({ ok: true, ...vodStats() }), "application/json");
+    }
+    if (url.pathname === "/metrics") {
+      return send(res, 200, metrics().render(), "text/plain; version=0.0.4; charset=utf-8");
     }
     if (url.pathname === "/vod/open") {
       const input = url.searchParams.get("u") ?? "";
@@ -135,7 +246,12 @@ const server = createServer(async (req, res) => {
     if (file === "index.m3u8") return send(res, 200, vodPlaylist(id!), "application/vnd.apple.mpegurl");
     if (file === "slices.m3u8") return send(res, 200, vodPlaylist(id!, true), "application/vnd.apple.mpegurl");
     const watcher = watcherOf(url);
-    if (file === "init.mp4") return send(res, 200, await vodInit(id!, watcher), "video/mp4");
+    if (file === "init.mp4") {
+      const init = await vodInit(id!, watcher);
+      send(res, 200, init, "video/mp4");
+      noteServed(id!, "init", init.length);
+      return;
+    }
     // Streamed: each keyframe group is sent as soon as it exists, so the
     // player can start decoding before the whole segment has been produced.
     let started = false;
@@ -155,7 +271,10 @@ const server = createServer(async (req, res) => {
         }
         // Wait for the socket to drain, or for the player to hang up (a closed
         // socket never drains, and the loop would have waited forever).
-        if (!res.write(readFragment(path)) && !gone) {
+        const fragment = readFragment(path);
+        const drained = res.write(fragment);
+        noteServed(id!, "fragment", fragment.length);
+        if (!drained && !gone) {
           await new Promise<void>((resolve) => {
             resume = resolve;
             res.once("drain", resolve);
