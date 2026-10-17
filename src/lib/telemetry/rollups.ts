@@ -8,6 +8,7 @@
  * event files is read line by line. Everything here is pure except
  * `writeRollups`, the one place that reads event files and writes rollups.
  */
+import { qualityBucket } from "../metrics";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -165,7 +166,6 @@ const HOUR_MS = 3_600_000;
 /** A debrid search this short only read its cache, so its times say nothing about a search. */
 export const REAL_SEARCH_MIN_MS = 100;
 /** A scope film is letterboxed (1920x800 is a 1080p film): wider than this many times its height, its width says its class. */
-const SCOPE_RATIO = 1.9;
 /** The debrid times a search reports, and the names they are kept under. */
 const DEBRID_TIMES: ReadonlyArray<readonly [string, string]> = [
   ["totalMs", "total"],
@@ -273,20 +273,8 @@ class Groups<T> {
   }
 }
 
-/**
- * The bucket a picture is counted under, as the metrics name them. A scope
- * film is bucketed by its width, since its height is short of any class.
- */
-export function qualityBucket(height: number | null, width: number | null): string {
-  if (height === null && width === null) return "unknown";
-  const byWidth = width !== null && (height === null || width / height >= SCOPE_RATIO);
-  const value = (byWidth ? width : height) ?? 0;
-  const steps: ReadonlyArray<readonly [number, string]> = byWidth
-    ? [[3500, "2160"], [2400, "1440"], [1800, "1080"], [1200, "720"]]
-    : [[2160, "2160"], [1440, "1440"], [1080, "1080"], [720, "720"]];
-  for (const [minimum, bucket] of steps) if (value >= minimum) return bucket;
-  return value > 0 ? "sd" : "unknown";
-}
+/** The bucket a picture is counted under: the metrics' own (see qualityBucket in metrics.ts). */
+export { qualityBucket };
 
 interface SearchState {
   discoveries: number;

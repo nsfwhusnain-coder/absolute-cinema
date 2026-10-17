@@ -206,24 +206,19 @@ export function metrics(): Registry {
 export type QualityBucket = "2160" | "1440" | "1080" | "720" | "sd" | "unknown";
 
 /**
- * A picture as the quality bucket metrics are labelled with. The width says it
- * best when it is known: a scope film in 4K decodes 3840x1600, and in 1080p
- * 1920x800, so its height alone reads a rung low.
+ * A picture as the quality bucket metrics are labelled with: the higher of the
+ * rungs its height and its width each reach. A scope film decodes 3840x1600 in
+ * 4K and 1920x800 in 1080p, short of its rung in height; a 4:3 film decodes
+ * 1440x1080, short of it in width; an ultrawide 3440x1440 is 1440p either way.
  */
 export function qualityBucket(height: number | null | undefined, width?: number | null): QualityBucket {
-  const w = width ?? 0;
-  if (w > 0) {
-    if (w >= 3200) return "2160";
-    if (w >= 2200) return "1440";
-    if (w >= 1700) return "1080";
-    if (w >= 1100) return "720";
-    return "sd";
-  }
   const h = height ?? 0;
-  if (h <= 0) return "unknown";
-  if (h >= 2000) return "2160";
-  if (h >= 1300) return "1440";
-  if (h >= 900) return "1080";
-  if (h >= 650) return "720";
-  return "sd";
+  const w = width ?? 0;
+  if (h <= 0 && w <= 0) return "unknown";
+  const rung = (value: number, steps: readonly number[]) => steps.findIndex((minimum) => value >= minimum);
+  const byHeight = rung(h, [2000, 1300, 900, 650]);
+  const byWidth = rung(w, [3500, 2400, 1800, 1200]);
+  const found = [byHeight, byWidth].filter((i) => i >= 0);
+  if (!found.length) return "sd";
+  return (["2160", "1440", "1080", "720"] as const)[Math.min(...found)]!;
 }

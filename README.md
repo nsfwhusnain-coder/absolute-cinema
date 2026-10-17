@@ -246,7 +246,8 @@ settings), `data/source-memory/` (remembered servers) and `transcode-cache/` (re
 output; bounded by the settings above and safe to delete).
 
 **Diagnostics.** Every search, start, failure, stall and jump is written as one line
-to `db/events/`, kept for 30 days and never sent anywhere; viewers appear as a tag, not
+to `db/events/`, kept for 400 days (with a summary of each day kept for good, in
+`db/rollups/`) and never sent anywhere; viewers appear as a tag, not
 an account. It is what answers "how long do starts take on the TV?" or "did this get
 worse last week?":
 
