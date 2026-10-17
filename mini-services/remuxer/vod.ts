@@ -511,7 +511,9 @@ function ffmpegArgs(session: Session, startTime: number): string[] {
     // times into every fragment (the default writes run-relative times).
     // delay_moov writes the header after the first packets, once the
     // parameter sets above have been extracted from them.
-    "-movflags", `+frag_keyframe+empty_moov+default_base_moof+frag_discont${rebuild.length ? "+delay_moov" : ""}`,
+    // delay_moov always: the header waits for the first packets, which E-AC-3 and AC-3 audio need
+    // (their sample entries are written from a parsed frame), as rebuilt parameter sets do.
+    "-movflags", "+frag_keyframe+empty_moov+default_base_moof+frag_discont+delay_moov",
     "-use_editlist", "1",
     // Also cut mid-GOP every second so the first bytes after a seek reach the
     // player without waiting for the next keyframe. Mid-GOP fragments simply
