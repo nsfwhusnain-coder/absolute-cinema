@@ -42,6 +42,46 @@ export interface ProxySource {
   lanesHeldUntil?: number;
   /** What the session has done so far, counted here as the proxy reads (see remux-stats.ts). Absent for a file nobody summarises. */
   stats?: SessionStats;
+  /**
+   * While set, the file is handed to ffmpeg at this pace (bits per second) rather than as fast as the CDN
+   * goes: vod.ts sets it once every viewer of the session is well ahead (see paceSession there).
+   */
+  paceBps?: number;
+  /** The pace's token bucket, in bytes: dropped whenever the pace is lifted. */
+  paceBucket?: { tokens: number; at: number };
+}
+
+/** A paced file may run this far ahead of its pace in one go, in seconds of it. */
+const PACE_BURST_S = 1;
+/** One wait at most, in ms: a pace lifted meanwhile (the viewer seeked) is felt within this. */
+const PACE_MAX_WAIT_MS = 250;
+
+/**
+ * How long to wait before handing `bytes` more of a paced file to ffmpeg, in
+ * ms (0 when it is not paced, or within its burst). Takes the bytes from the
+ * file's bucket.
+ */
+export function paceWaitMs(source: ProxySource, bytes: number, now = performance.now()): number {
+  const bps = source.paceBps;
+  if (!bps || !(bps > 0)) {
+    source.paceBucket = undefined;
+    return 0;
+  }
+  const rate = bps / 8;
+  const bucket = (source.paceBucket ??= { tokens: rate * PACE_BURST_S, at: now });
+  bucket.tokens = Math.min(rate * PACE_BURST_S, bucket.tokens + (Math.max(0, now - bucket.at) / 1000) * rate);
+  bucket.at = now;
+  bucket.tokens -= bytes;
+  return bucket.tokens >= 0 ? 0 : Math.min(PACE_MAX_WAIT_MS, (-bucket.tokens / rate) * 1000);
+}
+
+async function paced(source: ProxySource, bytes: number, client: Client): Promise<void> {
+  let wait = paceWaitMs(source, bytes);
+  while (wait > 0 && !client.gone && source.paceBps) {
+    await new Promise((resolve) => setTimeout(resolve, wait));
+    // Still owed after one wait (a big part, a slow pace): wait again, unless the pace was lifted.
+    wait = source.paceBucket && source.paceBucket.tokens < 0 ? paceWaitMs(source, 0) : 0;
+  }
 }
 
 /** The sizes the connection logic works in. Tests use smaller ones. */
@@ -438,7 +478,9 @@ export async function serveRange(
       if (hit) {
         const from = offset - hit.start;
         const to = Math.min(hit.bytes.length, range.end - hit.start + 1);
-        await write(res, hit.bytes.subarray(from, to), client);
+        const bytes = hit.bytes.subarray(from, to);
+        await paced(source, bytes.length, client);
+        await write(res, bytes, client);
         offset = hit.start + to;
         fromMemory = true;
         continue;
@@ -564,6 +606,7 @@ async function copyWindow(
         first = false;
         // Never more than was asked for: a CDN that sends past the range would shift the rest of the file.
         const part = value.length > left ? value.subarray(0, left) : value;
+        await paced(source, part.length, client);
         await write(res, part, client);
         left -= part.length;
         report.written(part.length);
@@ -793,7 +836,7 @@ async function streamParallel(
       }
       const head = pieces[0];
       if (!head) break;
-      await writePiece(res, head, client);
+      await writePiece(res, head, client, source);
       if (client.gone) break;
       pieces.shift();
       written = head.end + 1;
@@ -825,10 +868,11 @@ function halt(piece: Piece): void {
  * Hands a piece's bytes on in order, each one as it arrives, and returns once
  * they are all handed on (or the reader has gone).
  */
-async function writePiece(res: ServerResponse, piece: Piece, client: Client): Promise<void> {
+async function writePiece(res: ServerResponse, piece: Piece, client: Client, source: ProxySource): Promise<void> {
   while (!client.gone) {
     const part = piece.parts.shift();
     if (part) {
+      await paced(source, part.length, client);
       await write(res, part, client);
     } else if (piece.error) {
       throw piece.error;

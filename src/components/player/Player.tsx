@@ -41,6 +41,7 @@ import { subtitlesRequired } from "./subtitle-policy";
 import { normalizeHeight, playableHere, qualityChoices, qualityLabel, type AudioChoice, type TitleContext } from "./playable";
 import {
   BufferingSpinner,
+  CapacityCard,
   Captions,
   FailureCard,
   IconButton,
@@ -634,7 +635,16 @@ export function Player(props: PlayerProps) {
         </div>
       )}
 
-      {state.failureMessage && (
+      {state.capacity.kind !== "none" && (
+        <CapacityCard
+          state={state.capacity}
+          onRejoin={actions.rejoin}
+          onLighter={() => actions.setQuality(1080)}
+          onBack={props.onBack}
+        />
+      )}
+
+      {state.failureMessage && state.capacity.kind === "none" && (
         <FailureCard
           message={state.failureMessage}
           onRetry={actions.retry}

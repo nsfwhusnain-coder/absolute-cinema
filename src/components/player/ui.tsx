@@ -4,6 +4,7 @@ import { useCallback, useRef, useState, type KeyboardEvent, type PointerEvent, t
 import { Check, ChevronLeft, Loader2, RotateCcw, Volume1, Volume2, VolumeX } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CaptionBackground, CaptionColor, CaptionFont, CaptionSize } from "@/lib/profile-extras";
+import type { CapacityReason, CapacityState } from "@/lib/playback/capacity";
 
 export function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
@@ -416,6 +417,110 @@ export function FailureCard({
           )}
           <button type="button" onClick={onBack} className="h-10 rounded-full text-sm text-white/70 hover:text-white">
             Go back
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Why the server is full, in a line a viewer can take in (docs/CAPACITY.md). */
+function capacityCause(reason: CapacityReason): string | null {
+  switch (reason) {
+    case "temperature":
+      return "The server is cooling down after a busy spell.";
+    case "cpu":
+    case "memory":
+      return "The server is working at its limit.";
+    case "network":
+      return "The internet connection is carrying all it can.";
+    case "playback":
+      return "Viewers are buffering, so nobody new is let in for now.";
+    case "starts":
+      return "A few films have just started; yours is next.";
+    default:
+      return null;
+  }
+}
+
+/**
+ * The server's line (docs/CAPACITY.md): waiting for a seat (the film starts
+ * by itself when one frees), a line too long to join, or a stream the server
+ * stopped to protect itself. Never "can't play": nothing is wrong with the film.
+ */
+export function CapacityCard({
+  state,
+  onRejoin,
+  onLighter,
+  onBack,
+}: {
+  state: Exclude<CapacityState, { kind: "none" }>;
+  onRejoin: () => void;
+  /** Offered while waiting for 4K when a 1080p stream would fit now. */
+  onLighter?: () => void;
+  onBack: () => void;
+}) {
+  const primary =
+    "inline-flex h-11 items-center justify-center gap-2 rounded-full bg-white font-semibold text-black transition hover:bg-white/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70";
+  const secondary =
+    "h-11 rounded-full bg-[var(--mat-fill-hover)] font-medium transition hover:bg-[var(--mat-fill-active)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70";
+  const quiet = "h-10 rounded-full text-sm text-white/70 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70";
+  let heading: string;
+  let body: string;
+  let cause: string | null = null;
+  if (state.kind === "queued") {
+    heading = "We've reached our limit";
+    body = `${state.position <= 1 ? "You're next in the queue." : `You're number ${state.position} in the queue.`} Your film starts by itself as soon as someone finishes and there's room, or you can try again at a different time.`;
+    cause = capacityCause(state.reason);
+  } else if (state.kind === "full") {
+    heading = "The queue is full";
+    body = "Too many people are waiting right now. Please try again at a different time.";
+  } else {
+    heading = "You've been disconnected";
+    body =
+      state.reason === "temperature"
+        ? "The server got too hot, so some streams had to stop to keep it running. Your place in the film is saved."
+        : "The server is struggling with capacity at the moment, so some streams had to stop to keep it running. Your place in the film is saved.";
+  }
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 p-6" onClick={(e) => e.stopPropagation()}>
+      <div
+        role={state.kind === "queued" ? "status" : "alertdialog"}
+        aria-live="polite"
+        aria-label={heading}
+        className="glass-clear glass-dense w-full max-w-sm rounded-3xl p-6 text-center text-white"
+      >
+        {state.kind === "queued" && (
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-white/10 font-display text-2xl font-semibold tabular-nums">
+            {state.position}
+          </div>
+        )}
+        <h2 className="font-display text-lg font-semibold">{heading}</h2>
+        <p className="mt-2 text-sm leading-relaxed text-white/70">{body}</p>
+        {cause && <p className="mt-2 text-xs leading-relaxed text-white/50">{cause}</p>}
+        {state.kind === "queued" && (
+          <div className="mx-auto mt-4 h-px w-40 overflow-hidden bg-white/10" aria-hidden>
+            <div className="loader-hairline h-full w-1/3 bg-white/70" />
+          </div>
+        )}
+        <div className="mt-5 flex flex-col gap-2">
+          {state.kind === "queued" && onLighter && state.lighterFits && (
+            <button type="button" data-remote-default onClick={onLighter} className={primary}>
+              Start now in 1080p
+            </button>
+          )}
+          {state.kind !== "queued" && (
+            <button type="button" data-remote-default onClick={onRejoin} className={primary}>
+              <RotateCcw className="h-4 w-4" /> {state.kind === "evicted" ? "Rejoin the queue" : "Try again"}
+            </button>
+          )}
+          <button
+            type="button"
+            {...(state.kind === "queued" && !(onLighter && state.lighterFits) ? { "data-remote-default": true } : {})}
+            onClick={onBack}
+            className={state.kind === "queued" ? secondary : quiet}
+          >
+            {state.kind === "queued" ? "Leave the queue" : "Go back"}
           </button>
         </div>
       </div>

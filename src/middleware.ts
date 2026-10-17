@@ -34,6 +34,9 @@ const PUBLIC_PAGE_PATHS = new Set<string>([
   // the invite-code gate itself still lives server-side in /api/register.
   "/register",
   "/dmca",
+  // The live dashboard's page is an empty shell: everything it shows comes from /api/hub/live, which
+  // answers only an owner's session or the dashboard's key (a screen that is not signed in).
+  "/hub",
 ]);
 
 function isPublicPath(pathname: string): boolean {

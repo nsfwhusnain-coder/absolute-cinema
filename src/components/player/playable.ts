@@ -7,6 +7,7 @@ import type { Ranker } from "@/lib/playback/orchestrator";
 import type { Playable } from "./engine";
 import type { RemuxAudioTrack, StreamSubtitleTrack } from "./store";
 import { timeoutSignal } from "@/lib/abort";
+import { capacityRefusal } from "@/lib/playback/capacity";
 import { getTitleLanguage, titleLanguageKey } from "@/lib/title-language";
 
 export interface TitleContext {
@@ -190,18 +191,25 @@ export function remuxOpenQuery(source: PlaybackSource, title: TitleContext, audi
   return params;
 }
 
-/** Turns a source into something the engine can load (opening a remux session when needed). */
+/**
+ * Turns a source into something the engine can load (opening a remux session
+ * when needed, under the viewer's `seat`). A refusal for capacity throws a
+ * CapacityError: the server is full, not the source broken.
+ */
 export async function resolvePlayable(
   source: PlaybackSource,
   title: TitleContext,
   audio: AudioChoice,
   startAt: number,
   video: HTMLVideoElement,
-  signal: AbortSignal
+  signal: AbortSignal,
+  seat: string | null = null
 ): Promise<ResolvedPlayable> {
   const sameOrigin = source.url.startsWith("/");
   if (sourceDelivery(source) === "remux") {
     const params = remuxOpenQuery(source, title, audio, startAt);
+    // Not part of remuxOpenQuery: a prewarm has no seat, and its query must match Play's to the letter.
+    if (seat) params.set("seat", seat);
     const timeout = timeoutSignal(VOD_OPEN_TIMEOUT_MS, signal);
     const res = await fetch(`/api/vod/open?${params}`, { signal: timeout.signal }).finally(timeout.done);
     const body = (await res.json().catch(() => ({}))) as {
@@ -217,7 +225,11 @@ export async function resolvePlayable(
       subtitles?: StreamSubtitleTrack[];
       subtitleBase?: string;
       error?: string;
+      capacity?: string;
+      reason?: string;
     };
+    const refusal = capacityRefusal(res.status, body);
+    if (refusal) throw refusal;
     if (!res.ok || !body.playlistUrl) throw new Error(body.error || `remux open failed (${res.status})`);
     return {
       playable: {

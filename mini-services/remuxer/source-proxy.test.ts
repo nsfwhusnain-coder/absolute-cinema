@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createServer, type Server } from "node:http";
 import { connect, type AddressInfo } from "node:net";
-import { cachedAt, lanesFor, outcomeOf, parseRange, rampedPieceBytes, RefusedError, serveRange, SilentError, steadyPieceBytes, windowEnd, WrongRangeError, __setReadIdleForTests, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf } from "./source-proxy";
+import { cachedAt, lanesFor, outcomeOf, paceWaitMs, parseRange, rampedPieceBytes, RefusedError, serveRange, SilentError, steadyPieceBytes, windowEnd, WrongRangeError, __setReadIdleForTests, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf } from "./source-proxy";
 import { __setLinkPacingForTests, linkRefused } from "./link-pacer";
 import { metrics } from "../../src/lib/metrics";
 import { newSessionStats } from "./remux-stats";
@@ -626,5 +626,51 @@ describe("serveRange's upstream metrics", () => {
     expect(seriesValue(`ac_proxy_open_requests{cdn="${cdn}"}`)).toBe(before.open);
     expect(stats.refusals).toBe(1);
     expect(stats.bytesUpstream).toBe(total);
+  });
+});
+
+describe("read-ahead pacing", () => {
+  it("lets a burst of a second through, then spaces the rest at the pace", () => {
+    const source: ProxySource = { url: "x", totalSize: 1e9, cached: [], paceBps: 8_000_000 };
+    // 8 Mbit/s is 1 MB/s: the first megabyte goes at once, the next 250 KB owes a quarter of a second.
+    expect(paceWaitMs(source, 1_000_000, 0)).toBe(0);
+    expect(paceWaitMs(source, 250_000, 0)).toBeCloseTo(250, 0);
+    // Half a second later, half a megabyte has come back: 250 KB of debt paid, 250 KB to spare.
+    expect(paceWaitMs(source, 250_000, 500)).toBe(0);
+  });
+
+  it("waits no more than a quarter of a second at a time, so a lifted pace is felt at once", () => {
+    const source: ProxySource = { url: "x", totalSize: 1e9, cached: [], paceBps: 8_000_000 };
+    expect(paceWaitMs(source, 5_000_000, 0)).toBe(250);
+  });
+
+  it("forgets its bucket when the pace is lifted, and starts afresh when it comes back", () => {
+    const source: ProxySource = { url: "x", totalSize: 1e9, cached: [], paceBps: 8_000_000 };
+    paceWaitMs(source, 3_000_000, 0);
+    source.paceBps = undefined;
+    expect(paceWaitMs(source, 3_000_000, 10)).toBe(0);
+    expect(source.paceBucket).toBeUndefined();
+    source.paceBps = 8_000_000;
+    expect(paceWaitMs(source, 1_000_000, 20)).toBe(0);
+  });
+
+  it("hands a paced file over at its pace, and an unpaced one as fast as it comes", async () => {
+    const total = 3 * 1024 * KB;
+    const up = await upstream(total);
+    const read = async (paceBps: number | undefined) => {
+      const source: ProxySource = { url: up.url, totalSize: total, cached: [], ...(paceBps ? { paceBps } : {}) };
+      const port = await proxy(source, 4 * 1024 * KB);
+      const started = performance.now();
+      const res = await fetch(`http://127.0.0.1:${port}/`, { headers: { Range: `bytes=0-${total - 1}` } });
+      const body = new Uint8Array(await res.arrayBuffer());
+      expect(body.length).toBe(total);
+      expect(body[123_456]).toBe(byteAt(123_456));
+      return performance.now() - started;
+    };
+    const free = await read(undefined);
+    // 16 Mbit/s is 2 MB/s: 3 MB with a one-second burst of 2 MB takes about half a second more.
+    const paced = await read(16_000_000);
+    expect(paced).toBeGreaterThan(400);
+    expect(paced).toBeGreaterThan(free + 300);
   });
 });

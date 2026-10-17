@@ -35,6 +35,8 @@ import { reportDecodeFailure } from "@/lib/playback/decode-capability";
 import { isViewerSideFailure } from "@/lib/playback/failure-kind";
 import { MediaEngine, type EngineAudioTrack } from "./engine";
 import { createRanker, resolvePlayable, startAudio, type AudioChoice, type TitleContext } from "./playable";
+import { CapacityError, getSeatKeeper, seatStreamFor, type CapacityReason } from "@/lib/playback/capacity";
+import { sourceDelivery, sourceMaxHeight } from "@/lib/playback/source-quality";
 import { usePlayerState } from "./store";
 import { useSleepTimer } from "./use-sleep-timer";
 import { getTitleLanguage, rememberTitleLanguage, titleLanguageKey } from "@/lib/title-language";
@@ -106,6 +108,15 @@ export interface PlayerControllerOptions {
   onRefreshSources(): void;
 }
 
+/**
+ * What a seat is asked for, for a source: remuxed here, relayed through this
+ * server (a same-origin address), or read by the player straight from its CDN.
+ */
+function seatStreamOf(source: PlaybackSource, durationS: number) {
+  const delivery = sourceDelivery(source) === "remux" ? "remux" : source.url.startsWith("/") ? "web" : "direct";
+  return seatStreamFor({ delivery, height: sourceMaxHeight(source), sizeBytes: source.sizeBytes, durationS });
+}
+
 export function usePlayerController(options: PlayerControllerOptions) {
   const { videoRef } = options;
   const optionsRef = useRef(options);
@@ -143,6 +154,15 @@ export function usePlayerController(options: PlayerControllerOptions) {
   const userPaused = useRef(false);
   /** A source is being attached: pause events now come from the swap, not the viewer. */
   const attaching = useRef(false);
+  /** Opens refused for capacity in a row: the seat is asked for again a few times, then the line is shown. */
+  const capacityRetries = useRef(0);
+  /** What to do when the server stops this stream to protect itself (set below, with the engine). */
+  const evictedRef = useRef<(reason: CapacityReason) => void>(() => {});
+  /**
+   * Where the film was when the server stopped it: kept apart from positionRef, which the emptied player's
+   * clock (back at 0) would overwrite, so rejoining picks it up where it stopped.
+   */
+  const stoppedAt = useRef<number | null>(null);
   const store = usePlayerState;
 
   const sourceById = useCallback((id: string | null) => optionsRef.current.sources.find((s) => s.id === id), []);
@@ -183,6 +203,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
     (reason: string, why = "didn't respond") => {
       const state = orchestrator.current;
       if (state.phase !== "starting") return;
+      // Stopped to protect the server: the card says so, and no other server is tried behind it.
+      if (getSeatKeeper().evicted) return;
       const source = sourceById(state.activeId);
       if (source) {
         const failure = { event: "handoff_failed" as const, reason, engine: engineRef.current?.kind };
@@ -214,8 +236,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
     [ranker]
   );
 
-  const playbackFailed = useCallback(
-    (reason: string, kind: "error" | "stall" = "error") => {
+  const failPlayback = useCallback(
+    (reason: string, kind: "error" | "stall") => {
       const state = orchestrator.current;
       if (state.phase === "starting") return startFailed(reason);
       if (state.phase !== "playing" && state.phase !== "recovering") return;
@@ -225,6 +247,24 @@ export function usePlayerController(options: PlayerControllerOptions) {
       apply(onPlaybackError(state, optionsRef.current.sources, reason, ranker(), Date.now(), kind));
     },
     [apply, ranker, sourceById, startFailed]
+  );
+
+  const playbackFailed = useCallback(
+    (reason: string, kind: "error" | "stall" = "error") => {
+      const seats = getSeatKeeper();
+      if (seats.evicted) return;
+      // A stream the server stopped to protect itself fails like a broken one, or runs dry like a slow one.
+      // The server is asked first (one quick renewal), so the viewer hears why instead of being moved to a
+      // worse source.
+      if (seats.current) {
+        void seats.renew().then((evicted) => {
+          if (!evicted) failPlayback(reason, kind);
+        });
+        return;
+      }
+      failPlayback(reason, kind);
+    },
+    [failPlayback]
   );
 
   const armStall = useCallback(() => {
@@ -286,6 +326,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
           return;
         }
         engineRef.current?.destroy();
+        // Nothing plays behind the failure card: its seat is someone else's to use (Try again asks anew).
+        getSeatKeeper().release();
         s.set({ failureMessage: command.message, buffering: false, playing: false });
         return;
       }
@@ -296,13 +338,23 @@ export function usePlayerController(options: PlayerControllerOptions) {
       if (!video || !engine || !source) return;
       if (command.notice) s.showNotice(command.notice, "warning");
       reportSustained();
-      reporterRef.current?.attach({ sourceId: source.id, provider: source.provider, delivery: deliveryOfSource(source) });
       clearTimers();
       // From here on, errors from the source being replaced are nobody's.
       engine.abandon();
       attachAbort.current?.abort();
       const abort = new AbortController();
       attachAbort.current = abort;
+      // A seat on the server first (docs/CAPACITY.md): held already when playing, else asked for, waiting in
+      // line while there is none. A better source found meanwhile keeps the place in line.
+      let seat: string | null;
+      try {
+        seat = await getSeatKeeper().acquire(seatStreamOf(source, optionsRef.current.fallbackDurationS), abort.signal);
+      } catch {
+        // A newer attach took over, or the line is full and the card says so: nothing is tried meanwhile.
+        return;
+      }
+      if (abort.signal.aborted) return;
+      reporterRef.current?.attach({ sourceId: source.id, provider: source.provider, delivery: deliveryOfSource(source) });
       const startAt = command.keepPosition ? positionRef.current : optionsRef.current.initialTime;
       // A viewer who paused and then picked another server, quality or audio
       // track expects to stay paused at the same spot.
@@ -319,7 +371,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
       const baseAudio = startAudio(title, optionsRef.current.audio);
       const audio = override === undefined ? baseAudio : { ...baseAudio, index: override };
       try {
-        const resolved = await resolvePlayable(source, title, audio, startAt, video, abort.signal);
+        const resolved = await resolvePlayable(source, title, audio, startAt, video, abort.signal, seat);
         if (abort.signal.aborted) return;
         // The file's own track list is the one sure word on its language: a dub
         // whose name gave nothing away is passed over while anything else can play.
@@ -364,6 +416,16 @@ export function usePlayerController(options: PlayerControllerOptions) {
       } catch (err) {
         attaching.current = false;
         if (abort.signal.aborted) return;
+        if (err instanceof CapacityError) {
+          // The server is full, or stopped this viewer's stream: never the source's fault.
+          if (err.capacity === "evicted") return evictedRef.current(err.reason);
+          // Opened under a seat the server no longer knows: the seat is asked for again (the line, if need be).
+          getSeatKeeper().forget();
+          if (++capacityRetries.current <= 3) return void executeRef.current(command);
+          capacityRetries.current = 0;
+          s.set({ capacity: { kind: "full", reason: err.reason, retryAfterS: 15 }, buffering: false });
+          return;
+        }
         const reason = err instanceof Error ? err.message : "load failed";
         if (orchestrator.current.phase === "starting") startFailed(reason);
         else playbackFailed(reason);
@@ -390,7 +452,27 @@ export function usePlayerController(options: PlayerControllerOptions) {
       onFatal: (reason) => playbackFailed(reason),
     });
     engineRef.current = engine;
-    const onPageHide = () => engine.leave();
+    const seats = getSeatKeeper();
+    // The server stopped this stream to protect itself: it ends here, the place in the film kept, and the card
+    // offers the line again. Nothing fails over: another server would only be refused the same way.
+    evictedRef.current = (reason: CapacityReason) => {
+      stoppedAt.current = positionRef.current;
+      const duration = remuxDuration.current ?? (Number.isFinite(video.duration) ? video.duration : 0);
+      if (orchestrator.current.everPlayed && duration > 0) optionsRef.current.onProgress(positionRef.current, duration);
+      clearTimers();
+      attachAbort.current?.abort();
+      attaching.current = false;
+      engine.destroy();
+      const source = sourceById(orchestrator.current.activeId);
+      if (source) emitPlayerFeedback({ event: "capacity_stopped", sourceId: source.id, provider: source.provider, reason, engine: engine.kind, delivery: deliveryOfSource(source) });
+      store.getState().set({ playing: false, buffering: false, capacity: { kind: "evicted", reason } });
+    };
+    seats.hold((capacity) => store.getState().set({ capacity }), (reason) => evictedRef.current(reason));
+    const onPageHide = (event: PageTransitionEvent) => {
+      engine.leave();
+      // A page kept for the back button comes back with its film: the seat lapses or is renewed then, not given away.
+      if (!event.persisted) seats.release(true);
+    };
     window.addEventListener("pagehide", onPageHide);
     const { title } = optionsRef.current;
     const feedbackTitle = { tmdbId: String(title.tmdbId), mediaType: title.mediaType, season: title.season, episode: title.episode };
@@ -452,9 +534,11 @@ export function usePlayerController(options: PlayerControllerOptions) {
       reporterRef.current?.close();
       engine.destroy();
       engineRef.current = null;
+      // The seat outlives this player a little, so the next episode takes it over rather than queueing again.
+      seats.letGo();
       clearFeedbackTitleContext();
     };
-  }, [videoRef, store, playbackFailed, clearTimers, reportSustained, chooseAudioTrack]);
+  }, [videoRef, store, playbackFailed, clearTimers, reportSustained, chooseAudioTrack, sourceById]);
 
   // The profile's quality, once the server has confirmed it, unless the viewer already picked one.
   const profileQuality = options.quality;
@@ -475,6 +559,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
       // it replaces. Its frame is not the new source's first.
       if (attaching.current) return;
       reporterRef.current?.playing();
+      getSeatKeeper().setPlaying(true);
+      capacityRetries.current = 0;
       s().set({ playing: true, buffering: false, autoplayBlocked: false });
       if (stallTimer.current) clearTimeout(stallTimer.current);
       // A first frame always settles the attach's start timer, whatever the
@@ -513,6 +599,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
       }
     };
     const onTimeUpdate = () => {
+      // Stopped by the server: the emptied element's clock says 0, which is not where the viewer was.
+      if (stoppedAt.current !== null) return;
       const now = performance.now();
       const t = video.currentTime;
       if (!video.paused && !video.seeking) {
@@ -551,9 +639,10 @@ export function usePlayerController(options: PlayerControllerOptions) {
     const onWaiting = () => {
       s().set({ buffering: true });
       // A wait is a stall only after the first picture, and not while a jump (or the grace after one) is what it waits for.
-      reporterRef.current?.waiting(
-        !attaching.current && orchestrator.current.phase === "playing" && !video.seeking && Date.now() - lastSeekAt.current >= SEEK_GRACE_MS
-      );
+      const stall = !attaching.current && orchestrator.current.phase === "playing" && !video.seeking && Date.now() - lastSeekAt.current >= SEEK_GRACE_MS;
+      reporterRef.current?.waiting(stall);
+      // Viewers' stalls tell the server it is at its limit (see the governor's "playback" reading).
+      if (stall) getSeatKeeper().noteStall();
       if (orchestrator.current.phase !== "playing") return;
       armStall();
       if (video.seeking || Date.now() - lastSeekAt.current < SEEK_GRACE_MS) return;
@@ -592,6 +681,7 @@ export function usePlayerController(options: PlayerControllerOptions) {
     };
     const onPause = () => {
       s().set({ playing: false });
+      getSeatKeeper().setPlaying(false);
       reporterRef.current?.paused();
       // Paused by the viewer: buffering that was in progress is no longer a stall.
       if (stallTimer.current) {
@@ -754,6 +844,17 @@ export function usePlayerController(options: PlayerControllerOptions) {
         orchestrator.current = onRetryAll(orchestrator.current);
         optionsRef.current.onRefreshSources();
         apply(onRoster(orchestrator.current, optionsRef.current.sources, true, ranker(), Date.now()));
+      },
+      /** After a full line or a stopped stream: joins the line again, to start where the viewer was. */
+      rejoin() {
+        getSeatKeeper().clearEviction();
+        store.getState().set({ capacity: { kind: "none" }, buffering: true });
+        // Back where the film stopped, not where the emptied player's clock says.
+        if (stoppedAt.current !== null) positionRef.current = stoppedAt.current;
+        stoppedAt.current = null;
+        const sourceId = orchestrator.current.activeId;
+        if (sourceId) executeRef.current({ type: "attach", sourceId, keepPosition: orchestrator.current.everPlayed, refresh: false });
+        else apply(onRoster(orchestrator.current, optionsRef.current.sources, optionsRef.current.discovering, ranker(), Date.now()));
       },
     };
   }, [apply, ranker, sourceById, store, videoRef]);

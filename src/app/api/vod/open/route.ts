@@ -5,7 +5,7 @@ import { isRefusedLink, refuseSource } from "@/lib/playback/debrid/refused-relea
 import { assessMediaDuration } from "@/lib/playback/media-duration";
 import { resolveRemuxSourceUrl } from "@/lib/playback/remux-source";
 import { rememberRemuxSession } from "@/lib/playback/remux-sessions";
-import { REMUXER_URL, UNUSABLE_HEADER, watcherOf } from "@/lib/playback/remuxer";
+import { CAPACITY_HEADER, REMUXER_URL, UNUSABLE_HEADER, watcherOf } from "@/lib/playback/remuxer";
 import { titleRuntimeMinutes, type RuntimeQuestion } from "@/lib/playback/title-runtime";
 import { recordVodOpen, vodOpenOutcome, type VodOpenAnswer } from "@/lib/telemetry/vod-open";
 
@@ -36,10 +36,12 @@ async function isAnotherLength(title: RuntimeQuestion, sourceId: string, duratio
 
 /**
  * GET /api/vod/open?type=&id=&sourceId=&ticket=&season=&episode=&startAt=
- *                  &audioPreference=&originalLanguage=&audioLanguage=&dolbyVision=&audioCaps=&prewarm=
+ *                  &audioPreference=&originalLanguage=&audioLanguage=&dolbyVision=&audioCaps=&prewarm=&seat=
  *
  * Opens a seekable video-on-demand remux of an MKV source and returns the
- * playlist URL plus the title's real duration.
+ * playlist URL plus the title's real duration. `seat` is the viewer's seat
+ * (docs/CAPACITY.md); without one the stream starts only if it fits. A refusal
+ * for capacity is a 503 that says so, and never counts against the source.
  */
 export async function GET(req: NextRequest) {
   if (process.env.REMUX_ENABLED === "0") {
@@ -94,6 +96,9 @@ export async function GET(req: NextRequest) {
   // The file's size, when the source said it: the remuxer plans its first reads from it.
   const size = params.get("size") ?? "";
   if (/^[1-9]\d{0,14}$/.test(size)) worker.set("size", size);
+  // The seat the stream plays under (the governor checks it is this viewer's).
+  const seat = params.get("seat") ?? "";
+  if (/^[a-f0-9]{24}$/.test(seat)) worker.set("seat", seat);
 
   const asked = Date.now();
   /** How long the open took and how it ended: the largest part of a start that is not the search. */
@@ -120,7 +125,18 @@ export async function GET(req: NextRequest) {
     audioTracks?: unknown[];
     subtitles?: unknown[];
     error?: string;
+    capacity?: string;
+    reason?: string;
   };
+  const capacity = res.headers.get(CAPACITY_HEADER);
+  if (capacity) {
+    // No room for the stream, or the viewer's stream was stopped: the player shows the line, not another server.
+    opened(`capacity ${capacity}`, { status: res.status, capacity: true });
+    return NextResponse.json(
+      { error: body.error ?? "The server is at capacity", capacity: body.capacity ?? capacity, reason: body.reason ?? "seats" },
+      { status: 503, headers: { [CAPACITY_HEADER]: capacity, "Retry-After": res.headers.get("retry-after") ?? "15", "Cache-Control": "no-store" } }
+    );
+  }
   if (!res.ok || !body.id) {
     // Found out since it was last opened (by a prewarm, or a player that had stopped waiting).
     if (res.headers.has(UNUSABLE_HEADER)) await refuseSource(sourceId, title);

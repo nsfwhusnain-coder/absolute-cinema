@@ -19,7 +19,7 @@ export const remuxIndexSeconds = registry.histogram("ac_remux_index_seconds", "R
 export const remuxRunsStarted = registry.counter("ac_remux_runs_started_total", "ffmpeg runs started.", ["cdn"]);
 export const remuxRunsEnded = registry.counter(
   "ac_remux_runs_ended_total",
-  "ffmpeg runs ended, by reason: completed, idle, viewer_left, run_limit, made_nothing, bad_stream, unusable, failed, other.",
+  "ffmpeg runs ended, by reason: completed, idle, viewer_left, run_limit, made_nothing, bad_stream, unusable, failed, session_ended, capacity, other.",
   ["reason"]
 );
 export const remuxFirstFragmentSeconds = registry.histogram("ac_remux_first_fragment_seconds", "From a run's start to its first fragment.", ["cdn"]);
@@ -57,6 +57,26 @@ export function runEndReason(reason: string): string {
   if (/made nothing/.test(reason)) return "made_nothing";
   if (/bad stream/.test(reason)) return "bad_stream";
   if (/began at|sound and no picture/.test(reason)) return "unusable";
+  if (/^capacity/.test(reason)) return "capacity";
   if (/source changed|session/.test(reason)) return "session_ended";
   return "other";
 }
+
+// The capacity governor (governor.ts, docs/CAPACITY.md).
+export const capacityLevel = registry.gauge("ac_capacity_level", "The machine's state as the governor judges it: 0 ok, 1 busy (nobody new is let in), 2 critical (streams are stopped).");
+export const capacityReasons = registry.gauge("ac_capacity_reason", "1 for each reading that holds the level above ok: temperature, cpu, memory, network, playback.", ["reason"]);
+export const capacitySeats = registry.gauge("ac_capacity_seats", "Streams holding a seat, by picture class.", ["class"]);
+export const capacityQueue = registry.gauge("ac_capacity_queue", "Viewers waiting in line for a seat.");
+export const capacityUse = registry.gauge("ac_capacity_use_ratio", "Planned use of each budget, 0-1 (seats held, or the measured use when that is more).", ["resource"]);
+export const capacityCpuCores = registry.gauge("ac_capacity_cpu_cores", "The container's CPU use (used), smoothed over about 20 s, the cores it may use (limit), and the remuxer's own thread (remuxer).", ["kind"]);
+export const capacityThrottled = registry.gauge("ac_capacity_throttled_ratio", "Share of the container's CPU periods its quota ran out in, over the last 10 s.");
+export const capacityMemoryBytes = registry.gauge("ac_capacity_memory_bytes", "Memory the container holds and cannot drop (page cache left out), and its ceiling.", ["kind"]);
+export const capacityTemperature = registry.gauge("ac_capacity_temperature_celsius", "The CPU's temperature, averaged over the last 5 s (absent when no sensor is readable).");
+export const capacityLoopLag = registry.gauge("ac_capacity_loop_lag_seconds", "How late the remuxer's event loop runs, 95th percentile of the last 10 s.");
+export const capacityRequests = registry.counter(
+  "ac_capacity_requests_total",
+  "Requests for a seat, by answer: admitted, queued, full, unasked_admitted, unasked_refused, prewarm_refused.",
+  ["answer"]
+);
+export const capacityEvictions = registry.counter("ac_capacity_evictions_total", "Streams stopped to protect the machine, by reason.", ["reason"]);
+export const capacityQueueWaitSeconds = registry.histogram("ac_capacity_queue_wait_seconds", "Time from joining the line to being let in.", [], [1, 5, 10, 30, 60, 120, 300, 600, 1200, 1800]);

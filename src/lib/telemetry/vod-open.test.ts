@@ -11,6 +11,7 @@ function sample(series: string): number {
 describe("vodOpenOutcome", () => {
   it("is ok only for a file the remuxer opened and the route answered with", () => {
     expect(vodOpenOutcome({ status: 200, opened: true })).toBe("ok");
+    expect(vodOpenOutcome({ status: 503, capacity: true })).toBe("capacity");
   });
 
   it("is remuxer_unavailable when the remuxer could not be reached", () => {

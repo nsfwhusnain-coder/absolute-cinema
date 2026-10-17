@@ -155,6 +155,13 @@ export class VodError extends Error {
   }
 }
 
+/** Every run is taken by someone watching: the server is full, nothing is wrong with the file (see docs/CAPACITY.md). */
+export class VodCapacityError extends VodError {
+  constructor() {
+    super("remux capacity reached", 503);
+  }
+}
+
 /** How a failed open is counted in ac_remux_session_opens_total: the error's HTTP status, or "error" for anything else. */
 export function openOutcome(err: unknown): string {
   return err instanceof VodError ? String(err.status) : "error";
@@ -183,6 +190,8 @@ interface Run {
   watcher: string;
   /** When a player last took from it. */
   servedAt: number;
+  /** Each viewer it served, and when last: two viewers of one file can share a run, whoever started it. */
+  servedTo: Map<string, number>;
   /** Where the player it serves last asked: how far ahead of that it may run is its own business. */
   wanted: number;
   /** Counted as ended already: a run ends once, whether it is stopped or its process closes first. */
@@ -193,6 +202,8 @@ interface Run {
 
 interface Session {
   id: string;
+  /** The app's name for the source (its source id), or a test's key: what the dashboard knows it by. */
+  identity: string;
   url: string;
   source: ProxySource;
   dir: string;
@@ -346,6 +357,7 @@ export async function openVodSession(
     session = await pending;
   }
   session.lastRequestAt = Date.now();
+  if (identity && !session.identity) session.identity = identity;
   noteViewer(session.stats, watcher);
   if (!prewarm) demand(session);
   // Start where the viewer will, so the init and first segment are already
@@ -458,6 +470,7 @@ async function buildSession(
   stats.indexReads = fetcher.requests();
   const session: Session = {
     id,
+    identity: "",
     url,
     source: { url, totalSize, cached: index.fetched, windowBytes: PREWARM_WINDOW_BYTES, targetBps: bitrateBps ?? undefined, stats },
     dir,
@@ -662,7 +675,7 @@ function makeRoom(session: Session, watcher: string): void {
   // from someone mid-film just moved the stall to them, and with a few
   // viewers at once they took turns stalling each other.
   // A prewarm takes nothing from anyone: it only uses a free run.
-  if (!session.demanded) throw new VodError("remux capacity reached", 503);
+  if (!session.demanded) throw new VodCapacityError();
   const idleOthers = [...sessions.values()]
     .filter((s) => s !== session && (!s.demanded || now - s.lastRequestAt > ACTIVE_VIEWER_MS))
     .sort((a, b) => Number(a.demanded) - Number(b.demanded) || a.lastRequestAt - b.lastRequestAt);
@@ -671,7 +684,7 @@ function makeRoom(session: Session, watcher: string): void {
     if (totalAliveRuns() < MAX_RUNS_TOTAL) return;
   }
   log(`refused ${session.id}: every run is taken by someone watching`);
-  throw new VodError("remux capacity reached", 503);
+  throw new VodCapacityError();
 }
 
 /** A player wants this session: it reads the source at full size from here on. */
@@ -711,6 +724,7 @@ function startRun(session: Session, segment: number, watcher: string): Run {
     dir,
     watcher,
     servedAt: Date.now(),
+    servedTo: new Map(watcher ? [[watcher, Date.now()]] : []),
     wanted: startTime,
     ended: false,
     stats: session.stats,
@@ -848,6 +862,27 @@ function snapToKeyframe(keyframes: readonly number[], t: number): number {
   return t;
 }
 
+/** Once every running run of a session is this far ahead of its viewer, its file is read at a pace. */
+const PACE_CUSHION_S = 60;
+/** The pace: this many times the file's own bitrate, and never below PACE_FLOOR_BPS. */
+const PACE_FACTOR = 2;
+const PACE_FLOOR_BPS = 8_000_000;
+
+/**
+ * Reads a session's file at twice its bitrate once its viewers have a minute
+ * in hand, instead of as fast as the CDN goes. The minute is still made at full
+ * speed (a start, a seek, a viewer who fell behind), and the run still pauses
+ * at AHEAD_PAUSE_S: only the race between is calmer. Three viewers starting at
+ * once used to read 260 Mbit/s from their CDNs to serve 70, and filled the
+ * remuxer's one thread while the internet link and the queue paid for it.
+ */
+function paceSession(session: Session): void {
+  const running = aliveRuns(session).filter((r) => !r.paused);
+  const bitrate = session.info.bitrateBps;
+  const ahead = running.length > 0 && running.every((r) => lastTime(r) - r.wanted >= PACE_CUSHION_S);
+  session.source.paceBps = session.demanded && ahead && bitrate ? Math.max(PACE_FLOOR_BPS, bitrate * PACE_FACTOR) : undefined;
+}
+
 /** Pause a run that has raced far ahead of the viewer; resume it as they catch up. */
 function throttle(session: Session, run: Run): void {
   const lead = lastTime(run) - run.wanted;
@@ -859,11 +894,13 @@ function throttle(session: Session, run: Run): void {
   } else if (session.demanded && lead < AHEAD_RESUME_S && !abandoned) {
     wake(run);
   }
+  paceSession(session);
 }
 
-/** A player took from this run, asking about `at`: it is being watched, from there. */
-function served(session: Session, run: Run, at: number): void {
+/** A player took from this run, asking about `at`: it is being watched, from there (by `watcher`). */
+function served(session: Session, run: Run, at: number, watcher = ""): void {
   run.servedAt = Date.now();
+  if (watcher) run.servedTo.set(watcher, run.servedAt);
   run.wanted = at;
   throttle(session, run);
 }
@@ -947,14 +984,14 @@ async function* windowFragments(session: Session, window: PlanWindow, segment: n
   demand(session);
   session.wantedTime = window.start;
   const reached = runReaching(session, window);
-  if (reached) served(session, reached, window.start);
+  if (reached) served(session, reached, window.start, watcher);
   for (const run of aliveRuns(session)) throttle(session, run);
 
   for (const run of [...session.runs].reverse()) {
     // A run stopped part-way (a seek, the run limit, the janitor) has not finished the window it stopped in.
     const complete = fragmentsInWindow(window, run.fragments, run.completed);
     if (complete) {
-      if (!run.finished && !run.failed) served(session, run, window.start);
+      if (!run.finished && !run.failed) served(session, run, window.start, watcher);
       for (const fragment of complete) yield fragment.path;
       return;
     }
@@ -1003,6 +1040,7 @@ async function* windowFragments(session: Session, window: PlanWindow, segment: n
     if (Date.now() > deadline) throw new VodError("segment stalled", 504);
     session.lastRequestAt = Date.now();
     run.servedAt = Date.now();
+    if (watcher) run.servedTo.set(watcher, run.servedAt);
     run.wanted = window.start;
     wake(run);
     await sleep(POLL_MS);
@@ -1117,6 +1155,124 @@ export function leaveVodSession(id: string): void {
     }
   }
   log(`left ${id}`);
+}
+
+/**
+ * A viewer's stream was stopped to protect the machine (governor.ts): their
+ * runs of the session end now. What the runs made stays for anyone else on it.
+ */
+export function stopViewerRuns(id: string, watcher: string, reason: string): number {
+  const session = sessions.get(id);
+  if (!session) return 0;
+  const now = Date.now();
+  let stopped = 0;
+  for (const run of aliveRuns(session)) {
+    if (run.watcher !== watcher) continue;
+    // Another viewer of the file is being served by it: it becomes theirs, and stopping it would stop them too.
+    const other = [...run.servedTo].find(([w, at]) => w !== watcher && now - at <= ACTIVE_VIEWER_MS);
+    if (other) {
+      run.watcher = other[0];
+      continue;
+    }
+    stopRun(run, reason);
+    stopped++;
+  }
+  return stopped;
+}
+
+/**
+ * Streams building their first minute right now: a viewer asked lately, a run
+ * is reading, and its file is not yet read at a pace (see paceSession). The
+ * capacity governor lets no more than a couple warm up at once.
+ */
+export function vodWarmingCount(now = Date.now()): number {
+  let count = 0;
+  for (const session of sessions.values()) {
+    if (!session.demanded || now - session.lastRequestAt > ACTIVE_VIEWER_MS || session.source.paceBps) continue;
+    if (aliveRuns(session).some((run) => !run.paused)) count++;
+  }
+  return count;
+}
+
+/** The sessions this viewer was served from lately: the streams they have playing now. */
+export function watcherActiveSessions(watcher: string, withinMs = ACTIVE_VIEWER_MS): string[] {
+  if (!watcher) return [];
+  const now = Date.now();
+  const found: string[] = [];
+  for (const session of sessions.values()) {
+    if (aliveRuns(session).some((run) => now - (run.servedTo.get(watcher) ?? Number.NEGATIVE_INFINITY) <= withinMs)) found.push(session.id);
+  }
+  return found;
+}
+
+/** One run, as the live dashboard shows it. */
+export interface VodRunDetail {
+  id: number;
+  watcher: string;
+  pid: number | undefined;
+  paused: boolean;
+  /** How far past where its viewer last asked it has made the stream, in seconds. */
+  aheadS: number;
+  servedAgoMs: number;
+}
+
+/** One open session, as the live dashboard shows it. */
+export interface VodSessionDetail {
+  id: string;
+  identity: string;
+  cdn: string;
+  bitrateBps: number | null;
+  durationS: number;
+  videoCodec: string | null;
+  dynamicRange: string;
+  audioDelivery: string;
+  /** False while it is only prewarmed. */
+  demanded: boolean;
+  idleMs: number;
+  bytesServed: number;
+  bytesUpstream: number;
+  lanes: number;
+  /** The pace its file is read at now, in bits per second; null while it reads as fast as the CDN goes. */
+  paceBps: number | null;
+  runs: VodRunDetail[];
+  /** Viewers served by any of its runs lately. */
+  watchers: Array<{ watcher: string; agoMs: number }>;
+}
+
+/** Every open session with its live runs, for the dashboard. */
+export function vodSessionsDetail(now = Date.now()): VodSessionDetail[] {
+  return [...sessions.values()].map((session) => {
+    const seen = new Map<string, number>();
+    const runs = aliveRuns(session).map((run) => {
+      for (const [watcher, at] of run.servedTo) seen.set(watcher, Math.max(seen.get(watcher) ?? 0, at));
+      return {
+        id: run.id,
+        watcher: run.watcher,
+        pid: run.proc.pid,
+        paused: run.paused,
+        aheadS: Math.max(0, lastTime(run) - run.wanted),
+        servedAgoMs: now - run.servedAt,
+      };
+    });
+    return {
+      id: session.id,
+      identity: session.identity,
+      cdn: cdnDomainOf(session.source.url),
+      bitrateBps: session.info.bitrateBps,
+      durationS: session.durationS,
+      videoCodec: session.info.videoCodecId,
+      dynamicRange: session.info.dynamicRange,
+      audioDelivery: session.audioDelivery,
+      demanded: session.demanded,
+      idleMs: now - session.lastRequestAt,
+      bytesServed: session.stats.bytesServed,
+      bytesUpstream: session.stats.bytesUpstream,
+      lanes: session.source.lanes ?? 1,
+      paceBps: session.source.paceBps ?? null,
+      runs,
+      watchers: [...seen].map(([watcher, at]) => ({ watcher, agoMs: now - at })).sort((a, b) => a.agoMs - b.agoMs),
+    };
+  });
 }
 
 /** True for the cache folder of a session that is open now. */

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUserId } from "@/lib/auth";
 import { refuseSource } from "@/lib/playback/debrid/refused-releases";
 import { remuxSessionOrigin } from "@/lib/playback/remux-sessions";
-import { REMUXER_URL, UNUSABLE_HEADER, watcherOf } from "@/lib/playback/remuxer";
+import { CAPACITY_HEADER, REMUXER_URL, UNUSABLE_HEADER, watcherOf } from "@/lib/playback/remuxer";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +27,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       "Content-Type": upstream.headers.get("content-type") ?? "application/octet-stream",
       "Cache-Control": "no-store",
       ...(upstream.headers.get("content-length") ? { "Content-Length": upstream.headers.get("content-length")! } : {}),
+      // The viewer's stream was stopped to protect the server: the player says so instead of trying another one.
+      ...(upstream.headers.get(CAPACITY_HEADER) ? { [CAPACITY_HEADER]: upstream.headers.get(CAPACITY_HEADER)! } : {}),
     },
   });
 }

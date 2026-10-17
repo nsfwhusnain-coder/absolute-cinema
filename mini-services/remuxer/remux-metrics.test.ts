@@ -15,6 +15,7 @@ describe("runEndReason", () => {
       ["began at 12.0s, not 10.0s", "unusable"],
       ["sound and no picture", "unusable"],
       ["source changed", "session_ended"],
+      ["capacity: temperature", "capacity"],
       ["shutdown", "other"],
       ["expired", "other"],
       ["low disk", "other"],

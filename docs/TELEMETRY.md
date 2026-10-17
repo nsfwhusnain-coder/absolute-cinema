@@ -90,6 +90,23 @@ Devices: `desktop`, `tablet`, `phone`, `tv`, `other`. Deliveries: `remux`
 | `ac_proxy_turn_wait_seconds` | histogram | cdn | a request's wait for its link's turn (paced CDNs) |
 | `ac_container_network_bytes` | gauge | direction (rx/tx) | the container's own traffic since it started (rate() gives up/down speed) |
 | `ac_process_resident_bytes`, `ac_process_cpu_seconds` | gauge | process | at each scrape |
+| `ac_capacity_level` | gauge | | the governor's level: 0 ok, 1 busy, 2 critical (docs/CAPACITY.md) |
+| `ac_capacity_reason` | gauge | reason | 1 for each reading holding the level above ok |
+| `ac_capacity_seats` | gauge | class (4k/1080p/720p/sd) | streams holding a seat |
+| `ac_capacity_queue` | gauge | | viewers waiting in the queue |
+| `ac_capacity_use_ratio` | gauge | resource (cpu/memory/downlink/uplink) | planned use of each budget, 0-1 |
+| `ac_capacity_cpu_cores` | gauge | kind (used/limit) | the container's CPU, smoothed over about 20 s, and its quota |
+| `ac_capacity_throttled_ratio` | gauge | | share of CPU periods the quota ran out in, last 10 s |
+| `ac_capacity_memory_bytes` | gauge | kind (committed/limit) | memory held and not droppable, and the ceiling |
+| `ac_capacity_temperature_celsius` | gauge | | the CPU's temperature, 5 s average |
+| `ac_capacity_loop_lag_seconds` | gauge | | the remuxer's event loop, 95th percentile of 10 s |
+| `ac_capacity_requests_total` | counter | answer (admitted/queued/full/unasked_admitted/unasked_refused/prewarm_refused) | each request for a seat (a place in the queue counts once) |
+| `ac_capacity_evictions_total` | counter | reason | a stream stopped to protect the machine |
+| `ac_capacity_queue_wait_seconds` | histogram | | from joining the queue to being let in |
+
+`ac_remux_runs_ended_total` gains the reason `capacity` (a run stopped with
+its viewer's seat), and `ac_web_vod_opens_total` the outcome `capacity` (an
+open refused because the server was full).
 
 `cdn` is the CDN's domain (`real-debrid.com`, `debrid.it`, ...), the same as
 `cdnDomainOf` in `link-pacer.ts`.
@@ -190,6 +207,29 @@ Every 60 s while the remuxer runs: how busy the site was, for capacity planning.
 | `cpuPercent` | the remuxer process; `loadAvg1` for the machine |
 | `rssBytes` | the remuxer process |
 | `cacheBytes`, `diskFreeBytes` | the remux cache |
+| `level`, `seats`, `queue` | the capacity governor at that minute (docs/CAPACITY.md) |
+| `cpuCores`, `cpuLimitCores`, `throttled` | the container's CPU (smoothed) and quota, and the share of periods it ran out in |
+| `memoryCommittedBytes` | memory held and not droppable |
+| `temperatureC`, `loopLagMs`, `downBps` | the CPU's temperature, the event loop's lateness, the download rate |
+
+### `remux` / `capacity_level`, `capacity_queue`, `capacity_admit`, `capacity_full`, `capacity_evict`
+
+The capacity governor's moments (docs/CAPACITY.md). Each carries the readings
+of `capacity_snapshot`'s last block (`level`, `seats`, `queue`, `cpuCores`,
+`cpuLimitCores`, `throttled`, `memoryCommittedBytes`, `temperatureC`,
+`loopLagMs`, `downBps`) at that moment, and:
+
+| Event | Fields |
+|---|---|
+| `capacity_level` | `from`, `to`, `reasons` (comma-separated): each change of level |
+| `capacity_queue` | `class`, `delivery`, `position`, `reason`: someone joined the queue |
+| `capacity_admit` | `class`, `delivery`, `waitedS`: let in after waiting (no readings) |
+| `capacity_full` | `class`, `delivery`, `reason`: turned away, the queue was full |
+| `capacity_evict` | `reason`, `class`, `delivery`, `bitrateBps`, `heldS`, `runsStopped`: a stream stopped to protect the machine |
+
+The player reports the stop it was told of as `player_feedback` with
+`feedbackEvent: "capacity_stopped"` and its `reason`. It is for the record
+only: it never counts against the source.
 
 ## Daily rollups
 

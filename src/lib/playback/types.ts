@@ -317,7 +317,9 @@ export type PlayerFeedbackEvent =
    */
   | "sustained_play"
   /** A jump within the title, once the picture is moving again. Carries `seekMs`. Kept for the record only. */
-  | "seek";
+  | "seek"
+  /** The server stopped this stream to protect itself (docs/CAPACITY.md). Carries `reason`. For the record only: it says nothing of the source. */
+  | "capacity_stopped";
 
 export interface PlayerFeedback {
   event: PlayerFeedbackEvent;

@@ -1,3 +1,4 @@
+import { forgetLivePlayer, noteLiveEvent, noteLiveHeartbeat, type LiveContext } from "@/lib/hub/live-players";
 import { logEvent, viewerTag } from "@/lib/event-log";
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUserId } from "@/lib/auth";
@@ -47,6 +48,7 @@ const EVENTS = new Set<ReportEvent>([
   "decode_error",
   "sustained_play",
   "seek",
+  "capacity_stopped",
   "heartbeat",
   "session_end",
 ]);
@@ -125,6 +127,12 @@ export async function POST(req: NextRequest) {
   const season = finite(body.season, 100) ?? 0;
   const episode = finite(body.episode, 10_000) ?? 0;
   const title = tmdbId ? { tmdbId, mediaType, season, episode } : {};
+  // What the live dashboard (/hub) shows of this player.
+  const live: LiveContext = {
+    title: tmdbId ? { tmdbId, mediaType, season, episode } : null,
+    deviceClass: platform?.deviceClass ?? null,
+    uaPlatform: platform?.uaPlatform ?? null,
+  };
 
   // A heartbeat or a summary is for the record and the live metrics only. It
   // is not an outcome: it feeds neither the provider's health nor the title's
@@ -150,6 +158,7 @@ export async function POST(req: NextRequest) {
     countSafely(() => {
       recordHeartbeat(labels, report);
       noteActivePlayer(viewerTag(userId), report.sourceId, labels);
+      noteLiveHeartbeat(userId, report, live);
     });
     return new NextResponse(null, { status: 204 });
   }
@@ -166,6 +175,7 @@ export async function POST(req: NextRequest) {
     });
     // The title view is over: it stops counting as playing this file now.
     countSafely(() => forgetActivePlayer(viewerTag(userId), report.sourceId));
+    countSafely(() => forgetLivePlayer(userId, report.sourceId));
     return new NextResponse(null, { status: 204 });
   }
 
@@ -206,6 +216,7 @@ export async function POST(req: NextRequest) {
     decodedWidth: feedback.decodedWidth,
     decodedHeight: feedback.decodedHeight,
   });
+  countSafely(() => noteLiveEvent(userId, { ...feedback, delivery: feedback.delivery ?? undefined, engine: feedback.engine ?? undefined }, live));
   countSafely(() => {
     switch (feedback.event) {
       case "first_frame":
@@ -226,8 +237,8 @@ export async function POST(req: NextRequest) {
         break;
     }
   });
-  // A jump is for the record: it says nothing of a source's health.
-  if (feedback.event === "seek") return new NextResponse(null, { status: 204 });
+  // A jump, or a stream the server stopped for capacity, is for the record: it says nothing of a source's health.
+  if (feedback.event === "seek" || feedback.event === "capacity_stopped") return new NextResponse(null, { status: 204 });
   // A file this device could not decode says nothing about the server it came
   // from, and both histories below are read by every screen in the house.
   const viewerSide = isViewerSideFailure(feedback);

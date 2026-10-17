@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import type { Phase } from "@/lib/playback/orchestrator";
+import type { CapacityState } from "@/lib/playback/capacity";
 import { defaultHdrOutput, parseHdrChoice, parseHdrLift, type HdrLift, type HdrOutput } from "@/lib/playback/dynamic-range";
 import type { EngineAudioTrack, QualityLevel } from "./engine";
 
@@ -134,6 +135,8 @@ export interface PlayerState {
   upNextVisible: boolean;
   /** The browser refused to start playback without a tap or click (a page opened directly, not from a Play button). */
   autoplayBlocked: boolean;
+  /** The server's line (docs/CAPACITY.md): waiting for a seat, a full line, or a stream stopped to protect the server. */
+  capacity: CapacityState;
   set(partial: Partial<PlayerState>): void;
   showNotice(text: string, tone?: PlayerNotice["tone"]): void;
   reset(): void;
@@ -169,6 +172,7 @@ const initial = {
   startNote: null,
   upNextVisible: false,
   autoplayBlocked: false,
+  capacity: { kind: "none" } as CapacityState,
 };
 
 let noticeSeq = 0;
