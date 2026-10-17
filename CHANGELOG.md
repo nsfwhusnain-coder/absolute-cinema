@@ -2,6 +2,33 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.7.0] - 2026-10-17
+
+### Added
+- **The site keeps a history of how well it works, to look back on.** What
+  every search found and did not, how starts went on each device, how much
+  playback buffered and at what bit rate, how fast each CDN delivered, and how
+  busy the server was: the numbers to decide later whether a provider is good
+  enough, or what to build next. Nothing leaves the server; viewers are a tag,
+  and no link is ever written. docs/TELEMETRY.md lists every number and why.
+  - **Live metrics for Prometheus** at `/api/metrics` (with `METRICS_TOKEN`):
+    the web app's, the remuxer's and the scraper's, for a Grafana dashboard of
+    bandwidth up and down, viewers and remux runs, start times, stalls, bit
+    rates, buffer, CDN speeds, search outcomes and the server's load.
+  - **Every search's findings** (`discovery_summary`): per service, how many
+    files at each quality, what the release judge made of them, the best file
+    with its real height and bit rate, and whether the title had 4K, 1080p,
+    web streams only, or nothing.
+  - **The player reports every 30 s and when it leaves a title:** buffer,
+    picture size, bit rate, its own bandwidth estimate, dropped frames,
+    stalls, the audio and subtitle language, and a summary of the whole view.
+  - **The remuxer reports each session** (bytes from the CDN and to players,
+    connection speeds, refusals, runs and how they ended) **and the server's
+    load every minute** (viewers, runs, network up and down, CPU, memory).
+  - **A summary of each day is kept for good** in `db/rollups/`, and the
+    event log for 400 days (it was 30). `scripts/playback-report.ts` prints
+    the new numbers, and `--rollups` summarises months from the daily files.
+
 ## [2.6.3] - 2026-10-17
 
 ### Changed
