@@ -2,6 +2,71 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.6.0] - 2026-10-17
+
+### Added
+- **A release is judged by the picture in its file, not by its name.** "4K"
+  and "1080p" said little: every 4K release of one cartoon was an AI upscale,
+  and an iPad played a 2.2 Mbit/s encode while a 10 Mbit/s one of the same
+  episode was on offer. Each file is now weighed by how much picture its size
+  carries for its length and codec, by its group's record, and by what its
+  name admits to (upscaled, interpolated, burnt-in subtitles, Dolby Vision
+  only). An upscaled or starved 4K file counts as the 1080p it really is, and
+  the sharper real picture is started first; the source menu says
+  "upscaled" or "low bitrate" where that is so.
+- **A file is read over several connections when one is too slow for it.**
+  AllDebrid gives most connections about 2.5 Mbit/s, so a 4K file on it opened
+  late and then stalled. The remuxer measures what one connection delivers
+  and reads over as many as the file needs (up to twelve), in pieces that
+  arrive in the order they are played.
+  - AllDebrid refuses a file asked for too often (an answer of "204"); its
+    files are now asked no faster than it serves, and a refusal is waited out
+    rather than failing the start.
+  - A file the service's CDN cannot carry, even over twelve connections, is
+    put behind one it can.
+- **Surround sound where the viewer can hear it.** A 5.1 track is kept 5.1 for
+  a TV or receiver that takes it (as Dolby Digital Plus where the device plays
+  it, as 5.1 AAC where it does not) and made stereo only for devices that
+  play two channels.
+- **Subtitles show in iPhone fullscreen and picture-in-picture,** and no
+  longer go missing for a while after a jump.
+
+### Changed
+- **A start waits a little for the best file instead of starting low.** Web
+  streams are a last resort, used only when no debrid file of 1080p or better
+  is to be had, and a start holds up to 20 s for a better file still being
+  looked for. A sharper picture now wins over a file that needs no remuxing.
+- **Automatic quality keeps to 1080p on a web stream that has it,** where a
+  slow first answer could take it down to 427p.
+- **The player's buffer is sized in bytes for each kind of device,** not in
+  seconds. A 4K film filled a TV's or a browser's memory long before its
+  seconds were up, and playback stuttered from then on.
+- Starts are quicker: the answer for a title is asked for again every second
+  while a debrid service is still deciding (it was every three), and a file
+  is indexed a round trip sooner.
+- hls.js 1.6.19.
+
+### Fixed
+- **Stuttering that began part-way into a film and did not stop.** A 4K file
+  read from a slow CDN came in slower than it played, so playback caught up
+  with it and stuttered from that point on, while anything already watched
+  played smoothly; a buffer sized in seconds also outgrew what a browser or
+  TV holds. Reading over several connections and a buffer that fits the
+  device (both above) address both.
+- **Some releases never started** ("could not be played"): their video kept
+  its decoder settings inside the stream, not in the file's header, and the
+  player was handed an empty description. They are now rebuilt from the
+  stream.
+- **A show could start on a web stream while a 4K file was a second away,**
+  when the torrent index failed to answer: a failed search was taken for an
+  empty one. It is now asked again once, and a failure is never "nothing
+  more to come".
+- A file labelled 1080p in the 720p place is now treated as 720p.
+- Two viewers of one file stopped each other's playback; and a file made
+  ready before Play was opened a second time when Play was pressed.
+- A start or a jump in a remuxed file could land a hair before the point it
+  aimed at and start a second, needless read of the file.
+
 ## [2.5.7] - 2026-10-11
 
 ### Fixed
