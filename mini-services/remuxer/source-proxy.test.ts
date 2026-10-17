@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createServer, type Server } from "node:http";
 import { connect, type AddressInfo } from "node:net";
 import { cachedAt, lanesFor, parseRange, rampedPieceBytes, serveRange, steadyPieceBytes, windowEnd, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf } from "./source-proxy";
-import { __setLinkPacingForTests } from "./link-pacer";
+import { __setLinkPacingForTests, linkRefused } from "./link-pacer";
 
 /** Byte `i` of the pretend source file, so any slice can be checked without keeping the file. */
 const byteAt = (i: number): number => (i * 7 + (i >> 9)) % 251;
@@ -31,6 +31,9 @@ function listen(server: Server): Promise<number> {
 interface UpstreamOptions {
   /** Sends at this rate on each connection, instead of as fast as it is read. */
   bytesPerSecond?: number;
+  /** After this many bytes of a response, sends at `thenBytesPerSecond` instead: a connection that speeds up. */
+  slowFor?: number;
+  thenBytesPerSecond?: number;
   /** Answers request number `request` (counting from 1) with `refuseStatus` (503 unless given) when this returns true. */
   refuse?: (request: number) => boolean;
   refuseStatus?: number;
@@ -74,6 +77,7 @@ async function upstream(totalSize: number, options: UpstreamOptions = {}): Promi
       open++;
       maxOpen = Math.max(maxOpen, open);
       req.socket.once("close", close);
+      const first = next;
       const pump = (): void => {
         while (!closed && next <= end) {
           const piece = slice(next, Math.min(end, next + PIECE - 1));
@@ -84,9 +88,10 @@ async function upstream(totalSize: number, options: UpstreamOptions = {}): Promi
             close();
             return void res.end();
           }
-          if (options.bytesPerSecond) {
+          const rate = options.slowFor !== undefined && next - first > options.slowFor ? options.thenBytesPerSecond : options.bytesPerSecond;
+          if (rate) {
             // A throttled connection waits its turn, and for the socket to take the piece, before the next one.
-            const wait = (piece.length / options.bytesPerSecond) * 1000;
+            const wait = (piece.length / rate) * 1000;
             return void (room ? setTimeout(pump, wait) : res.once("drain", () => setTimeout(pump, wait)));
           }
           if (!room) return void res.once("drain", pump);
@@ -362,6 +367,27 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     expect(second.lanes).toBeGreaterThan(1);
   });
 
+  it("takes a probe's speed from after its settle, not from a connection still getting up to speed", async () => {
+    const total = 8 * 1024 * KB;
+    // 0.5 s at 256 KB/s, then 10 MB/s: one connection carries 8 Mbit/s with room to spare.
+    const ramp = { bytesPerSecond: 256_000, slowFor: 128 * KB, thenBytesPerSecond: 10_000_000 };
+    const settled: LaneTuning = { probeBytes: 4 * 1024 * KB, chunkBytes: 128 * KB, firstChunkBytes: 128 * KB, earlyDecisionMs: 200, probeSettleMs: 500 };
+    const up = await upstream(total, ramp);
+    const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: 8_000_000 };
+    const port = await proxy(source, WINDOW, settled);
+    const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    expect(source.lanes).toBe(1);
+
+    // Judged from the first byte, the same connection looked slow enough for several.
+    __resetDomainSpeedsForTests();
+    const again = await upstream(total, ramp);
+    const hasty: ProxySource = { url: again.url, totalSize: total, cached: [], targetBps: 8_000_000 };
+    const hastyPort = await proxy(hasty, WINDOW, { ...settled, probeSettleMs: 0 });
+    await (await fetch(`http://127.0.0.1:${hastyPort}/src`, { headers: { Range: "bytes=0-" } })).arrayBuffer();
+    expect(hasty.lanes).toBeGreaterThan(1);
+  });
+
   it("goes parallel part-way through a slow probe instead of waiting for its end", async () => {
     const total = 4 * 1024 * KB;
     const tuning: LaneTuning = { probeBytes: 2 * 1024 * KB, chunkBytes: 128 * KB, firstChunkBytes: 128 * KB, earlyDecisionMs: 150 };
@@ -415,6 +441,8 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
 
   it("asks a refusing link no faster than its pacing allows", async () => {
     __setLinkPacingForTests({ burst: 4, ratePerS: 40, refusalPauseMs: 150, slowForMs: 60_000 });
+    // Another file on the same CDN was refused: its links are paced from the start.
+    linkRefused("http://127.0.0.1:1/another-file");
     const total = 1024 * KB;
     const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 64 * KB, firstChunkBytes: 64 * KB, earlyDecisionMs: 60_000 };
     const askedAt: number[] = [];
@@ -429,10 +457,10 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     const port = await proxy(source, WINDOW, tuning);
     const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
-    // Nothing for the pause after the refusal; then the three turns that built up
-    // over it at half the rate, and one turn every 50 ms (20 a second) after those.
+    // The burst of four went out together. After the refusal: nothing for the pause,
+    // then the three turns that built up over it at half the rate, then one every 50 ms.
     const refusedAt = askedAt[2]!;
-    const after = askedAt.filter((t) => t > refusedAt);
+    const after = askedAt.slice(4);
     expect(after[0]! - refusedAt).toBeGreaterThanOrEqual(140);
     expect(after.length).toBeGreaterThan(6);
     expect((after.at(-1)! - after[3]!) / (after.length - 4)).toBeGreaterThanOrEqual(40);

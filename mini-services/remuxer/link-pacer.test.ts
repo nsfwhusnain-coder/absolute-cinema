@@ -13,7 +13,7 @@ async function turnTimes(link: string, count: number, since = Date.now()): Promi
 describe("linkTurn", () => {
   it("gives a link its burst at once, then turns at its rate", async () => {
     __setLinkPacingForTests({ burst: 3, ratePerS: 20 });
-    const times = await turnTimes("https://a.example/1", 5);
+    const times = await turnTimes("https://a.debrid.it/1", 5);
     for (const t of times.slice(0, 3)) expect(t).toBeLessThan(30);
     // One turn every 50 ms once the burst is spent.
     expect(times[3]!).toBeGreaterThanOrEqual(40);
@@ -23,14 +23,14 @@ describe("linkTurn", () => {
 
   it("keeps each link's turns its own", async () => {
     __setLinkPacingForTests({ burst: 2, ratePerS: 1 });
-    await turnTimes("https://a.example/1", 2);
-    const [other] = await turnTimes("https://a.example/2", 1);
+    await turnTimes("https://a.debrid.it/1", 2);
+    const [other] = await turnTimes("https://a.debrid.it/2", 1);
     expect(other!).toBeLessThan(30);
   });
 
   it("gives a link that refused no turn for the pause, then half its rate", async () => {
     __setLinkPacingForTests({ burst: 4, ratePerS: 20, refusalPauseMs: 200, slowForMs: 10_000 });
-    const link = "https://a.example/1";
+    const link = "https://a.debrid.it/1";
     const since = Date.now();
     linkRefused(link);
     const times = await turnTimes(link, 4, since);
@@ -44,14 +44,14 @@ describe("linkTurn", () => {
   it("reports the refusal that starts a pause, and not the ones during it", () => {
     __setLinkPacingForTests({ refusalPauseMs: 1_000 });
     const now = Date.now();
-    expect(linkRefused("https://a.example/1", now)).toBe(true);
-    expect(linkRefused("https://a.example/1", now + 10)).toBe(false);
-    expect(linkRefused("https://a.example/1", now + 1_001)).toBe(true);
+    expect(linkRefused("https://a.debrid.it/1", now)).toBe(true);
+    expect(linkRefused("https://a.debrid.it/1", now + 10)).toBe(false);
+    expect(linkRefused("https://a.debrid.it/1", now + 1_001)).toBe(true);
   });
 
   it("gives up a turn nobody wants any more without using it", async () => {
     __setLinkPacingForTests({ burst: 1, ratePerS: 2 });
-    const link = "https://a.example/1";
+    const link = "https://a.debrid.it/1";
     await linkTurn(link);
     let wanted = true;
     const dropped = linkTurn(link, () => !wanted);
@@ -62,6 +62,27 @@ describe("linkTurn", () => {
     expect(await dropped).toBe(false);
     // The dropped turn did not use the token due at 500 ms: the next one has it.
     expect((await kept) - since).toBeLessThan(600);
+  });
+});
+
+describe("which links are paced", () => {
+  it("leaves a link on a CDN that has never refused alone, and paces it once its CDN refuses", async () => {
+    __setLinkPacingForTests({ burst: 1, ratePerS: 1, refusalPauseMs: 150 });
+    const link = "https://syd1-4.download.real-debrid.com/d/a/file.mkv";
+    const free = await turnTimes(link, 5);
+    for (const t of free) expect(t).toBeLessThan(30);
+    const since = Date.now();
+    linkRefused("https://syd2-4.download.real-debrid.com/d/b/other.mkv");
+    // Another link on the same CDN now waits for its turns too: its burst, then one a second.
+    const [first, second] = await turnTimes(link, 2, since);
+    expect(first!).toBeLessThan(30);
+    expect(second!).toBeGreaterThanOrEqual(900);
+  });
+
+  it("paces AllDebrid's links from the start", async () => {
+    __setLinkPacingForTests({ burst: 2, ratePerS: 20 });
+    const times = await turnTimes("https://x9.debrid.it/dl/a/file.mkv", 3);
+    expect(times[2]!).toBeGreaterThanOrEqual(40);
   });
 });
 

@@ -608,9 +608,20 @@ function startRun(session: Session, segment: number, watcher: string): Run {
     stopRun(run, reason);
     run.failed = true;
   };
-  const firstFragment = setTimeout(() => {
-    if (!run.fragments.length && !run.finished && !run.failed) giveUp("made nothing");
-  }, (session.source.lanes ?? 1) >= 2 ? SLOW_SOURCE_FIRST_FRAGMENT_TIMEOUT_MS : FIRST_FRAGMENT_TIMEOUT_MS);
+  // A file found to need several connections gets the longer wait. That is
+  // looked at when the first wait runs out, not when the run starts: the
+  // connections are measured as the run reads, and a run timed when they
+  // were still unknown was given up 11 s in, its file two seconds into
+  // reading over twelve.
+  const runStartedAt = Date.now();
+  const awaitFirstFragment = (): void => {
+    if (run.fragments.length || run.finished || run.failed) return;
+    const limit = (session.source.lanes ?? 1) >= 2 ? SLOW_SOURCE_FIRST_FRAGMENT_TIMEOUT_MS : FIRST_FRAGMENT_TIMEOUT_MS;
+    const left = runStartedAt + limit - Date.now();
+    if (left > 0) firstFragment = setTimeout(awaitFirstFragment, left);
+    else giveUp("made nothing");
+  };
+  let firstFragment = setTimeout(awaitFirstFragment, FIRST_FRAGMENT_TIMEOUT_MS);
   const splitter = new Fmp4StreamSplitter();
   let stderr = "";
   let seq = 0;

@@ -15,7 +15,9 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { isRefusal, linkRate, linkRefused, linkTurn } from "./link-pacer";
+import { cdnDomainOf, isRefusal, linkRate, linkRefused, linkTurn } from "./link-pacer";
+
+export { cdnDomainOf };
 
 export interface CachedRange {
   start: number;
@@ -58,8 +60,16 @@ export interface LaneTuning {
    * connection spends less of its time waiting for answers.
    */
   maxPieceBytes?: number;
-  /** Read-waiting time after which a probe may already decide on parallel connections. */
+  /** Read-waiting time, after the settle, after which a probe may already decide on parallel connections. */
   earlyDecisionMs: number;
+  /**
+   * Read-waiting time at the start of a probe that its speed is not taken
+   * from (none when unset). A connection reaches its speed only after a second
+   * or so (TCP's slow start, and Real-Debrid ramps each download up): counted
+   * from the first byte, a connection that went on at 136 Mbit/s was taken
+   * for 2, and the file was read over twelve when one would do.
+   */
+  probeSettleMs?: number;
 }
 
 const UPSTREAM_TIMEOUT_MS = 20_000;
@@ -111,6 +121,8 @@ const DECIDE_EVERY = 32;
  * sixteen seconds, which a viewer would spend looking at a spinner.
  */
 const EARLY_DECISION_MS = 1_500;
+/** A probe whose reads after the settle waited less than this is judged by the whole of it. */
+const MIN_SETTLED_MS = 300;
 /**
  * How long a CDN's measured speed per connection stands for the next file on
  * it. Files of one debrid service come from one CDN, which caps every
@@ -126,18 +138,9 @@ export const LANE_TUNING: LaneTuning = {
   firstChunkBytes: 256 * 1024,
   maxPieceBytes: 8 * 1024 * 1024,
   earlyDecisionMs: EARLY_DECISION_MS,
+  probeSettleMs: 1_000,
 };
 const domainSpeeds = new Map<string, { laneBps: number; at: number }>();
-
-/** The CDN a link is served from: its host's last two labels (each debrid link has a host of its own under one domain). */
-export function cdnDomainOf(url: string): string {
-  try {
-    const host = new URL(url).hostname;
-    return /^[\d.]+$/.test(host) ? host : host.split(".").slice(-2).join(".");
-  } catch {
-    return "";
-  }
-}
 
 /** Notes what one connection to this file's CDN delivers, for the next file on it. */
 function rememberDomainSpeed(source: ProxySource, laneBps: number, now = Date.now()): void {
@@ -453,8 +456,11 @@ async function streamUpstream(
     }
     const probing = source.lanes === undefined;
     const windowStart = offset;
+    const settleMs = tuning.probeSettleMs ?? 0;
     let probeWaitMs = 0;
-    let probeReadBytes = 0;
+    // What arrived after the settle, and the waiting it took.
+    let settledBytes = 0;
+    let settledWaitMs = 0;
     const cap = windowCap(source, windowBytes);
     const last = windowEnd(offset, end, probing ? Math.min(tuning.probeBytes, cap) : cap);
     try {
@@ -462,11 +468,15 @@ async function streamUpstream(
         written,
         read: (bytes, waitedMs) => {
           if (!probing) return measure(source, tuning, bytes, waitedMs);
+          // Only reads begun after the settle count.
+          const begunAt = probeWaitMs;
           probeWaitMs += waitedMs;
-          probeReadBytes += bytes;
-          if (source.lanes !== undefined || probeWaitMs < tuning.earlyDecisionMs) return;
+          if (begunAt < settleMs) return;
+          settledBytes += bytes;
+          settledWaitMs += waitedMs;
+          if (source.lanes !== undefined || settledWaitMs < tuning.earlyDecisionMs) return;
           // Long enough to tell: a connection this slow goes parallel now, mid-probe.
-          const laneBps = bytesPerSecond({ bytes: probeReadBytes, ms: probeWaitMs });
+          const laneBps = bytesPerSecond({ bytes: settledBytes, ms: settledWaitMs });
           if (lanesFor({ targetBps: source.targetBps, laneBps, maxLanes: MAX_LANES }) < 2) return;
           source.laneBps = laneBps;
           rememberDomainSpeed(source, laneBps);
@@ -476,8 +486,12 @@ async function streamUpstream(
       });
       if (offset <= last && !client.gone && !parallel(source)) throw new Error("upstream ended early");
       if (probing && source.lanes === undefined && !client.gone) {
-        // The whole probe window counts, its first read included: a window that arrived in one read was too quick to time.
-        const laneBps = bytesPerSecond({ bytes: offset - windowStart, ms: probeWaitMs });
+        // What came after the settle, when there was enough of it; else the whole probe window, its first read
+        // included: a window that arrived in one read was too quick to time.
+        const laneBps =
+          settledWaitMs >= MIN_SETTLED_MS
+            ? bytesPerSecond({ bytes: settledBytes, ms: settledWaitMs })
+            : bytesPerSecond({ bytes: offset - windowStart, ms: probeWaitMs });
         source.laneBps = laneBps;
         rememberDomainSpeed(source, laneBps);
         decide(source, laneBps);

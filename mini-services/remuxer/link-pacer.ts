@@ -13,9 +13,10 @@
  * with the index reads alongside, went past it, and pieces refused three times
  * in a row failed the run with nothing made.
  *
- * So every upstream request for a link first waits here for a turn: up to
- * `burst` straight away, then `ratePerS` a second. A refusal stops the link's
- * requests for `refusalPauseMs`, and halves its rate for `slowForMs`.
+ * So every upstream request for a link on such a CDN first waits here for a
+ * turn: up to `burst` straight away, then `ratePerS` a second. A refusal stops
+ * the link's requests for `refusalPauseMs`, and halves its rate for `slowForMs`.
+ * Links on other CDNs are not held at all (see `paced`).
  */
 
 export interface LinkPacing {
@@ -57,6 +58,35 @@ interface Bucket {
 let pacing: LinkPacing = DEFAULT_LINK_PACING;
 const buckets = new Map<string, Bucket>();
 
+/** The CDN a link is served from: its host's last two labels (each debrid link has a host of its own under one domain), or an address whole. */
+export function cdnDomainOf(url: string): string {
+  try {
+    const host = new URL(url).hostname;
+    return /^[\d.]+$/.test(host) ? host : host.split(".").slice(-2).join(".");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * CDNs that refuse a link asked too often; only their links are paced.
+ * Real-Debrid's served 300 Mbit/s over four connections and never refused, and
+ * pacing it too held a 4K start to 1.2 requests a second until the run gave up.
+ * AllDebrid's is known from the start; any other joins on its first refusal.
+ */
+const KNOWN_REFUSING = new Set(["debrid.it"]);
+/** How long a CDN that refused once is paced for. */
+const REFUSING_MEMORY_MS = 6 * 60 * 60 * 1000;
+const refusing = new Map<string, number>();
+
+/** Whether this link's requests wait for turns: its CDN is one that refuses. */
+function paced(link: string, now: number): boolean {
+  const domain = cdnDomainOf(link);
+  if (KNOWN_REFUSING.has(domain)) return true;
+  const until = refusing.get(domain);
+  return until !== undefined && now < until;
+}
+
 function rateAt(bucket: Bucket, now: number): number {
   return now < bucket.slowUntil ? pacing.ratePerS / 2 : pacing.ratePerS;
 }
@@ -91,6 +121,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * the request is no longer wanted.
  */
 export function linkTurn(link: string, cancelled: () => boolean = () => false): Promise<boolean> {
+  if (!paced(link, Date.now())) return Promise.resolve(!cancelled());
   const bucket = bucketFor(link, Date.now());
   const turn = bucket.queue.then(async () => {
     for (;;) {
@@ -111,8 +142,9 @@ export function linkTurn(link: string, cancelled: () => boolean = () => false): 
   return turn;
 }
 
-/** Requests a second this link may start once its burst is spent: half the usual for a while after a refusal. */
+/** Requests a second this link may start once its burst is spent: half the usual for a while after a refusal, and no limit off a CDN that refuses. */
 export function linkRate(link: string, now = Date.now()): number {
+  if (!paced(link, now)) return Number.POSITIVE_INFINITY;
   const bucket = buckets.get(link);
   return bucket ? rateAt(bucket, now) : pacing.ratePerS;
 }
@@ -124,6 +156,7 @@ export function linkRate(link: string, now = Date.now()): number {
  * burst of refusals is reported once.
  */
 export function linkRefused(link: string, now = Date.now()): boolean {
+  refusing.set(cdnDomainOf(link), now + REFUSING_MEMORY_MS);
   const bucket = bucketFor(link, now);
   refill(bucket, now);
   bucket.tokens = 0;
@@ -142,8 +175,9 @@ export function isRefusal(status: number): boolean {
   return status === 429 || status === 503 || (status > 200 && status < 300 && status !== 206);
 }
 
-/** Test seam: other pacing (null for the default), and every link forgotten. */
+/** Test seam: other pacing (null for the default), and every link and refusing CDN forgotten. */
 export function __setLinkPacingForTests(next: Partial<LinkPacing> | null): void {
   pacing = next ? { ...DEFAULT_LINK_PACING, ...next } : DEFAULT_LINK_PACING;
   buckets.clear();
+  refusing.clear();
 }
