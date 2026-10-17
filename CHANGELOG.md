@@ -2,6 +2,13 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.6.2] - 2026-10-17
+
+### Fixed
+- **Films with Dolby Digital Plus sound would not start in 2.6.1** (they
+  loaded for ever). A setting the remuxer needs for that sound was taken
+  away along with the 2.6.1 fix. It is back for every film.
+
 ## [2.6.1] - 2026-10-17
 
 ### Fixed
