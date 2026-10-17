@@ -45,7 +45,16 @@ export function playableHere(sources: readonly PlaybackSource[], remuxAvailable:
  * started then, the file is never left for the better one a moment behind it.
  */
 export function isSuspect(source: PlaybackSource, now = Date.now()): boolean {
-  if (source.probe?.ok === false || bitrateSustainabilityRank(source) < 0) return true;
+  return isUnfit(source) || isCoolingDown(source, now);
+}
+
+/** A file the server found broken, or whose CDN was measured too slow to carry it. */
+function isUnfit(source: PlaybackSource): boolean {
+  return source.probe?.ok === false || bitrateSustainabilityRank(source) < 0;
+}
+
+/** A file whose service failed several starts in a row lately (for this viewer): it is said of the service, not of the file. */
+function isCoolingDown(source: PlaybackSource, now = Date.now()): boolean {
   return (source.runtimeHealth?.cooldownUntil ?? 0) > now;
 }
 
@@ -64,15 +73,23 @@ export function createRanker(quality: "auto" | number, remuxAvailable: boolean, 
     pick(candidates) {
       const playable = playableHere(candidates, remuxAvailable);
       if (!playable.length) return null;
-      // Sources the server has seen failing are a last resort, not a first try.
-      const healthy = playable.filter((s) => !isSuspect(s));
-      // A web stream never leads a healthy debrid file of 1080p or better, whatever its height.
-      const pool = healthy.length ? withoutWebFallbacks(healthy) : playable;
-      let narrowed = pool;
+      // A file the server found broken, or whose CDN cannot carry it, is a last resort.
+      const fit = playable.filter((s) => !isUnfit(s));
+      // A web stream never leads a debrid file of 1080p or better that can still start, whatever its height,
+      // nor one whose service is cooling down after failed starts: a few failures of Real-Debrid on one film
+      // (2.6.1 failed every remux for a quarter of an hour) put the next film on a 1080p web stream while its
+      // 4K files were fine. Those files are tried after the others of their quality instead.
+      const startable = fit.length ? withoutWebFallbacks(fit) : playable;
+      const fresh = startable.filter((s) => !isCoolingDown(s));
+      let narrowed = fresh.length ? fresh : startable;
       if (quality !== "auto") {
-        const heights = [...new Set(pool.map(sourceMaxHeight))].filter((h) => h > 0 && h <= quality);
+        // A chosen quality is waited for: a file of it whose service is cooling down comes before a smaller picture.
+        const heights = [...new Set(startable.map(sourceMaxHeight))].filter((h) => h > 0 && h <= quality);
         const target = heights.length ? Math.max(...heights) : null;
-        if (target !== null) narrowed = pool.filter((s) => sourceMaxHeight(s) === target);
+        if (target !== null) {
+          const freshAtTarget = fresh.filter((s) => sourceMaxHeight(s) === target);
+          narrowed = freshAtTarget.length ? freshAtTarget : startable.filter((s) => sourceMaxHeight(s) === target);
+        }
       }
       return (
         decidePlayback(narrowed, { preferredHeight: quality, fourKStartup: "fast", preferredProvider, remuxAvailable })

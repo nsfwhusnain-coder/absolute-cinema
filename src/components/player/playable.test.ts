@@ -96,6 +96,27 @@ describe("a web stream against a debrid file of 1080p or better", () => {
   });
 });
 
+describe("a debrid file whose service is cooling down after failed starts", () => {
+  const cooling = (source: PlaybackSource): PlaybackSource => ({ ...source, runtimeHealth: { cooldownUntil: Date.now() + 60_000 } as PlaybackSource["runtimeHealth"] });
+
+  it("still leads a web stream, for a 4K viewer and on auto", () => {
+    const pool = [web("web-1080", 1080), cooling(debrid("debrid-4k", 2160))];
+    expect(createRanker(2160, true, "").pick(pool)?.id).toBe("debrid-4k");
+    expect(createRanker("auto", true, "").pick(pool)?.id).toBe("debrid-4k");
+  });
+
+  it("comes before a smaller picture for a viewer who chose 4K, and after it on auto", () => {
+    const pool = [debrid("debrid-1080", 1080), cooling(debrid("debrid-4k", 2160))];
+    expect(createRanker(2160, true, "").pick(pool)?.id).toBe("debrid-4k");
+    expect(createRanker("auto", true, "").pick(pool)?.id).toBe("debrid-1080");
+  });
+
+  it("comes after a file of the same quality whose service is not", () => {
+    const pool = [cooling(debrid("debrid-4k-a", 2160)), debrid("debrid-4k-b", 2160)];
+    expect(createRanker(2160, true, "").pick(pool)?.id).toBe("debrid-4k-b");
+  });
+});
+
 describe("picture quality at 1080p", () => {
   const sharpRemux: PlaybackSource = {
     ...debrid("sharp-remux", 1080),
