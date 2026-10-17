@@ -15,7 +15,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { isRefusal, linkRefused, linkTurn } from "./link-pacer";
+import { isRefusal, linkRate, linkRefused, linkTurn } from "./link-pacer";
 
 export interface CachedRange {
   start: number;
@@ -42,22 +42,20 @@ export interface ProxySource {
 export interface LaneTuning {
   /** The window one connection reads while the connections are still unknown. */
   probeBytes: number;
-  /** One parallel piece, and the amount of reading each throughput sample covers. */
+  /** The size parallel pieces grow to at least, and the amount of reading each throughput sample covers. */
   chunkBytes: number;
   /**
-   * The first pieces of a parallel read are this small, doubling up to
-   * `chunkBytes`: on a CDN giving 2 Mbit/s a connection, a 2 MiB piece takes
-   * eight seconds to arrive, and the reader (ffmpeg, about to make the first
-   * picture) waits on the first piece whole. Small pieces arrive together in
-   * about a second.
+   * The smallest piece of a parallel read; its first pieces grow from about
+   * this (see `rampedPieceBytes`). On a CDN giving 2 Mbit/s a connection, a
+   * 2 MiB piece takes eight seconds to arrive, and the reader (ffmpeg, about
+   * to make the first picture) waits on the first piece whole.
    */
   firstChunkBytes: number;
   /**
-   * Once a parallel read is under way its pieces grow, to about PIECE_SECONDS
-   * of one connection's reading, up to this size (`chunkBytes` when unset). A
-   * CDN that limits how often a link is asked (link-pacer.ts) is then asked
-   * less often for the same bytes, and a fast connection spends less of its
-   * time waiting for answers.
+   * The most a parallel piece grows to (`chunkBytes` when unset); see
+   * `steadyPieceBytes`. A CDN that limits how often a link is asked
+   * (link-pacer.ts) is then asked less often for the same bytes, and a fast
+   * connection spends less of its time waiting for answers.
    */
   maxPieceBytes?: number;
   /** Read-waiting time after which a probe may already decide on parallel connections. */
@@ -101,6 +99,8 @@ const LANE_WEIGHT = 0.3;
 const LANE_WEIGHT_DOWN = 0.6;
 /** Seconds of one connection's reading that a parallel piece grows to. */
 const PIECE_SECONDS = 8;
+/** The share of a link's paced rate that a parallel read plans to ask for, leaving room for its index reads and retries. */
+const PACING_SHARE = 0.8;
 /** After a 429 or 503 halves a file's connections, they are not raised again for this long. */
 const LANE_HOLD_MS = 60_000;
 /** The connections are planned again after this many completed chunks. */
@@ -525,12 +525,33 @@ function slotsFor(source: ProxySource, windowBytes: number, tuning: LaneTuning):
 
 /**
  * The size parallel pieces grow to: about PIECE_SECONDS of one connection's
- * reading, from `chunkBytes` up to `maxPieceBytes`, and never more than the
+ * reading, and large enough that the connections together ask the link no
+ * more often than its pacing allows (link-pacer.ts: twelve connections at
+ * 2.5 Mbit/s in 2 MiB pieces asked AllDebrid 1.4 times a second, past what it
+ * serves). From `chunkBytes` up to `maxPieceBytes`, and never more than the
  * window lets wait in memory with every connection holding a piece.
  */
 export function steadyPieceBytes(source: ProxySource, windowBytes: number, tuning: LaneTuning): number {
-  const most = Math.min(tuning.maxPieceBytes ?? tuning.chunkBytes, Math.floor(windowCap(source, windowBytes) / slotsFor(source, windowBytes, tuning)));
-  return Math.max(tuning.chunkBytes, Math.min(most, Math.round((source.laneBps ?? 0) * PIECE_SECONDS)));
+  const slots = slotsFor(source, windowBytes, tuning);
+  const most = Math.min(tuning.maxPieceBytes ?? tuning.chunkBytes, Math.floor(windowCap(source, windowBytes) / slots));
+  const laneBps = source.laneBps ?? 0;
+  const forPacing = (slots * laneBps) / (PACING_SHARE * linkRate(source.url));
+  return Math.max(tuning.chunkBytes, Math.min(most, Math.round(Math.max(laneBps * PIECE_SECONDS, forPacing))));
+}
+
+/**
+ * The size of the `nth` piece (from 1) of one parallel read. Over the first
+ * round of connections the pieces grow by equal steps to the steady size, so
+ * they arrive one after another, in the order the reader needs them, and keep
+ * doing so: the first in about a second, and none of the later ones holding
+ * up the bytes behind it while the rest wait. Pieces that all started at once
+ * and grew no further would arrive together and then leave the reader waiting
+ * on the next round, a whole piece's time on a slow connection.
+ */
+export function rampedPieceBytes(source: ProxySource, windowBytes: number, tuning: LaneTuning, nth: number): number {
+  const steady = steadyPieceBytes(source, windowBytes, tuning);
+  const step = steady / slotsFor(source, windowBytes, tuning);
+  return Math.min(steady, Math.max(tuning.firstChunkBytes, Math.round(nth * step)));
 }
 
 /**
@@ -558,15 +579,14 @@ async function streamParallel(
   let written = start;
   const stopAll = () => pieces.forEach(halt);
   client.release = stopAll;
-  // Pieces start small and double, so the first bytes of a request arrive in about a second.
-  let pieceBytes = Math.min(tuning.chunkBytes, Math.max(1, tuning.firstChunkBytes));
+  let started = 0;
   try {
     for (;;) {
       while (next <= end && parallel(source) && pieces.length < slotsFor(source, windowBytes, tuning)) {
+        const pieceBytes = rampedPieceBytes(source, windowBytes, tuning, ++started);
         const piece = startPiece(source, next, Math.min(end, next + pieceBytes - 1), client, tuning);
         pieces.push(piece);
         next = piece.end + 1;
-        pieceBytes = Math.min(steadyPieceBytes(source, windowBytes, tuning), pieceBytes * 2);
       }
       const head = pieces[0];
       if (!head) break;

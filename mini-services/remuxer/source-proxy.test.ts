@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createServer, type Server } from "node:http";
 import { connect, type AddressInfo } from "node:net";
-import { cachedAt, lanesFor, parseRange, serveRange, steadyPieceBytes, windowEnd, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf } from "./source-proxy";
+import { cachedAt, lanesFor, parseRange, rampedPieceBytes, serveRange, steadyPieceBytes, windowEnd, type LaneTuning, type ProxySource, __resetDomainSpeedsForTests, cdnDomainOf } from "./source-proxy";
 import { __setLinkPacingForTests } from "./link-pacer";
 
 /** Byte `i` of the pretend source file, so any slice can be checked without keeping the file. */
@@ -378,7 +378,7 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     expect(source.lanes).toBeGreaterThan(1);
   });
 
-  it("starts a parallel read with small pieces that double, so the first bytes come quickly", async () => {
+  it("starts a parallel read with small pieces that grow by equal steps, so they arrive in order", async () => {
     const total = 2 * 1024 * KB;
     const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 256 * KB, firstChunkBytes: 32 * KB, earlyDecisionMs: 60_000 };
     const up = await upstream(total, SLOW);
@@ -386,8 +386,9 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     const port = await proxy(source, WINDOW, tuning);
     const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
-    const sizes = up.asked.slice(0, 5).map(([start, end]) => end - start + 1);
-    expect(sizes).toEqual([32 * KB, 64 * KB, 128 * KB, 256 * KB, 256 * KB]);
+    const sizes = up.asked.slice(0, 9).map(([start, end]) => end - start + 1);
+    // Eight connections: the steady 256 KiB is reached in eight steps of 32 KiB.
+    expect(sizes).toEqual([32, 64, 96, 128, 160, 192, 224, 256, 256].map((kb) => kb * KB));
   });
 
   it("waits out a link's 204 refusals and delivers every byte, on as many connections", async () => {
@@ -462,5 +463,20 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     expect(steadyPieceBytes({ url: "", totalSize: 0, cached: [], lanes: 12, laneBps: 10_000_000, windowBytes: 24 * 1024 * KB }, window, tuning)).toBe(2048 * KB);
     // Without a largest piece, pieces stay one chunk.
     expect(steadyPieceBytes({ url: "", totalSize: 0, cached: [], lanes: 4, laneBps: 10_000_000 }, window, { ...tuning, maxPieceBytes: undefined })).toBe(2048 * KB);
+  });
+
+  it("makes pieces long enough that twelve slow connections ask a link no faster than it is paced", () => {
+    __setLinkPacingForTests(null);
+    const tuning: LaneTuning = { probeBytes: 4096 * KB, chunkBytes: 2048 * KB, firstChunkBytes: 256 * KB, maxPieceBytes: 8192 * KB, earlyDecisionMs: 1_500 };
+    const source: ProxySource = { url: "https://x.debrid.it/dl/a/file.mkv", totalSize: 0, cached: [], lanes: 12, laneBps: 312_500 };
+    // 12 connections x 312.5 KB/s, at 80% of 1.2 requests a second: 3.9 MB a piece, about 0.96 requests a second.
+    const steady = steadyPieceBytes(source, 128 * 1024 * KB, tuning);
+    expect(steady).toBe(3_906_250);
+    expect(12 / (steady / 312_500)).toBeLessThanOrEqual(1.2 * 0.8 + 1e-9);
+    // The first round grows to it in twelve equal steps.
+    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 1)).toBe(325_521);
+    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 6)).toBe(1_953_125);
+    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 12)).toBe(steady);
+    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 40)).toBe(steady);
   });
 });

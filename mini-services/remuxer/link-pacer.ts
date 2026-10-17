@@ -8,9 +8,10 @@
  * served, four a second was not. The limit is each link's own (another file on
  * the same host was served while the first was being refused), and it counts
  * requests started, not connections open: sixteen long reads at once were all
- * served. A run reading over twelve connections in pieces, with the index reads
- * and the next episode's prewarm alongside, went past it, and pieces refused
- * three times in a row failed the run with nothing made.
+ * served; on one kept-alive connection, thirty requests in a row (about one a
+ * second) were all served. A run reading over twelve connections in pieces,
+ * with the index reads alongside, went past it, and pieces refused three times
+ * in a row failed the run with nothing made.
  *
  * So every upstream request for a link first waits here for a turn: up to
  * `burst` straight away, then `ratePerS` a second. A refusal stops the link's
@@ -30,7 +31,7 @@ export interface LinkPacing {
 
 export const DEFAULT_LINK_PACING: LinkPacing = {
   burst: 12,
-  ratePerS: 1.5,
+  ratePerS: 1.2,
   refusalPauseMs: 3_000,
   slowForMs: 60_000,
 };
@@ -108,6 +109,12 @@ export function linkTurn(link: string, cancelled: () => boolean = () => false): 
   });
   bucket.queue = turn.catch(() => false);
   return turn;
+}
+
+/** Requests a second this link may start once its burst is spent: half the usual for a while after a refusal. */
+export function linkRate(link: string, now = Date.now()): number {
+  const bucket = buckets.get(link);
+  return bucket ? rateAt(bucket, now) : pacing.ratePerS;
 }
 
 /**

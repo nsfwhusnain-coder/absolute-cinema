@@ -236,7 +236,7 @@ describe("httpRangeFetcher", () => {
   }
 
   it("asks a link that refused a range again once its pause is over", async () => {
-    __setLinkPacingForTests({ refusalPauseMs: 120 });
+    __setLinkPacingForTests({ refusalPauseMs: 120, ratePerS: 1_000 });
     const askedAt: number[] = [];
     const url = await serve((_req, res) => {
       askedAt.push(Date.now());
@@ -251,7 +251,7 @@ describe("httpRangeFetcher", () => {
   });
 
   it("gives up on a link that goes on refusing", async () => {
-    __setLinkPacingForTests({ refusalPauseMs: 20 });
+    __setLinkPacingForTests({ refusalPauseMs: 20, ratePerS: 1_000 });
     let asked = 0;
     const url = await serve((_req, res) => {
       asked++;
