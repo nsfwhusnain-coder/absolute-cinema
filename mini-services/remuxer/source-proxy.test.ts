@@ -27,8 +27,9 @@ function listen(server: Server): Promise<number> {
 interface UpstreamOptions {
   /** Sends at this rate on each connection, instead of as fast as it is read. */
   bytesPerSecond?: number;
-  /** Answers request number `request` (counting from 1) with 503 when this returns true. */
+  /** Answers request number `request` (counting from 1) with `refuseStatus` (503 unless given) when this returns true. */
   refuse?: (request: number) => boolean;
+  refuseStatus?: number;
 }
 
 interface Upstream {
@@ -56,7 +57,7 @@ async function upstream(totalSize: number, options: UpstreamOptions = {}): Promi
       const end = Math.min(Number(match[2]), totalSize - 1);
       let next = Number(match[1]);
       asked.push([next, end]);
-      if (options.refuse?.(asked.length)) return void res.writeHead(503).end();
+      if (options.refuse?.(asked.length)) return void res.writeHead(options.refuseStatus ?? 503).end();
       res.writeHead(206, { "Content-Length": String(end - next + 1), "Content-Range": `bytes ${next}-${end}/${totalSize}` });
       // A response counts as open until its last byte is handed over, or its reader hangs up.
       let closed = false;
@@ -236,7 +237,7 @@ describe("serveRange", () => {
 describe("serveRange over several connections", () => {
   const WINDOW = 128 * 1024 * KB;
   /** Small probe and pieces, so the connections are decided within a few hundred milliseconds. */
-  const TUNING: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 128 * KB, earlyDecisionMs: 60_000 };
+  const TUNING: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 128 * KB, firstChunkBytes: 128 * KB, earlyDecisionMs: 60_000 };
   /** A connection that delivers about 1 MB/s, the way a throttled debrid CDN does. */
   const SLOW = { bytesPerSecond: 1_000_000 };
   /** 8 MB/s with headroom: several connections at the SLOW speed. */
@@ -329,7 +330,7 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
 
   it("starts the next file on a CDN measured slow a moment ago on several connections, without probing", async () => {
     const total = 2 * 1024 * KB;
-    const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 128 * KB, earlyDecisionMs: 60_000 };
+    const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 128 * KB, firstChunkBytes: 128 * KB, earlyDecisionMs: 60_000 };
     const up = await upstream(total, SLOW);
     const first: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS };
     const firstPort = await proxy(first, WINDOW, tuning);
@@ -347,7 +348,7 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
 
   it("goes parallel part-way through a slow probe instead of waiting for its end", async () => {
     const total = 4 * 1024 * KB;
-    const tuning: LaneTuning = { probeBytes: 2 * 1024 * KB, chunkBytes: 128 * KB, earlyDecisionMs: 150 };
+    const tuning: LaneTuning = { probeBytes: 2 * 1024 * KB, chunkBytes: 128 * KB, firstChunkBytes: 128 * KB, earlyDecisionMs: 150 };
     const up = await upstream(total, SLOW);
     const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS };
     const port = await proxy(source, WINDOW, tuning);
@@ -359,5 +360,28 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     expect(probeEnd).toBe(2 * 1024 * KB - 1);
     expect(nextStart).toBeLessThan(probeEnd);
     expect(source.lanes).toBeGreaterThan(1);
+  });
+
+  it("starts a parallel read with small pieces that double, so the first bytes come quickly", async () => {
+    const total = 2 * 1024 * KB;
+    const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 256 * KB, firstChunkBytes: 32 * KB, earlyDecisionMs: 60_000 };
+    const up = await upstream(total, SLOW);
+    const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS, lanes: 8, laneBps: 125_000 };
+    const port = await proxy(source, WINDOW, tuning);
+    const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    const sizes = up.asked.slice(0, 5).map(([start, end]) => end - start + 1);
+    expect(sizes).toEqual([32 * KB, 64 * KB, 128 * KB, 256 * KB, 256 * KB]);
+  });
+
+  it("takes a 204 answer to a range as a refusal and uses fewer connections", async () => {
+    const total = 1024 * KB;
+    const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 64 * KB, firstChunkBytes: 64 * KB, earlyDecisionMs: 60_000 };
+    const up = await upstream(total, { ...SLOW, refuseStatus: 204, refuse: (request) => request === 2 });
+    const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS, lanes: 8, laneBps: 125_000 };
+    const port = await proxy(source, WINDOW, tuning);
+    const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
+    expect(source.lanes).toBeLessThan(8);
   });
 });

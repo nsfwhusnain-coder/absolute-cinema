@@ -41,6 +41,14 @@ export interface LaneTuning {
   probeBytes: number;
   /** One parallel piece, and the amount of reading each throughput sample covers. */
   chunkBytes: number;
+  /**
+   * The first pieces of a parallel read are this small, doubling up to
+   * `chunkBytes`: on a CDN giving 2 Mbit/s a connection, a 2 MiB piece takes
+   * eight seconds to arrive, and the reader (ffmpeg, about to make the first
+   * picture) waits on the first piece whole. Small pieces arrive together in
+   * about a second.
+   */
+  firstChunkBytes: number;
   /** Read-waiting time after which a probe may already decide on parallel connections. */
   earlyDecisionMs: number;
 }
@@ -93,6 +101,7 @@ const DOMAIN_MEMORY_MAX = 64;
 export const LANE_TUNING: LaneTuning = {
   probeBytes: 4 * 1024 * 1024,
   chunkBytes: 2 * 1024 * 1024,
+  firstChunkBytes: 256 * 1024,
   earlyDecisionMs: EARLY_DECISION_MS,
 };
 const domainSpeeds = new Map<string, { laneBps: number; at: number }>();
@@ -494,12 +503,15 @@ async function streamParallel(
   let written = start;
   const stopAll = () => pieces.forEach(halt);
   client.release = stopAll;
+  // Pieces start small and double, so the first bytes of a request arrive in about a second.
+  let pieceBytes = Math.min(tuning.chunkBytes, Math.max(1, tuning.firstChunkBytes));
   try {
     for (;;) {
       while (next <= end && parallel(source) && pieces.length < slotsFor(source, windowBytes, tuning)) {
-        const piece = startPiece(source, next, Math.min(end, next + tuning.chunkBytes - 1), client, tuning);
+        const piece = startPiece(source, next, Math.min(end, next + pieceBytes - 1), client, tuning);
         pieces.push(piece);
         next = piece.end + 1;
+        pieceBytes = Math.min(tuning.chunkBytes, pieceBytes * 2);
       }
       const head = pieces[0];
       if (!head) break;
@@ -597,7 +609,10 @@ async function fetchPiece(piece: Piece, source: ProxySource, client: Client, tun
   });
   if (upstream.status !== 206 || !upstream.body) {
     await upstream.body?.cancel().catch(() => {});
-    if (upstream.status === 429 || upstream.status === 503) backOff(source, lanesWhenAsked);
+    // A refusal: 429 or 503, or a 2xx that is not the range asked for (AllDebrid answers 204 to too many at once).
+    if (upstream.status === 429 || upstream.status === 503 || (upstream.status >= 200 && upstream.status < 300)) {
+      backOff(source, lanesWhenAsked);
+    }
     throw new Error(`upstream HTTP ${upstream.status}`);
   }
   const reader = upstream.body.getReader();

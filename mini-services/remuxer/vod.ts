@@ -91,6 +91,12 @@ const MAX_FAILED_RUNS_PER_SEGMENT = 2;
 const FFMPEG_PROBE_BYTES = 1_500_000;
 /** A run that has made nothing this long after starting is not going to. */
 const FIRST_FRAGMENT_TIMEOUT_MS = 11_000;
+/**
+ * The same for a file read over several connections: its CDN gives each one
+ * so little (2 Mbit/s seen) that the first picture group alone can take most
+ * of the usual wait to arrive, through no fault of the file.
+ */
+const SLOW_SOURCE_FIRST_FRAGMENT_TIMEOUT_MS = 22_000;
 /** Its first fragment may begin this far past the keyframe it was started at before the keyframe is called unusable. */
 const ENTRY_TOLERANCE_S = 1;
 /**
@@ -594,7 +600,7 @@ function startRun(session: Session, segment: number, watcher: string): Run {
   };
   const firstFragment = setTimeout(() => {
     if (!run.fragments.length && !run.finished && !run.failed) giveUp("made nothing");
-  }, FIRST_FRAGMENT_TIMEOUT_MS);
+  }, (session.source.lanes ?? 1) >= 2 ? SLOW_SOURCE_FIRST_FRAGMENT_TIMEOUT_MS : FIRST_FRAGMENT_TIMEOUT_MS);
   const splitter = new Fmp4StreamSplitter();
   let stderr = "";
   let seq = 0;
