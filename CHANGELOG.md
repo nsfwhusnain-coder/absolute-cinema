@@ -2,6 +2,21 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.8.1] - 2026-10-17
+
+### Fixed
+- **The queue could wait behind one slow stream.** A stream counted as warming
+  up until it was a minute ahead of its viewer, and one on a slow CDN
+  connection never got there: it held a warm-up slot for minutes while every
+  budget stood half empty. A stream counts as warming up while it reads fast
+  now (well above its own bitrate), which is the burst the slots are for.
+- **The server called itself busy too early.** The remuxer's main thread is
+  planned from the seats held, not from its measured load, most of which is
+  read-ahead that slows down unnoticed; and it counts as busy only when its
+  loop runs a second late or the thread is pegged. Nine real viewers, eight
+  of them in 4K, played without a stall at the load that used to keep the
+  queue shut behind a single high-bitrate stream.
+
 ## [2.8.0] - 2026-10-17
 
 ### Added
