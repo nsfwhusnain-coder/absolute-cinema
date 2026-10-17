@@ -5,6 +5,7 @@ import { DEFAULT_PROVIDER_ID, listProviders } from "@/lib/playback";
 import { FLAG_DEFAULTS, invalidateAppFlag } from "@/lib/feature-flags";
 import { PROFILE_PICKER_SETTING, profilePickerEnabled, REQUIRE_PIN_SETTING, requirePin, SIGNUPS_OPEN_SETTING, signupsOpen } from "@/lib/profiles";
 import { INVITES_SETTING } from "@/lib/invites";
+import { FEEDBACK_SETTING } from "@/lib/feedback";
 
 /**
  * Server-wide settings (TMDB API key override, playback provider, profiles, flags).
@@ -22,8 +23,8 @@ const ADMIN_ONLY_KEYS = ["tmdb_api_key"]; // not exposed to non-admins
 // server as account metadata, never as the raw token.
 const SECRET_KEYS = ["realdebrid_token"];
 
-// Kept by their own routes, not shown as settings (the invite list: /api/admin/invites).
-const INTERNAL_KEYS = [INVITES_SETTING];
+// Kept by their own routes, not shown as settings (the invite list: /api/admin/invites; the feedback: /api/admin/feedback).
+const INTERNAL_KEYS = [INVITES_SETTING, FEEDBACK_SETTING];
 
 const FLAG_KEYS = Object.keys(FLAG_DEFAULTS);
 

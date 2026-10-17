@@ -55,6 +55,7 @@ import {
   formatTime,
 } from "./ui";
 import { EpisodesMenu, type SeasonOption } from "./episodes-menu";
+import { ReportMenu } from "./report-menu";
 import { PLAYER_SHORTCUTS, REMOTE_BUTTONS } from "@/lib/shortcuts";
 import { useIsTv } from "@/hooks/use-is-tv";
 import { useMediaSession } from "./use-media-session";
@@ -117,10 +118,11 @@ type Panel =
   | "episodes"
   | "sleep"
   | "sleep-settings"
-  | "shortcuts";
+  | "shortcuts"
+  | "report";
 
 /** Menus reached from the Settings menu: Back, on the screen or the remote, returns there. */
-const SETTINGS_PANELS: ReadonlySet<Panel> = new Set<Panel>(["subtitles", "audio", "picture", "quality", "speed", "servers", "download", "sleep-settings", "shortcuts"]);
+const SETTINGS_PANELS: ReadonlySet<Panel> = new Set<Panel>(["subtitles", "audio", "picture", "quality", "speed", "servers", "download", "sleep-settings", "shortcuts", "report"]);
 
 /** The menu a remote's colour button opens: one that has nothing to offer here gives way to Settings. */
 function remotePanel(target: RemotePanel, audioChoice: boolean, episodes: boolean): Panel {
@@ -850,6 +852,7 @@ export function Player(props: PlayerProps) {
               <MenuItem label="Playback speed" trailing={<MenuValue>{state.rate === 1 ? "Normal" : `${state.rate}×`}</MenuValue>} opens="speed" onClick={() => setPanel("speed")} />
               <MenuItem label="Server" trailing={<MenuValue>{serverName(activeSource)}</MenuValue>} opens="servers" onClick={() => setPanel("servers")} />
               <MenuItem label="Sleep timer" trailing={<SleepMenuValue mediaType={mediaType} />} opens="sleep-settings" onClick={() => setPanel("sleep-settings")} />
+              <MenuItem label="Report a problem" opens="report" onClick={() => setPanel("report")} />
               {typeof document !== "undefined" && document.pictureInPictureEnabled && (
                 <MenuItem
                   label="Picture in picture"
@@ -1012,6 +1015,18 @@ export function Player(props: PlayerProps) {
                 ))}
               </div>
             </PlayerMenu>
+          )}
+          {panel === "report" && (
+            <ReportMenu
+              title={props.title}
+              displayTitle={props.displayTitle}
+              episodeLabel={props.episodeLabel}
+              source={activeSource}
+              decodedHeight={nowHeight}
+              engineKind={actions.engineKind}
+              onBack={() => setPanel("settings")}
+              onSent={() => setPanel("none")}
+            />
           )}
           {panel === "episodes" && props.tv && (
             <EpisodesMenu

@@ -2,6 +2,16 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- **Feedback from testers**: "Report a problem" in the player's settings menu,
+  and "Send feedback" in Settings, send a note to the admin: a playback
+  problem, something broken, an idea, or anything else. A playback report
+  carries the film, the moment it happened, the quality and the server it came
+  from. The admin reads them in Settings → Server → Feedback from viewers and
+  deletes them there. Each profile may send ten an hour.
+
 ## [2.9.0] - 2026-10-18
 
 ### Added

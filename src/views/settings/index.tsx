@@ -10,6 +10,7 @@ import { AppSection } from "./app-section";
 import { AppearanceSection } from "./appearance-section";
 import { HomeSection } from "./home-section";
 import { ConnectionsSection } from "./connections-section";
+import { FeedbackInbox, FeedbackSection } from "./feedback-section";
 import { LibrarySection } from "./library-section";
 import { PlaybackSection } from "./playback-section";
 import { Segmented } from "./primitives";
@@ -87,12 +88,14 @@ export function SettingsView() {
           <>
             <ConnectionsSection tmdbConfigured={data.status.tmdb} tmdbMasked={data.settings.tmdb_api_key ?? ""} />
             <ProfilesSection settings={data.settings} />
+            <FeedbackInbox />
             <SystemSection settings={data.settings} providers={data.providers} />
           </>
         ) : (
           <>
             <ProfileSection />
             <PlaybackSection />
+            <FeedbackSection />
             <AppearanceSection />
             <HomeSection />
             <LibrarySection />

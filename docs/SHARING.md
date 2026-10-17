@@ -27,6 +27,11 @@ made. A used-up, expired or switched-off link says so. Testers cannot see or
 make invites; the admin sees each one's uses and state. Five wrong PINs lock
 a profile for 15 minutes, doubling with every further round, up to a day.
 
+Testers can tell you what went wrong. **Report a problem** in the player's
+settings menu sends a note with the film and the moment it happened, and
+**Send feedback** in Settings sends one that is not about a film. You read
+them in Settings → Server → Feedback from viewers, and delete them there.
+
 ## A separate instance for testers
 
 Run a second copy of the site beside your own, with its own `.env`, its own

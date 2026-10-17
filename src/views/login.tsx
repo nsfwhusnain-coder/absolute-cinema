@@ -280,6 +280,7 @@ export function LoginView({ callbackUrl, error, invite }: { callbackUrl?: string
               {screen.kind === "manual" && (
                 <ManualScreen
                   canCreate={data.signupsOpen}
+                  pinRequired={Boolean(data.requirePin)}
                   onCreate={() => setScreen({ kind: "create" })}
                   onBack={data.pickerEnabled ? () => setScreen({ kind: "pick" }) : undefined}
                   onDone={finish}
@@ -647,11 +648,14 @@ function CreateScreen({
 
 function ManualScreen({
   canCreate,
+  pinRequired = false,
   onCreate,
   onBack,
   onDone,
 }: {
   canCreate: boolean;
+  /** Every profile on this server has a PIN: the field is not optional. */
+  pinRequired?: boolean;
   onCreate: () => void;
   onBack?: () => void;
   onDone: (name: string) => void;
@@ -695,7 +699,7 @@ function ManualScreen({
         <Field label="Name">
           <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} autoFocus autoComplete="username" />
         </Field>
-        <Field label="PIN (only if the profile is locked)">
+        <Field label={pinRequired ? "PIN" : "PIN (only if the profile is locked)"}>
           <input
             className={inputClass}
             type="password"

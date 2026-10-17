@@ -840,6 +840,8 @@ export function usePlayerController(options: PlayerControllerOptions) {
         if (track?.language) rememberTitleLanguage(titleLanguageKey(title.mediaType, title.tmdbId), { audio: track.language });
         executeRef.current({ type: "attach", sourceId, keepPosition: true, refresh: false });
       },
+      /** The engine playing the file now (hlsjs, native_hls or native_file), or null before one is loaded. For a viewer's report. */
+      engineKind: () => engineRef.current?.kind ?? null,
       retry() {
         orchestrator.current = onRetryAll(orchestrator.current);
         optionsRef.current.onRefreshSources();
