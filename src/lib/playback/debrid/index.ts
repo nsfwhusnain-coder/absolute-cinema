@@ -554,8 +554,10 @@ function toPlaybackSource(
 // Real-Debrid roster (fast + full paths)
 // ---------------------------------------------------------------------------
 
-function slotHeight(slot: DebridSlot): 720 | 1080 | 2160 {
-  if (slot === "native-720") return 720;
+export function slotHeight(slot: DebridSlot): 720 | 1080 | 2160 {
+  // Both 720p slots: the remux one used to fall through to 1080, so a 720p
+  // file was offered (and started) as 1080p.
+  if (slot === "native-720" || slot === "safari-720") return 720;
   if (slot.startsWith("safari-2160") || slot.startsWith("native-2160")) return 2160;
   return 1080;
 }
