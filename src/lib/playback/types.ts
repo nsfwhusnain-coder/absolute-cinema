@@ -128,6 +128,19 @@ export interface PlaybackSource {
   /** Exact file size when the resolver knew it (Torrentio footer, RD filesize). */
   sizeBytes?: number;
   /**
+   * How much picture the file holds, judged from its release by
+   * `assessRelease` (release-quality.ts): 3 normal, 2 too heavy to stream
+   * smoothly, 1 flagged (starved, upscaled, interpolated, hardcoded subtitles,
+   * Dolby Vision with no HDR10 fallback). Debrid sources only.
+   */
+  qualityTier?: 1 | 2 | 3;
+  /** The score inside `qualityTier`; higher is better. */
+  qualityScore?: number;
+  /** What `assessRelease` noticed, such as "upscaled", "starved" or "remux". */
+  qualityFlags?: string[];
+  /** The release the file came from, as the index named it. */
+  releaseTitle?: string;
+  /**
    * Actual container format, when known. Debrid sources always drop MKV/WebM
    * before ever becoming a PlaybackSource (see
    * src/lib/playback/debrid/torrentio.ts `isBrowserPlayableContainer` +
