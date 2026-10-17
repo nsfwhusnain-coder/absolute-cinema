@@ -18,7 +18,7 @@ import type { ErrorData, Level, MediaPlaylist } from "hls.js";
 import { BufferBudget } from "@/lib/playback/buffer-budget";
 import { activeBufferProfile } from "@/lib/playback/device-profile";
 import { HLS_WORKER_PATH, hlsWorkerSupportedHere } from "@/lib/playback/player-engine";
-import { seekPointAtOrBefore, snapSeek } from "@/lib/playback/seek-points";
+import { landingTime, seekPointAtOrBefore, snapSeek } from "@/lib/playback/seek-points";
 
 export interface Playable {
   kind: "hls" | "file";
@@ -147,7 +147,7 @@ export class MediaEngine {
     const sliced = Boolean(playable.slicedUrl && options.seekPoints?.length);
     if (sliced) {
       this.seekPoints = options.seekPoints!;
-      startAt = seekPointAtOrBefore(this.seekPoints, startAt);
+      startAt = landingTime(seekPointAtOrBefore(this.seekPoints, startAt));
     }
     const profile = activeBufferProfile();
     const budget = new BufferBudget(profile, playable.declaredBitrateBps, playable.keyframeGapS);
@@ -255,7 +255,7 @@ export class MediaEngine {
    */
   seekTarget(to: number): number {
     if (!this.seekPoints || isBuffered(this.video, to)) return to;
-    return snapSeek(this.seekPoints, this.video.currentTime, to);
+    return landingTime(snapSeek(this.seekPoints, this.video.currentTime, to));
   }
 
   /**

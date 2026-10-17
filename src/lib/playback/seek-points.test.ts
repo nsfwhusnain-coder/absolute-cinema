@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 import { describe, expect, it } from "bun:test";
-import { seekPointAfter, seekPointAtOrBefore, snapSeek } from "./seek-points";
+import { landingTime, SEEK_POINT_NUDGE_S, seekPointAfter, seekPointAtOrBefore, snapSeek } from "./seek-points";
 
 const points = [0, 10.4, 20.8, 31.2];
 
@@ -43,5 +43,21 @@ describe("snapSeek", () => {
 
   it("goes back to the start of the interval on a jump backwards within it", () => {
     expect(snapSeek(points, 19, 12)).toBe(10.4);
+  });
+});
+
+describe("landingTime", () => {
+  it("lands just inside a point's slice, so adding up the playlist's durations cannot put it in the slice before", () => {
+    // The server's point, rounded down to the millisecond, and the slice's start as hls.js adds it up.
+    const point = 792.4;
+    const sliceStart = 792.40033 + 0.000004;
+    expect(point < sliceStart).toBe(true);
+    expect(landingTime(point)).toBeGreaterThan(sliceStart);
+    expect(landingTime(point)).toBeLessThan(point + 0.1);
+  });
+
+  it("leaves the start of the title where it is", () => {
+    expect(landingTime(0)).toBe(0);
+    expect(landingTime(10.4)).toBeCloseTo(10.4 + SEEK_POINT_NUDGE_S, 9);
   });
 });

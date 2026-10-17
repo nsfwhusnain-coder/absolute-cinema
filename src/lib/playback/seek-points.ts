@@ -8,6 +8,22 @@
  * before it. These are the times the server says such a jump may land on.
  */
 
+/**
+ * How far past a point the player is sent. The server gives its points to the
+ * millisecond, rounded either way, and hls.js places each slice by adding up
+ * the playlist's durations, a few microseconds off again. A jump exactly onto
+ * a point could fall in the slice before it, which hangs on the keyframe a
+ * whole interval earlier: the server then started a second run, from that
+ * keyframe, beside the one already making the right slice (twice the reading
+ * from a slow CDN, at the start, when it matters most).
+ */
+export const SEEK_POINT_NUDGE_S = 0.05;
+
+/** Where the player is sent to start from a point: just inside its slice. */
+export function landingTime(point: number): number {
+  return point > 0 ? point + SEEK_POINT_NUDGE_S : point;
+}
+
 /** The last point at or before `time`; the first point when `time` comes before them all. */
 export function seekPointAtOrBefore(points: readonly number[], time: number): number {
   if (!points.length) return time;
