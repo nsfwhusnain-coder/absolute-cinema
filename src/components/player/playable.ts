@@ -2,7 +2,7 @@ import type { PlaybackSource } from "@/lib/playback/types";
 import { decidePlayback, withoutWebFallbacks } from "@/lib/playback/decide-playback";
 import { bitrateSustainabilityRank, isSourcePlayableHere, sourceDelivery, sourceMaxHeight } from "@/lib/playback/source-quality";
 import { preferNativeHls } from "@/lib/playback/player-engine";
-import { supportsDolbyVision } from "@/lib/playback/decode-capability";
+import { audioCapabilities, audioCapsParam, supportsDolbyVision } from "@/lib/playback/decode-capability";
 import type { Ranker } from "@/lib/playback/orchestrator";
 import type { Playable } from "./engine";
 import type { RemuxAudioTrack, StreamSubtitleTrack } from "./store";
@@ -163,6 +163,8 @@ export function remuxOpenQuery(source: PlaybackSource, title: TitleContext, audi
   if (title.episode != null) params.set("episode", String(title.episode));
   if (title.originalLanguage) params.set("originalLanguage", title.originalLanguage);
   if (supportsDolbyVision()) params.set("dolbyVision", "1");
+  // The surround audio this viewer can take; the remuxer decides how the chosen track is carried from it.
+  params.set("audioCaps", audioCapsParam(audioCapabilities()));
   return params;
 }
 

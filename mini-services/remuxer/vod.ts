@@ -4,7 +4,8 @@
  * Opening a title reads its Matroska keyframe index and builds a complete
  * segment plan (see vod-plan.ts), so the player gets the full timeline and
  * can seek anywhere immediately. Segments are produced on demand by ffmpeg
- * "runs" that stream-copy video (no re-encode) and convert audio to AAC.
+ * "runs" that stream-copy video (no re-encode) and copy or convert audio
+ * (see audio-delivery.ts).
  * A request for a segment no run will reach soon starts a new run right
  * there; runs that race too far ahead of the viewer are paused, and idle
  * sessions are cleaned up.
@@ -20,6 +21,8 @@ import {
   type AudioTrackSelection,
   type SelectableMediaTrack,
 } from "../../src/lib/playback/track-selection";
+import { audioCapsParam, DEFAULT_AUDIO_CAPS, type AudioCaps } from "../../src/lib/playback/decode-capability";
+import { audioArgs, audioDelivery, type AudioDelivery } from "./audio-delivery";
 import { totalSizeFromContentRange } from "./content-range";
 import { httpRangeFetcher, readMkvKeyframes, type MkvAudioTrack, type MkvSubtitleTrack } from "./mkv-cues";
 import { deliveredRange, dolbyVisionDelivery, type DeliveredRange } from "./dolby-vision";
@@ -77,7 +80,6 @@ const INIT_WAIT_MS = 20_000;
 const POLL_MS = 100;
 const MAX_RUNS_PER_SESSION = 2;
 const MAX_FAILED_RUNS_PER_SEGMENT = 2;
-const AUDIO_BITRATE = "192k";
 /**
  * How much ffmpeg may read to identify the streams before it starts. A file
  * with image subtitles never satisfies it (those say nothing until a caption
@@ -168,6 +170,8 @@ interface Session {
   keyframes: number[];
   durationS: number;
   audioIndex: number | null;
+  /** How the chosen audio track is carried: copied, or re-encoded to surround or stereo. */
+  audioDelivery: AudioDelivery;
   subtitles: Array<{ track: MkvSubtitleTrack; cues: Map<string, VttCue> }>;
   hevc: boolean;
   /** Delivered as Dolby Vision (its configuration box written, sample entry dvh1). */
@@ -198,19 +202,20 @@ export interface VodSessionInfo {
   videoCodecId: string | null;
   /** What the viewer receives: SDR, PQ (HDR10), HLG or DV (Dolby Vision). */
   dynamicRange: DeliveredRange;
-  audio: { language: string | null; name: string | null; channels: number | null; codecId: string } | null;
+  audio: { language: string | null; name: string | null; channels: number | null; codecId: string; delivery: AudioDelivery } | null;
   /** Position of `audio` in `audioTracks`. */
   audioIndex: number | null;
   audioTracks: Array<{ index: number; language: string | null; name: string | null; channels: number | null; codecId: string }>;
   subtitles: Array<{ index: number; language: string | null; name: string | null; isDefault: boolean; isForced: boolean }>;
 }
 
-/** What the viewer's browser and screen can do beyond the common baseline. */
+/** What the viewer's browser, screen and audio output can do beyond the common baseline. */
 export interface VodViewer {
   decodesDolbyVision: boolean;
+  audio: AudioCaps;
 }
 
-const BASELINE_VIEWER: VodViewer = { decodesDolbyVision: false };
+const BASELINE_VIEWER: VodViewer = { decodesDolbyVision: false, audio: DEFAULT_AUDIO_CAPS };
 
 /** Automatic audio choice, or an explicit track the viewer picked. */
 export interface VodAudioRequest extends AudioTrackSelection {
@@ -235,7 +240,13 @@ function log(message: string): void {
   recordEvent("remux", "vod", { message, ...vodStats() });
 }
 
-function sessionId(url: string, audio: VodAudioRequest, viewer: VodViewer, identity: string): string {
+/**
+ * The key a session is shared by. The viewer's audio capabilities are part of
+ * it: they decide the delivery of the track (see audioDelivery), and the track
+ * is only known once the file is indexed, so the capabilities stand in for it,
+ * as the Dolby Vision flag does. Viewers who differ in either never share one.
+ */
+export function sessionId(url: string, audio: VodAudioRequest, viewer: VodViewer, identity: string): string {
   return createHash("sha256")
     .update(
       [
@@ -247,6 +258,7 @@ function sessionId(url: string, audio: VodAudioRequest, viewer: VodViewer, ident
         audio.preferredLanguage ?? "",
         audio.audioIndex ?? "",
         viewer.decodesDolbyVision ? "dv" : "",
+        audioCapsParam(viewer.audio),
       ].join("|")
     )
     .digest("hex")
@@ -353,6 +365,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
   const totalSize = fetcher.size();
   if (!totalSize) throw new VodError("source size unknown", 502);
   const audioTrack = chooseAudio(index.audioTracks, audio);
+  const audioMode = audioDelivery(audioTrack, viewer.audio);
   const textSubtitles = index.subtitleTracks.filter((t) => t.text).slice(0, MAX_SUBTITLE_TRACKS);
   const bounds = computeSegmentBounds(index.keyframes, index.durationS);
   const dir = join(cacheRoot, `vod-${id}`);
@@ -368,6 +381,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
     keyframes: index.keyframes,
     durationS: index.durationS,
     audioIndex: audioTrack?.audioIndex ?? null,
+    audioDelivery: audioMode,
     subtitles: textSubtitles.map((track) => ({ track, cues: new Map<string, VttCue>() })),
     hevc: /HEVC/i.test(index.videoCodecId ?? ""),
     dolbyVision: asDolbyVision,
@@ -389,7 +403,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
       videoCodecId: index.videoCodecId,
       dynamicRange: deliveredRange(index.dynamicRange, index.dolbyVision, asDolbyVision),
       audio: audioTrack
-        ? { language: audioTrack.language, name: audioTrack.name, channels: audioTrack.channels, codecId: audioTrack.codecId }
+        ? { language: audioTrack.language, name: audioTrack.name, channels: audioTrack.channels, codecId: audioTrack.codecId, delivery: audioMode }
         : null,
       audioIndex: audioTrack?.audioIndex ?? null,
       audioTracks: index.audioTracks.map((t) => ({
@@ -410,7 +424,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
   };
   sessions.set(id, session);
   const range = index.dolbyVision ? `Dolby Vision profile ${index.dolbyVision.profile} as ${session.info.dynamicRange}` : session.info.dynamicRange;
-  log(`open ${id}: ${index.durationS.toFixed(0)}s, ${bounds.length - 1} segments, ${index.keyframes.length} keyframes, audio #${session.audioIndex}, ${range}`);
+  log(`open ${id}: ${index.durationS.toFixed(0)}s, ${bounds.length - 1} segments, ${index.keyframes.length} keyframes, audio #${session.audioIndex} (${audioMode}), ${range}`);
   return session;
 }
 
@@ -429,7 +443,7 @@ function ffmpegArgs(session: Session, startTime: number): string[] {
   if (startTime > 0) args.push("-ss", (startTime + 0.3).toFixed(3));
   args.push("-i", proxyBase ? `${proxyBase}/src/${session.id}` : session.url, "-map", "0:v:0");
   if (session.audioIndex !== null) {
-    args.push("-map", `0:a:${session.audioIndex}`, "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ac", "2");
+    args.push("-map", `0:a:${session.audioIndex}`, ...audioArgs(session.audioDelivery));
   }
   args.push("-c:v", "copy");
   // Dolby Vision is only recognised with its configuration box, which ffmpeg

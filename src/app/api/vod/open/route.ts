@@ -12,6 +12,7 @@ export const dynamic = "force-dynamic";
 
 const OPEN_TIMEOUT_MS = 30_000;
 const LANGUAGE = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/;
+const AUDIO_CAPS = /^[a-z0-9.]{1,40}$/;
 
 const SECONDS_PER_MINUTE = 60;
 
@@ -34,7 +35,7 @@ async function isAnotherLength(title: RuntimeQuestion, sourceId: string, duratio
 
 /**
  * GET /api/vod/open?type=&id=&sourceId=&ticket=&season=&episode=&startAt=
- *                  &audioPreference=&originalLanguage=&audioLanguage=&dolbyVision=&prewarm=
+ *                  &audioPreference=&originalLanguage=&audioLanguage=&dolbyVision=&audioCaps=&prewarm=
  *
  * Opens a seekable video-on-demand remux of an MKV source and returns the
  * playlist URL plus the title's real duration.
@@ -77,6 +78,9 @@ export async function GET(req: NextRequest) {
   if (audioIndex !== undefined && Number.isInteger(audioIndex) && audioIndex >= 0) worker.set("audioIndex", String(audioIndex));
   // The viewer's browser said it decodes Dolby Vision.
   if (params.get("dolbyVision") === "1") worker.set("dolbyVision", "1");
+  // The surround audio the viewer can take (see audioCapsParam).
+  const audioCaps = params.get("audioCaps") ?? "";
+  if (AUDIO_CAPS.test(audioCaps)) worker.set("audioCaps", audioCaps);
   // Asked for ahead of Play: made ready, but never at a viewer's expense.
   if (params.get("prewarm") === "1") worker.set("prewarm", "1");
 

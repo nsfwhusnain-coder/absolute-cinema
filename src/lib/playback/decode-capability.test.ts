@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it } from "bun:test";
 import {
   AV1_PROBE_TYPES,
   HEVC_PROBE_TYPES,
+  audioCapabilities,
+  audioCapsParam,
   hevcSupport,
+  parseAudioCaps,
   probeDecodeSync,
   reportDecodeFailure,
   resetDecodeCapabilityCache,
@@ -144,5 +147,101 @@ describe("warmDecodeCapabilities", () => {
     browser(null);
     await warmDecodeCapabilities();
     expect(supportsHevc()).toBe(true);
+  });
+});
+
+describe("audio capabilities query", () => {
+  it("round-trips every capability through its compact form", () => {
+    const samples = [
+      { ec3: true, ac3: true, channels: 6 },
+      { ec3: true, ac3: false, channels: 8 },
+      { ec3: false, ac3: true, channels: 1 },
+      { ec3: false, ac3: false, channels: 2 },
+    ];
+    for (const caps of samples) expect(parseAudioCaps(audioCapsParam(caps))).toEqual(caps);
+  });
+
+  it("writes the tokens the server reads", () => {
+    expect(audioCapsParam({ ec3: true, ac3: true, channels: 6 })).toBe("ec3.ac3.ch6");
+    expect(audioCapsParam({ ec3: false, ac3: false, channels: 2 })).toBe("ch2");
+  });
+
+  it("clamps the channel count it writes to 1 to 8", () => {
+    expect(audioCapsParam({ ec3: false, ac3: false, channels: 12 })).toBe("ch8");
+    expect(audioCapsParam({ ec3: false, ac3: false, channels: 0 })).toBe("ch1");
+    expect(audioCapsParam({ ec3: false, ac3: false, channels: Number.NaN })).toBe("ch2");
+  });
+
+  it("reads a missing or malformed value as stereo without Dolby", () => {
+    const stereo = { ec3: false, ac3: false, channels: 2 };
+    for (const value of [null, undefined, "", "EC3.CH6", "ec3 ch6", "ec3.ch6/../x", "<script>", "x".repeat(41)]) {
+      expect(parseAudioCaps(value)).toEqual(stereo);
+    }
+  });
+
+  it("skips tokens it does not know and channel counts out of range", () => {
+    expect(parseAudioCaps("ec3.dts.ch6")).toEqual({ ec3: true, ac3: false, channels: 6 });
+    expect(parseAudioCaps("ac3.ch9")).toEqual({ ec3: false, ac3: true, channels: 2 });
+    expect(parseAudioCaps("ch0.ch6")).toEqual({ ec3: false, ac3: false, channels: 6 });
+  });
+});
+
+describe("audioCapabilities", () => {
+  const scope = globalThis as Record<string, unknown>;
+
+  afterEach(() => {
+    for (const name of ["window", "MediaSource", "ManagedMediaSource", "AudioContext"]) delete scope[name];
+    resetDecodeCapabilityCache();
+  });
+
+  /** A browser whose media source accepts `types` and whose audio output reports `channels`. */
+  function browser(types: readonly string[], channels: unknown, mediaSource = "MediaSource"): void {
+    scope.window = {};
+    scope[mediaSource] = { isTypeSupported: (type: string) => types.includes(type) };
+    scope.AudioContext = class {
+      destination = { maxChannelCount: channels };
+      close(): Promise<void> {
+        return Promise.resolve();
+      }
+    };
+    resetDecodeCapabilityCache();
+  }
+
+  it("reads the Dolby codecs the media source accepts, and the output's channels without E-AC-3", () => {
+    browser(['audio/mp4; codecs="ac-3"'], 6);
+    expect(audioCapabilities()).toEqual({ ec3: false, ac3: true, channels: 6 });
+  });
+
+  it("does not open an audio context where E-AC-3 decodes: surround goes as E-AC-3 there", () => {
+    browser(['audio/mp4; codecs="ec-3"'], 6);
+    expect(audioCapabilities()).toEqual({ ec3: true, ac3: false, channels: 2 });
+  });
+
+  it("asks ManagedMediaSource where the page has no MediaSource", () => {
+    browser(['audio/mp4; codecs="ac-3"'], 2, "ManagedMediaSource");
+    expect(audioCapabilities()).toEqual({ ec3: false, ac3: true, channels: 2 });
+  });
+
+  it("clamps the channels an output reports, and takes stereo for a missing count", () => {
+    browser([], 40);
+    expect(audioCapabilities().channels).toBe(8);
+    resetDecodeCapabilityCache();
+    browser([], undefined);
+    expect(audioCapabilities().channels).toBe(2);
+  });
+
+  it("takes stereo when the browser refuses an audio context", () => {
+    browser([], 6);
+    scope.AudioContext = class {
+      constructor() {
+        throw new Error("audio is not allowed here");
+      }
+    };
+    resetDecodeCapabilityCache();
+    expect(audioCapabilities()).toEqual({ ec3: false, ac3: false, channels: 2 });
+  });
+
+  it("answers stereo without asking anything when there is no window", () => {
+    expect(audioCapabilities()).toEqual({ ec3: false, ac3: false, channels: 2 });
   });
 });

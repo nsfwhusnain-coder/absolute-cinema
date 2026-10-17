@@ -262,7 +262,9 @@ function browserSupportsAv1(): boolean {
  *                 Opus/AAC audio. Rewrapping to fMP4 is a stream copy (no
  *                 decode, no encode; measured 60s of 4K AV1 in 6s wall), so
  *                 these are genuinely playable rather than dead inventory.
- * - "unavailable" the CODEC cannot be decoded here. No container change helps:
+ * - "unavailable" the CODEC cannot be decoded here, or it is the AC-3, E-AC-3 or
+ *                 Opus audio of a plain MP4 this browser cannot decode (the
+ *                 remuxer reads Matroska only). No container change helps:
  *                 Chrome cannot decode HEVC in any wrapper, ever.
  */
 export type SourceDelivery = "direct" | "remux" | "unavailable";
@@ -293,7 +295,7 @@ function codecDecodableHere(source: PlaybackSource): boolean {
  * codec says nothing about E-AC-3/DTS/TrueHD, and progressive multi-audio MP4
  * selection is not exposed consistently enough to enforce the user's language
  * choice. In either case the existing remux worker can copy video untouched
- * while producing one selected AAC track.
+ * while producing one selected audio track.
  */
 function resolvedSourceContainer(source: PlaybackSource): ReleaseContainer | undefined {
   const fromUrl = containerFromDirectUrl(unwrapProxyUpstream(source.url));
@@ -301,21 +303,22 @@ function resolvedSourceContainer(source: PlaybackSource): ReleaseContainer | und
   return source.container;
 }
 
+/**
+ * Audio some browsers decode and others do not. Chrome and Firefox decode no
+ * AC-3 or E-AC-3 at all, and Opus in MP4 varies by browser, so whether a file
+ * plays is the browser's own answer, never a guess from its container.
+ */
+const BROWSER_DECIDED_AUDIO: ReadonlySet<string> = new Set(["ac3", "eac3", "opus"]);
+
 function audioCodecDecodableHere(source: PlaybackSource): boolean {
   const codec = source.audioCodec;
   if (!codec || codec === "unknown" || codec === "aac" || codec === "mp3") {
     return true;
   }
   if (codec === "dts" || codec === "truehd" || codec === "flac") return false;
-  // AC-3 / E-AC-3 / Opus in MP4: play the file. Remuxing a 4K progressive
-  // just in case the browser dislikes the audio is why Poseidon sat on
-  // "Repackaging" while Pan (same height, direct MP4) started immediately.
-  const container = resolvedSourceContainer(source);
-  const containerOk = !container || isBrowserPlayableContainer(container);
-  if (containerOk && (codec === "ac3" || codec === "eac3" || codec === "opus")) {
-    return true;
-  }
-  if (typeof document === "undefined") return false;
+  // No page to ask (server-side render): the answer stays yes, as it always was.
+  // The client decides with its own browser.
+  if (typeof document === "undefined") return true;
   try {
     const media = document.createElement("audio");
     const mime =
@@ -335,6 +338,12 @@ function audioNeedsRemux(source: PlaybackSource): boolean {
   return !audioCodecDecodableHere(source);
 }
 
+/** A file the browser opens by itself and the remuxer cannot read: MP4 or MOV, by its URL or its release. */
+function isPlainMp4File(source: PlaybackSource): boolean {
+  const container = resolvedSourceContainer(source);
+  return container === "mp4" || container === "mov";
+}
+
 export function sourceDelivery(source: PlaybackSource): SourceDelivery {
   if (!codecDecodableHere(source)) return "unavailable";
   const container = resolvedSourceContainer(source);
@@ -343,6 +352,11 @@ export function sourceDelivery(source: PlaybackSource): SourceDelivery {
   // "Repackaging" stall. An MKV still remuxes even if someone labelled it HLS.
   if ((source.type === "hls" || source.type === "dash") && containerOk) {
     return "direct";
+  }
+  // The remuxer reads Matroska only, so an MP4 whose audio this browser cannot
+  // decode has no route. Its MKV twin is remuxed, and its audio made AAC.
+  if (isPlainMp4File(source) && BROWSER_DECIDED_AUDIO.has(source.audioCodec ?? "") && !audioCodecDecodableHere(source)) {
+    return "unavailable";
   }
   return containerOk && !audioNeedsRemux(source) ? "direct" : "remux";
 }

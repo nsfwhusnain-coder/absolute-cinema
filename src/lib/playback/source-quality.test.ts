@@ -1,5 +1,5 @@
 /// <reference types="bun-types" />
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import {
   bitrateSustainabilityRank,
   isRuntimeSourceUnhealthy,
@@ -1168,5 +1168,78 @@ describe("sortSourcesForPicker — picture quality at equal height", () => {
     const flagged4k = makeSource({ id: "flagged-4k", label: "Flagged", provider: "CinemaOS", type: "mp4", maxHeight: 2160, qualityTier: 1, qualityScore: 100 });
     const normal1080 = makeSource({ id: "normal-1080", label: "Normal", provider: "CinemaOS", type: "mp4", maxHeight: 1080, qualityTier: 3, qualityScore: 400 });
     expect(sortSourcesForPicker([normal1080, flagged4k]).map((s) => s.id)).toEqual(["flagged-4k", "normal-1080"]);
+  });
+});
+
+describe("sourceDelivery - Dolby and Opus audio is the browser's to decide", () => {
+  const scope = globalThis as { document?: unknown };
+
+  /** A browser whose audio element answers `canPlayType` with `answer` for every type. */
+  function browserAnswers(answer: string): void {
+    scope.document = { createElement: () => ({ canPlayType: () => answer }) };
+  }
+
+  afterEach(() => {
+    delete scope.document;
+  });
+
+  const mp4Audio = (audioCodec: "eac3" | "ac3" | "opus" | "dts", overrides: Partial<PlaybackSource> = {}) =>
+    makeSource({
+      id: `mp4-${audioCodec}`,
+      origin: "debrid",
+      type: "mp4",
+      codec: "h264",
+      container: "mp4",
+      audioCodec,
+      ...overrides,
+    });
+
+  it("an MP4 with E-AC-3 that the browser cannot decode has no route", () => {
+    browserAnswers("");
+    expect(sourceDelivery(mp4Audio("eac3"))).toBe("unavailable");
+  });
+
+  it("the same MP4 plays directly where the browser decodes E-AC-3", () => {
+    browserAnswers("probably");
+    expect(sourceDelivery(mp4Audio("eac3"))).toBe("direct");
+  });
+
+  it("an MKV with E-AC-3 remuxes whether or not the browser decodes it", () => {
+    const mkv = makeSource({ id: "mkv-eac3", origin: "debrid", type: "mp4", codec: "h264", container: "mkv", audioCodec: "eac3" });
+    browserAnswers("");
+    expect(sourceDelivery(mkv)).toBe("remux");
+    browserAnswers("probably");
+    expect(sourceDelivery(mkv)).toBe("remux");
+  });
+
+  it("holds a MOV to the same rule as an MP4", () => {
+    browserAnswers("");
+    expect(sourceDelivery(mp4Audio("ac3", { container: "mov" }))).toBe("unavailable");
+    browserAnswers("maybe");
+    expect(sourceDelivery(mp4Audio("ac3", { container: "mov" }))).toBe("direct");
+  });
+
+  it("judges the file by its URL when the URL names its container", () => {
+    browserAnswers("");
+    const named = mp4Audio("eac3", { container: "mkv", url: "https://cdn.example/d/ABC/Movie.2024.2160p.REMUX.mp4" });
+    expect(sourceDelivery(named)).toBe("unavailable");
+  });
+
+  it("applies the same test to Opus in an MP4", () => {
+    browserAnswers("");
+    expect(sourceDelivery(mp4Audio("opus"))).toBe("unavailable");
+    browserAnswers("probably");
+    expect(sourceDelivery(mp4Audio("opus"))).toBe("direct");
+  });
+
+  it("remuxes a file of unknown container rather than trusting it to play", () => {
+    browserAnswers("");
+    const unknown = makeSource({ id: "unknown-eac3", origin: "debrid", type: "mp4", codec: "h264", audioCodec: "eac3" });
+    expect(sourceDelivery(unknown)).toBe("remux");
+  });
+
+  it("keeps DTS in an MP4 on the remux path, as before", () => {
+    browserAnswers("probably");
+    expect(sourceDelivery(mp4Audio("dts"))).toBe("remux");
   });
 });

@@ -5,7 +5,7 @@
  * Internal only (127.0.0.1:3040); the Next.js app authenticates viewers and
  * proxies these routes.
  *
- *   GET /vod/open?u=<url>&audioPreference=&originalLanguage=&audioLanguage=&audioIndex=&startAt=&dolbyVision=&prewarm=
+ *   GET /vod/open?u=<url>&audioPreference=&originalLanguage=&audioLanguage=&audioIndex=&startAt=&dolbyVision=&audioCaps=&prewarm=
  *        → { id, durationS, segments, videoCodecId, dynamicRange, audio, audioIndex, audioTracks, subtitles }
  *   GET /vod/<id>/index.m3u8   complete VOD playlist, one entry per segment (keyframe to keyframe)
  *   GET /vod/<id>/slices.m3u8  the same timeline in slices of about two seconds, for MSE players
@@ -20,6 +20,7 @@ import { createServer, type ServerResponse } from "node:http";
 import { mkdirSync } from "node:fs";
 import type { AudioPreference } from "../../src/lib/profile-preferences";
 import { UNUSABLE_HEADER } from "../../src/lib/playback/remuxer";
+import { parseAudioCaps } from "../../src/lib/playback/decode-capability";
 import { onClientGone, serveRange } from "./source-proxy";
 import { removeCacheLeftovers } from "./cache-leftovers";
 import {
@@ -107,7 +108,7 @@ const server = createServer(async (req, res) => {
       const input = url.searchParams.get("u") ?? "";
       if (!/^https?:\/\//.test(input)) return send(res, 400, JSON.stringify({ error: "bad url" }), "application/json");
       const startAt = Math.min(MAX_START_AT_S, Math.max(0, Number(url.searchParams.get("startAt")) || 0));
-      const viewer = { decodesDolbyVision: url.searchParams.get("dolbyVision") === "1" };
+      const viewer = { decodesDolbyVision: url.searchParams.get("dolbyVision") === "1", audio: parseAudioCaps(url.searchParams.get("audioCaps")) };
       const prewarm = url.searchParams.get("prewarm") === "1";
       const info = await openVodSession(CACHE_DIR, input, parseAudio(url), startAt, viewer, prewarm, watcherOf(url), identityOf(url));
       return send(res, 200, JSON.stringify(info), "application/json");
