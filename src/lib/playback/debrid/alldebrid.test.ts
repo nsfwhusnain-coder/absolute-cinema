@@ -161,3 +161,36 @@ describe("alldebrid — resolve with fetch mocked", () => {
     expect(deleted.sort()).toEqual(["1", "2"]);
   });
 });
+
+describe("alldebrid — one upload checks the whole batch of candidates", () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.ALLDEBRID_API_KEY;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.ALLDEBRID_API_KEY;
+    else process.env.ALLDEBRID_API_KEY = originalKey;
+  });
+
+  it("sends the first 16 candidates in a single upload, and no more", async () => {
+    process.env.ALLDEBRID_API_KEY = FAKE_KEY;
+    const uploads: string[][] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/magnet/upload")) {
+        uploads.push(new URLSearchParams(String(init?.body ?? "")).getAll("magnets[]"));
+        return envelope({ magnets: [] });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    const targets = Array.from({ length: 20 }, (_, i) => ({
+      infoHash: i.toString(16).padStart(2, "0").repeat(20),
+      releaseTitle: `Film ${i} 1080p`,
+    }));
+    await resolveAllDebridFirstCached(targets, Date.now() + 5_000);
+
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]).toHaveLength(16);
+    expect(uploads[0]?.[0]).toBe(targets[0]?.infoHash);
+  });
+});

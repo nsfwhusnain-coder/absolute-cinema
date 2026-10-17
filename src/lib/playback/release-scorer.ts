@@ -1,36 +1,21 @@
 /**
- * Release provenance scoring — how well a release was mastered, independent of
+ * Release provenance scoring: how well a release was mastered, independent of
  * whether this browser can play it.
  *
- * `candidateRankScore` in debrid/torrentio.ts ranks within a resolution class
- * on size fitness, seeders and container, and nothing else. So how a release
- * was mastered carried no weight at all, and the consequence is the opposite
- * of what the ranking intends:
+ * The in-class ranking in debrid/torrentio.ts orders releases by the picture
+ * their files hold (release-quality.ts), so the score below is not on that
+ * path. It describes mastering alone (provenance, audio tier, HDR, dual audio)
+ * for a caller that wants that view. It deliberately says nothing about codec
+ * or container: those are deliverability questions, and source-quality.ts
+ * answers them with real per-browser decode probes. Scoring codec here too
+ * would double-count, and would fight that layer (a naive "HEVC is better" rule
+ * would promote exactly the releases Chrome cannot decode).
  *
- *   `sizeFitnessScore` targets 12 GiB for a 4K movie and subtracts 200 per
- *   octave away from it. A 60 GB REMUX sits ~2.3 octaves out and scores zero,
- *   while a 12 GB WEB-DL scores the full 400. The best master available was
- *   reliably the most penalised one, and could not win its class on any other
- *   axis because no other axis described quality.
- *
- * That size preference is not wrong — it was tuned against real Chromium
- * startup latency, and a 60 GB REMUX genuinely is slower to start. It was just
- * the only voice in the room.
- *
- * Capture releases are a separate matter and were already handled: they are
- * dropped outright in `parseTorrentioStreams`, which now calls
- * `isCaptureRelease` from this module so the drop and the penalty below share
- * one pattern. The penalty is still worth having — `parseReleaseTitle` is also
- * run by torbox.ts against resolved filenames, which never pass through that
- * drop.
- *
- * This module supplies the missing axis. It scores mastering only —
- * provenance, audio tier, HDR, dual audio. It deliberately says nothing about
- * codec or container: those are deliverability questions, and source-quality.ts
- * already answers them properly with real per-browser decode probes. Scoring
- * codec here too would double-count, and would actively fight that layer (a
- * naive "HEVC is better" rule would promote exactly the releases Chrome cannot
- * decode).
+ * `isCaptureRelease` is the part the ranking uses: cam and telesync rips are
+ * dropped in `parseTorrentioStreams`, and this module holds the pattern so the
+ * drop and the score cannot drift apart. The score still treats a capture as
+ * worthless, because torbox.ts runs `parseReleaseTitle` on resolved filenames,
+ * which never pass through that drop.
  */
 
 import type { ReleaseAudioCodec } from "./debrid/torrentio";
@@ -89,9 +74,9 @@ export function isCaptureRelease(title: string): boolean {
 
 /**
  * A capture is never worth watching when any alternative exists, so the
- * penalty is set an order of magnitude above every other term in
- * `candidateRankScore` (size fitness tops out at 400). It is a penalty rather
- * than a filter on purpose: for an obscure or brand-new title a cam is
+ * penalty is an order of magnitude larger than every other term of the score
+ * (no non-capture release reaches `RELEASE_QUALITY_MAX_SCORE`). It is a penalty
+ * rather than a filter on purpose: for an obscure or brand-new title a cam is
  * sometimes the only thing in existence, and a roster of one bad row still
  * beats an empty roster — it simply must never win while anything else is
  * available.
@@ -131,12 +116,8 @@ const HDR_BONUS = 10;
 const MULTI_AUDIO_BONUS = 4;
 
 /**
- * Ceiling for a non-capture release: 90 + 14 + 10 + 4.
- *
- * Kept deliberately in the same band as the seeders term (max 100) and below
- * the bounded size-richness signal (max 400). Provenance reorders broadly
- * comparable releases while substantial same-resolution richness remains the
- * primary picture-quality signal.
+ * Ceiling for a non-capture release: 90 + 14 + 10 + 4. Mastering alone, and
+ * not on the ranking path: release-quality.ts ranks by the picture a file holds.
  */
 export const RELEASE_QUALITY_MAX_SCORE = 118;
 

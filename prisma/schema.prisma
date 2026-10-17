@@ -111,6 +111,7 @@ model CachedStream {
   compat    String // "native" | "safari" — browser decode compatibility hint
   codec     String? // "h264" | "hevc" | "av1" | "unknown" — parsed release codec (nullable for back-compat with pre-existing rows)
   container String? // "mp4" | "mkv" | "webm" | "mov" | "unknown" — parsed container
+  sizeBytes Float? // size of the file that plays, in bytes (Float holds whole byte counts exactly); null when unknown
   createdAt DateTime @default(now())
   expiresAt DateTime
 

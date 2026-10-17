@@ -82,6 +82,8 @@ export interface CachedStreamRecord {
   codec?: "h264" | "hevc" | "av1" | "unknown";
   /** Parsed container format. */
   container?: "mp4" | "mkv" | "webm" | "mov" | "unknown";
+  /** Size of the file that plays, in bytes: the range probe's total when there was one, else the index's footer. Absent when neither was known. */
+  sizeBytes?: number;
 }
 
 function storedQualityFor(key: CachedStreamKey): string {
@@ -114,6 +116,7 @@ export async function getFreshCachedStream(key: CachedStreamKey): Promise<Cached
       compat: row.compat === "safari" ? "safari" : "native",
       ...(row.codec ? { codec: row.codec as CachedStreamRecord["codec"] } : {}),
       ...(row.container ? { container: row.container as CachedStreamRecord["container"] } : {}),
+      ...(row.sizeBytes != null ? { sizeBytes: row.sizeBytes } : {}),
     };
   } catch {
     return null;
@@ -151,6 +154,8 @@ export async function upsertCachedStream(
       expiresAt,
       ...(record.codec ? { codec: record.codec } : {}),
       ...(record.container ? { container: record.container } : {}),
+      // Written even when absent, so a re-resolve never keeps a size the file no longer has.
+      sizeBytes: record.sizeBytes ?? null,
     };
     await db.cachedStream.upsert({
       where: whereFor(key),

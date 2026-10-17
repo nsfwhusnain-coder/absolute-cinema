@@ -39,8 +39,13 @@ function cacheKey(key: {
   return `${key.imdbId}|${key.mediaType}|${key.season ?? 0}|${key.episode ?? 0}|${key.quality}|${key.provider}`;
 }
 
+/** The runtime TMDB reports for the film. Null, as an unknown runtime, unless a test sets one. */
+let movieRuntime: number | null = null;
 mock.module("@/lib/tmdb", () => ({
-  tmdb: { externalIds: async () => ({ id: 1, imdb_id: IMDB }) },
+  tmdb: {
+    externalIds: async () => ({ id: 1, imdb_id: IMDB }),
+    movieDetails: async () => ({ runtime: movieRuntime }),
+  },
 }));
 /** Milliseconds a cached link takes to read, by `cacheKey`. */
 const readDelays = new Map<string, number>();
@@ -86,6 +91,8 @@ describe("Real-Debrid roster — full + fast paths", () => {
   let server: ReturnType<typeof Bun.serve>;
   /** Milliseconds a release takes to resolve, by hash: a slow one stands in for a slow Real-Debrid answer. */
   const resolveDelays = new Map<string, number>();
+  /** The total size a file's range probe reports, by its CDN path. Unlisted files report 2 GiB. */
+  const probeTotals = new Map<string, number>();
 
   beforeAll(async () => {
     server = Bun.serve({
@@ -106,9 +113,9 @@ describe("Real-Debrid roster — full + fast paths", () => {
         }
         if (pathname.startsWith("/cdn/")) {
           if (req.headers.has("range")) {
-            const totalBytes = pathname.includes(SMALL_CLIP_HASH)
-              ? 1_184_727
-              : 2 * 1024 * 1024 * 1024;
+            const totalBytes =
+              probeTotals.get(pathname) ??
+              (pathname.includes(SMALL_CLIP_HASH) ? 1_184_727 : 2 * 1024 * 1024 * 1024);
             return new Response(new Uint8Array([0]), {
               status: 206,
               headers: {
@@ -145,8 +152,10 @@ describe("Real-Debrid roster — full + fast paths", () => {
     cacheStore.clear();
     readDelays.clear();
     resolveDelays.clear();
+    probeTotals.clear();
     clearMediaValidationCache();
     resetSlotMisses();
+    movieRuntime = null;
   });
 
   afterEach(() => {
@@ -436,9 +445,18 @@ describe("Real-Debrid roster — full + fast paths", () => {
     );
   });
 
-  /** A richer same-class 4K release wins even when a leaner peer has more seeders. */
-  it("full path: the richest 4K HEVC release wins the safari-2160 slot", async () => {
+  /**
+   * The 4K HEVC release with the most picture per frame wins, even when a leaner
+   * peer has more seeders. The runtime is what turns the 40 GB and 12 GB sizes
+   * into bitrates to compare.
+   */
+  it("full path: the 4K HEVC release with the most picture per frame wins the safari-2160 slot", async () => {
     const MKV_2160_HASH = "9".repeat(40);
+    movieRuntime = 120;
+    // The files really are these sizes, as their range probes report.
+    probeTotals.set(`/cdn/${NATIVE_2160_HASH}.mp4`, 20 * 1024 ** 3);
+    probeTotals.set(`/cdn/${SAFARI_2160_HASH}.mp4`, 40 * 1024 ** 3);
+    probeTotals.set(`/cdn/${MKV_2160_HASH}.mp4`, 12 * 1024 ** 3);
     mockTorrentioStreams([
       {
         title: "Movie.2024.2160p.WEB-DL.H264-GRP\n👤 40 💾 20 GB ⚙️ X",
@@ -447,7 +465,7 @@ describe("Real-Debrid roster — full + fast paths", () => {
         url: resolveProxyUrl(NATIVE_2160_HASH, 0, "movie.2160p.h264.mp4"),
       },
       {
-        // The 40 GB release is the richer same-class encode and must win even
+        // The 40 GB release is the sharper same-class encode and must win even
         // though the 12 GB alternative has many more seeders.
         title: "Movie.2024.2160p.UHD.BluRay.x265.HDR-GRP\n👤 90 💾 40 GB ⚙️ X",
         infoHash: SAFARI_2160_HASH,
@@ -455,8 +473,8 @@ describe("Real-Debrid roster — full + fast paths", () => {
         url: resolveProxyUrl(SAFARI_2160_HASH, 0, "movie.2160p.hevc.hdr.mp4"),
       },
       {
-        // A valid MKV alternative remains discoverable, but its smaller file
-        // no longer wins purely for sitting near the old startup-size target.
+        // A valid MKV alternative remains discoverable. Its smaller file holds
+        // less picture per frame, so it does not win on its seeders.
         title: "Movie.2024.2160p.UHD.BluRay.x265.HDR.mkv\n👤 500 💾 12 GB ⚙️ X",
         infoHash: MKV_2160_HASH,
         fileIdx: 0,
@@ -1010,6 +1028,148 @@ describe("Real-Debrid roster — full + fast paths", () => {
         await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
         expect(asked()).toBe(4);
       });
+    });
+  });
+
+  it("full path: a fresh resolve carries the probed file size and the release title on its source", async () => {
+    mockTorrentioStreams([
+      {
+        // The footer says 3 GB. The range probe of the file says 2 GiB, and that is the size that counts.
+        title: "Movie.2024.1080p.WEB-DL.H264-SIZED\n👤 40 💾 3 GB ⚙️ X",
+        infoHash: NATIVE_1080_HASHES[0],
+        fileIdx: 0,
+        url: resolveProxyUrl(NATIVE_1080_HASHES[0], 0, "movie.sized.1080p.h264.mp4"),
+      },
+    ]);
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    const source = sources.find((s) => s.id.includes("native-1080"));
+    expect(source?.sizeBytes).toBe(2 * 1024 ** 3);
+    expect(source?.releaseTitle).toBe("Movie.2024.1080p.WEB-DL.H264-SIZED");
+  });
+
+  it("full path: a cached read reports the size its range probe found, over the size it stored", async () => {
+    cacheStore.set(`${IMDB}|movie|0|0|native-1080-1|realdebrid`, {
+      title: "Movie.2024.1080p.WEB-DL.H264-CACHED-SIZE",
+      source: "cached-size",
+      url: `http://127.0.0.1:${server.port}/cdn/cached-size.mp4`,
+      compat: "native",
+      codec: "h264",
+      sizeBytes: 1024 ** 3,
+    });
+    mockTorrentioStreams([]);
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    const cached = sources.find((s) => s.id.includes("native-1080-1"));
+    expect(cached?.sizeBytes).toBe(2 * 1024 ** 3);
+    expect(cached?.releaseTitle).toBe("Movie.2024.1080p.WEB-DL.H264-CACHED-SIZE");
+  });
+
+  it("full path: every debrid source carries its picture reading, and the answer keeps its outlook", async () => {
+    movieRuntime = 120;
+    mockTorrentioStreams(buildStreams());
+    const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie" });
+    expect(sources.length).toBeGreaterThanOrEqual(6);
+    for (const source of sources) {
+      expect(source.releaseTitle).toBeDefined();
+      expect(source.qualityTier).toBeDefined();
+    }
+    // Annotated in place: the answer is still the array the resolver recorded its outlook against.
+    expect(debridOutlook(sources)).not.toBeNull();
+  });
+
+  describe("AllDebrid picks the best cached release, not the first native one", () => {
+    const originalAd = process.env.ALLDEBRID_API_KEY;
+    const NATIVE_HASH = "9a".repeat(20);
+    const HEVC_HASH = "9b".repeat(20);
+    const SAME_H264_HASH = "9c".repeat(20);
+    const SAME_HEVC_HASH = "9d".repeat(20);
+
+    beforeEach(() => {
+      delete process.env.REAL_DEBRID_API_TOKEN;
+      process.env.ALLDEBRID_API_KEY = "test-ad-key";
+    });
+
+    afterEach(() => {
+      if (originalAd === undefined) delete process.env.ALLDEBRID_API_KEY;
+      else process.env.ALLDEBRID_API_KEY = originalAd;
+    });
+
+    /**
+     * Answers Torrentio with `streams` and AllDebrid's upload, file list, unlock
+     * and delete calls, each file named from `fileNames` by its hash. Anything
+     * else goes out over the real loopback fetch.
+     */
+    function mockAllDebrid(streams: unknown[], fileNames: Map<string, string>): void {
+      const hashOfId = new Map<number, string>();
+      const json = (data: unknown) =>
+        new Response(JSON.stringify({ status: "success", data }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        const body = new URLSearchParams(String(init?.body ?? ""));
+        if (url.includes("torrentio") && url.includes("/stream/")) {
+          return new Response(JSON.stringify({ streams }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.includes("api.alldebrid.com/v4/magnet/upload")) {
+          return json({
+            magnets: body.getAll("magnets[]").map((hash, i) => {
+              hashOfId.set(i + 1, hash);
+              return { hash, id: i + 1, ready: true };
+            }),
+          });
+        }
+        if (url.includes("api.alldebrid.com/v4/magnet/files")) {
+          const name = fileNames.get(hashOfId.get(Number(body.get("id[]"))) ?? "") ?? "unknown.mkv";
+          return json({ magnets: [{ files: [{ n: name, s: 4 * 1024 ** 3, l: `https://alldebrid.com/f/${name}` }] }] });
+        }
+        if (url.includes("api.alldebrid.com/v4/link/unlock")) {
+          return json({ link: `https://cdn.example.debrid.it/dl/${(body.get("link") ?? "").split("/f/")[1]}` });
+        }
+        if (url.includes("api.alldebrid.com/v4/magnet/delete")) return json({ message: "ok" });
+        return originalFetch(input as never, init);
+      }) as unknown as typeof fetch;
+    }
+
+    it("takes the sharper HEVC release over the native one listed first", async () => {
+      movieRuntime = 120;
+      mockAllDebrid(
+        [
+          { title: "Movie.2024.1080p.WEB.DL.H264.Native\n👤 90 💾 4 GiB ⚙️ X", infoHash: NATIVE_HASH, fileIdx: 0 },
+          { title: "Movie.2024.1080p.BluRay.x265.Sharp\n👤 5 💾 9 GiB ⚙️ X", infoHash: HEVC_HASH, fileIdx: 0 },
+        ],
+        new Map([
+          [NATIVE_HASH, "Movie.2024.1080p.WEB.DL.H264.Native.mkv"],
+          [HEVC_HASH, "Movie.2024.1080p.BluRay.x265.Sharp.mkv"],
+        ])
+      );
+      const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie", forceRefresh: true });
+      const allDebrid = sources.filter((s) => s.provider === "AllDebrid");
+      expect(allDebrid.map((s) => s.url)).toEqual([
+        "https://cdn.example.debrid.it/dl/Movie.2024.1080p.BluRay.x265.Sharp.mkv",
+      ]);
+      expect(allDebrid[0]?.codec).toBe("hevc");
+    });
+
+    it("on an equal picture takes the codec other than HEVC, whichever is listed first", async () => {
+      movieRuntime = null;
+      mockAllDebrid(
+        [
+          { title: "Movie.2024.1080p.WEB.DL.x265.Tie\n👤 90", infoHash: SAME_HEVC_HASH, fileIdx: 0 },
+          { title: "Movie.2024.1080p.WEB.DL.H264.Tie\n👤 5", infoHash: SAME_H264_HASH, fileIdx: 0 },
+        ],
+        new Map([
+          [SAME_HEVC_HASH, "Movie.2024.1080p.WEB.DL.x265.Tie.mkv"],
+          [SAME_H264_HASH, "Movie.2024.1080p.WEB.DL.H264.Tie.mkv"],
+        ])
+      );
+      const sources = await resolveDebridSources({ tmdbId: 1, mediaType: "movie", forceRefresh: true });
+      const allDebrid = sources.filter((s) => s.provider === "AllDebrid");
+      expect(allDebrid.map((s) => s.url)).toEqual([
+        "https://cdn.example.debrid.it/dl/Movie.2024.1080p.WEB.DL.H264.Tie.mkv",
+      ]);
     });
   });
 });

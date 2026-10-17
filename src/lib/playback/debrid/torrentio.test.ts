@@ -11,8 +11,7 @@ import {
   parseReleaseTitle,
   parseSeeders,
   parseSizeBytes,
-  filterLeanDebridCandidates,
-  isLeanDebridSize,
+  filterStarvedCandidates,
   effectiveReleaseContainer,
   isDirectPlayDebridRelease,
   isMoviePackRelease,
@@ -24,16 +23,10 @@ import {
   torrentioOutcomeOf,
   torrentioTiming,
   type TorrentioFetchInfo,
+  type DebridCandidate,
 } from "./torrentio";
 
-describe("anime-sized releases", () => {
-  const MB = 1024 ** 2;
-  it("keeps a normal 24-minute HEVC 1080p episode", () => {
-    expect(isLeanDebridSize({ resolutionHeight: 1080, sizeBytes: 265 * MB, codec: "hevc" }, "tv")).toBe(false);
-  });
-  it("still rejects implausibly small H.264 1080p episodes", () => {
-    expect(isLeanDebridSize({ resolutionHeight: 1080, sizeBytes: 150 * MB, codec: "h264" }, "tv")).toBe(true);
-  });
+describe("debridHeightBucket", () => {
   it("buckets 800p Blu-ray rips with 720p", () => {
     expect(debridHeightBucket(800)).toBe(720);
     expect(debridHeightBucket(1080)).toBe(1080);
@@ -97,25 +90,39 @@ describe("extractInfoHashFromResolveUrl", () => {
   });
 });
 
-describe("debrid size floor", () => {
-  it("treats an 800 MB 1080p movie as too thin", () => {
-    expect(
-      isLeanDebridSize({ resolutionHeight: 1080, sizeBytes: 800 * 1024 ** 2 }, "movie")
-    ).toBe(true);
-    expect(
-      isLeanDebridSize({ resolutionHeight: 1080, sizeBytes: 5 * 1024 ** 3 }, "movie")
-    ).toBe(false);
+/**
+ * The starved floor. It replaces the old size floor, which judged a file by
+ * its bytes alone and so refused a small HEVC episode that looked fine. Now a
+ * file is refused only when its bitrate is too low for any picture.
+ */
+describe("filterStarvedCandidates", () => {
+  /** A release of the given class and bits per pixel; the bitrate is what the floor reads. */
+  const row = (
+    title: string,
+    compat: "native" | "safari",
+    resolutionHeight: 720 | 1080 | 2160,
+    bpp: number | null
+  ) => ({ title, compat, resolutionHeight, quality: { bpp } }) as unknown as DebridCandidate;
+
+  it("drops a starved file when another release of its class is not starved", () => {
+    const kept = filterStarvedCandidates([
+      row("starved", "native", 1080, 0.002),
+      row("sound", "native", 1080, 0.06),
+    ]);
+    expect(kept.map((c) => c.title)).toEqual(["sound"]);
   });
 
-  it("drops the skinny file when a rich one exists", () => {
-    const kept = filterLeanDebridCandidates(
-      [
-        { resolutionHeight: 1080 as const, sizeBytes: 700 * 1024 ** 2, title: "thin" },
-        { resolutionHeight: 1080 as const, sizeBytes: 8 * 1024 ** 3, title: "rich" },
-      ],
-      "movie"
-    );
-    expect(kept.map((row) => row.title)).toEqual(["rich"]);
+  it("keeps a starved file that is the only release of its class, since it may be the only copy", () => {
+    const kept = filterStarvedCandidates([
+      row("starved", "native", 1080, 0.002),
+      row("sound 4K", "native", 2160, 0.2),
+    ]);
+    expect(kept.map((c) => c.title)).toEqual(["starved", "sound 4K"]);
+  });
+
+  it("drops nothing whose bitrate is unknown", () => {
+    const kept = filterStarvedCandidates([row("unknown", "safari", 1080, null), row("sound", "safari", 1080, 0.06)]);
+    expect(kept.map((c) => c.title)).toEqual(["unknown", "sound"]);
   });
 });
 
@@ -372,7 +379,7 @@ describe("fetchTorrentioCandidates — MKV/HEVC kept (transcoder-link) + per-cla
     });
   }
 
-  it("prefers a larger legitimate 1080p BluRay over a lean WEB-DL while dropping captures/packs", async () => {
+  it("prefers the 1080p BluRay with more picture per frame over a lean WEB-DL, judged against the film's runtime, while dropping captures/packs", async () => {
     globalThis.fetch = (async () =>
       jsonResponse({
         streams: [
@@ -403,6 +410,7 @@ describe("fetchTorrentioCandidates — MKV/HEVC kept (transcoder-link) + per-cla
       imdbId: "tt0000005",
       mediaType: "movie",
       rdToken: FAKE_TOKEN,
+      runtimeMinutes: 120,
     });
 
     expect(candidates.map((candidate) => candidate.infoHash)).toEqual([
@@ -439,10 +447,9 @@ describe("fetchTorrentioCandidates — MKV/HEVC kept (transcoder-link) + per-cla
     expect(candidates.every((candidate) => candidate.sizeBytes == null)).toBe(true);
   });
 
-  it("breaks a size/seeder tie on how the release was mastered", async () => {
+  it("ranks a WEB-DL above a WEBRip of the same size and seeders, because its release quality is higher", async () => {
     // Identical class, container, size and seeders — the only difference is
-    // WEB-DL vs WEBRip. Before release-scorer.ts nothing in candidateRankScore
-    // described mastering at all, so these tied and input order decided it.
+    // WEB-DL vs WEBRip, which the release quality score reads as mastering.
     // The weaker release is listed first here so a pass cannot come from the
     // input order being preserved.
     globalThis.fetch = (async () =>
@@ -508,13 +515,13 @@ describe("fetchTorrentioCandidates — MKV/HEVC kept (transcoder-link) + per-cla
    * real (often the BEST) release rather than routing it through
    * /api/vod/open.
    */
-  it("keeps an MKV/HEVC 4K release — top of its class by seeders, container/codec preserved for the client's transcode gate", async () => {
+  it("keeps an MKV/HEVC 4K release, with its container and codec intact for the client's transcode gate", async () => {
     globalThis.fetch = (async () =>
       jsonResponse({
         streams: [
           {
-            // Top-seeded 4K release by a wide margin, and MKV — must now
-            // survive (previously dropped outright).
+            // Top-seeded 4K release, and MKV — must survive (previously
+            // dropped outright).
             title: "Movie.2024.2160p.UHD.BluRay.x265.HDR.mkv\n👤 900 💾 40 GB ⚙️ X",
             infoHash: "m".repeat(40),
             fileIdx: 0,
@@ -648,6 +655,125 @@ describe("fetchTorrentioCandidates — MKV/HEVC kept (transcoder-link) + per-cla
     expect(candidates.map((candidate) => candidate.infoHash)).toEqual([
       "k".repeat(40),
     ]);
+  });
+});
+
+/**
+ * Picture-quality ranking. A release is ordered by the picture its file holds
+ * for the title's runtime. Its container and seeder count come only after it.
+ */
+describe("fetchTorrentioCandidates: the picture a release really holds", () => {
+  const originalFetch = globalThis.fetch;
+  const FAKE_TOKEN = "test-rd-token";
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function answer(streams: { title: string; infoHash: string }[]): void {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ streams }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof fetch;
+  }
+  const hash = (letter: string) => letter.repeat(40);
+
+  // The Rick and Morty S03E10 set as Torrentio lists it: a 23-minute episode.
+  const RICK_AND_MORTY = [
+    { title: "Rick.and.Morty.S03.1080p.BluRay.x265-RARBG\n👤 900 💾 363 MiB ⚙️ X", infoHash: hash("a") },
+    { title: "Rick.and.Morty.S03.1080p.BluRay.x265-KONTRAST\n👤 25 💾 497 MiB ⚙️ X", infoHash: hash("b") },
+    {
+      title: "Rick and Morty (2013) S03 Extras (1080p x265 HEVC 10bit BluRay TrueHD 5.1) [Prof]\n👤 10 💾 1040 MiB ⚙️ X",
+      infoHash: hash("c"),
+    },
+    {
+      title: "Rick and Morty S03 Season 3 [1080p BluRay REMUX AVC TrueHD 5.1]-CPT\n👤 5 💾 1677 MiB ⚙️ X",
+      infoHash: hash("d"),
+    },
+    {
+      title: "Rick and Morty S03 2160p BluRay AI AV1 TrueHD 5.1 [Enrav1sh]\n👤 60 💾 1365 MiB ⚙️ X",
+      infoHash: hash("e"),
+    },
+  ];
+
+  it("ranks each class by picture: a 2160p AI upscale drops to the bottom of 1080p and never takes a 4K slot", async () => {
+    answer(RICK_AND_MORTY);
+    const found = await fetchTorrentioCandidates({
+      imdbId: "tt0000040",
+      mediaType: "tv",
+      season: 3,
+      episode: 10,
+      rdToken: FAKE_TOKEN,
+      runtimeMinutes: 23,
+    });
+
+    // Native first: the remux, then the upscale, which is tier 1. Then the
+    // HEVC class by picture: the 10-bit Extras, the KONTRAST encode, and the
+    // RARBG encode last, because its group is on the low-quality list.
+    expect(found.map((c) => c.infoHash?.[0])).toEqual(["d", "e", "c", "b", "a"]);
+    expect(found.some((c) => c.resolutionHeight === 2160)).toBe(false);
+
+    const upscale = found.find((c) => c.infoHash === hash("e"));
+    expect(upscale?.resolutionHeight).toBe(1080);
+    expect(upscale?.quality?.effectiveHeight).toBe(1080);
+    expect(upscale?.quality?.tier).toBe(1);
+    expect(upscale?.quality?.flags).toContain("upscaled");
+  });
+
+  it("prefers a much better MKV BluRay over a smaller MP4 WEB-DL of the same class, because the picture decides before the container", async () => {
+    answer([
+      { title: "Movie.2024.1080p.WEB-DL.H264.mp4\n👤 900 💾 3 GiB ⚙️ X", infoHash: hash("m") },
+      { title: "Movie.2024.1080p.BluRay.H264.mkv\n👤 5 💾 8 GiB ⚙️ X", infoHash: hash("k") },
+    ]);
+    const found = await fetchTorrentioCandidates({
+      imdbId: "tt0000041",
+      mediaType: "movie",
+      rdToken: FAKE_TOKEN,
+      runtimeMinutes: 120,
+    });
+    expect(found.map((c) => c.infoHash)).toEqual([hash("k"), hash("m")]);
+  });
+
+  it("breaks an equal picture toward the MP4 over an MKV, before the seeders are read", async () => {
+    // Without a runtime neither file's bitrate is known, so both read as the
+    // same neutral release and only the container and the seeders are left.
+    answer([
+      { title: "Movie.2024.1080p.BluRay.H264.mkv\n👤 900 💾 3 GiB ⚙️ X", infoHash: hash("k") },
+      { title: "Movie.2024.1080p.BluRay.H264.mp4\n👤 5 💾 3 GiB ⚙️ X", infoHash: hash("m") },
+    ]);
+    const found = await fetchTorrentioCandidates({ imdbId: "tt0000042", mediaType: "movie", rdToken: FAKE_TOKEN });
+    expect(found.map((c) => c.infoHash)).toEqual([hash("m"), hash("k")]);
+  });
+
+  it("drops a file too starved to hold a picture when another of its class is sound", async () => {
+    answer([
+      { title: "Rick.and.Morty.S03E10.1080p.WEB.H264.mp4\n👤 900 💾 40 MiB ⚙️ X", infoHash: hash("s") },
+      { title: "Rick.and.Morty.S03E10.1080p.WEB.H264.GRP.mp4\n👤 10 💾 600 MiB ⚙️ X", infoHash: hash("t") },
+    ]);
+    const found = await fetchTorrentioCandidates({
+      imdbId: "tt0000043",
+      mediaType: "tv",
+      season: 3,
+      episode: 10,
+      rdToken: FAKE_TOKEN,
+      runtimeMinutes: 23,
+    });
+    expect(found.map((c) => c.infoHash)).toEqual([hash("t")]);
+  });
+
+  it("keeps a starved file that is the only release, flagged as starved", async () => {
+    answer([{ title: "Rick.and.Morty.S03E10.1080p.WEB.H264.mp4\n👤 900 💾 40 MiB ⚙️ X", infoHash: hash("s") }]);
+    const found = await fetchTorrentioCandidates({
+      imdbId: "tt0000044",
+      mediaType: "tv",
+      season: 3,
+      episode: 10,
+      rdToken: FAKE_TOKEN,
+      runtimeMinutes: 23,
+    });
+    expect(found.map((c) => c.infoHash)).toEqual([hash("s")]);
+    expect(found[0]?.quality?.tier).toBe(1);
+    expect(found[0]?.quality?.flags).toContain("starved");
   });
 });
 

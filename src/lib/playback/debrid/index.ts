@@ -77,15 +77,17 @@ import type { MediaType, PlaybackSource } from "../types";
 import { inferAudioLanguageFromText } from "../source-facts";
 import { tmdb } from "../../tmdb";
 import { resolveKitsuEpisode } from "./anime-mapping";
-import { orderForStreaming } from "./streamability";
+import { annotateDebridQuality } from "./annotate-quality";
+import { compareReleaseQuality } from "../release-quality";
 import { titleRuntimeMinutes } from "../title-runtime";
 import {
+  ANIME_ORIGINAL_LANGUAGE,
   fetchTorrentioCandidates,
   fetchTorrentioKitsuCandidates,
   fetchTorrentioCandidatesNoDebrid,
+  candidateQuality,
   isMoviePackRelease,
   parseReleaseTitle,
-  parseSizeBytes,
   resolveImdbId,
   resolveOriginalLanguage,
   effectiveReleaseContainer,
@@ -351,13 +353,26 @@ async function fetchTorrentioCandidatesForTitle(
   imdbId: string,
   rdToken: string
 ): Promise<DebridCandidate[]> {
-  const [candidates, runtime] = await Promise.all([
-    fetchRankedTorrentioCandidates(req, imdbId, rdToken),
+  const candidates = await fetchRankedTorrentioCandidates(req, imdbId, rdToken);
+  const offered = { imdbId, season: req.season ?? 0, episode: req.episode ?? 0 };
+  return carryOutcome(candidates, withoutRefused(offered, candidates));
+}
+
+/** What a title is made in and how long it runs: the facts its releases are judged by beyond their names. */
+interface TitleProfile {
+  originalLanguage: string | null;
+  runtimeMinutes: number | null;
+  /** A Japanese original, whose releases are judged against the anime release-group tables. */
+  anime: boolean;
+}
+
+/** The title's profile from TMDB, each lookup cached there. Never rejects: a lookup that fails leaves its fact out. */
+async function loadTitleProfile(req: ResolveDebridSourcesRequest): Promise<TitleProfile> {
+  const [originalLanguage, runtimeMinutes] = await Promise.all([
+    resolveOriginalLanguage(req.tmdbId, req.mediaType),
     titleRuntimeMinutes(req),
   ]);
-  const offered = { imdbId, season: req.season ?? 0, episode: req.episode ?? 0 };
-  // Runtime turns file sizes into bitrates, so 4K that cannot stream smoothly ranks last.
-  return carryOutcome(candidates, orderForStreaming(withoutRefused(offered, candidates), runtime));
+  return { originalLanguage, runtimeMinutes, anime: originalLanguage === ANIME_ORIGINAL_LANGUAGE };
 }
 
 /** Leaves out releases already opened as this title and found not to play as it (see refused-releases.ts). */
@@ -382,7 +397,12 @@ async function fetchRankedTorrentioCandidates(
   imdbId: string,
   rdToken: string | null
 ): Promise<DebridCandidate[]> {
-  const facts = titleFactsFor(imdbId) ?? (await loadTitleFacts(imdbId, req.tmdbId, req.mediaType));
+  // The title's names and its profile are read together: the runtime and the
+  // language decide how each release reads, so both are known before parsing.
+  const [facts, profile] = await Promise.all([
+    titleFactsFor(imdbId) ?? loadTitleFacts(imdbId, req.tmdbId, req.mediaType),
+    loadTitleProfile(req),
+  ]);
   // A Kitsu lookup that failed, as opposed to one that found nothing, is kept
   // in mind: the IMDb lookup after it cannot vouch for an empty answer.
   let kitsuFailure: TorrentioOutcome | undefined;
@@ -391,7 +411,12 @@ async function fetchRankedTorrentioCandidates(
     if (kitsu) {
       // The entry's own names, for this lookup and for every check of the title after it.
       const known = (facts && addTitleNames(imdbId, kitsu.titles ?? [])) ?? facts;
-      const entry = { kitsuId: kitsu.kitsuId, episode: kitsu.episode, facts: known };
+      const entry = {
+        kitsuId: kitsu.kitsuId,
+        episode: kitsu.episode,
+        facts: known,
+        runtimeMinutes: profile.runtimeMinutes,
+      };
       const byKitsu = await fetchTorrentioKitsuCandidates(rdToken ? { ...entry, rdToken } : entry);
       if (byKitsu.length) return byKitsu;
       const outcome = torrentioOutcomeOf(byKitsu);
@@ -403,8 +428,10 @@ async function fetchRankedTorrentioCandidates(
     mediaType: req.mediaType,
     season: req.season,
     episode: req.episode,
-    originalLanguage: await resolveOriginalLanguage(req.tmdbId, req.mediaType),
+    originalLanguage: profile.originalLanguage,
     facts,
+    runtimeMinutes: profile.runtimeMinutes,
+    anime: profile.anime,
   };
   const byImdb = rdToken
     ? await fetchTorrentioCandidates({ ...title, rdToken })
@@ -537,7 +564,7 @@ function toPlaybackSource(
   mediaType: MediaType,
   season: number,
   episode: number,
-  record: Pick<CachedStreamRecord, "url" | "compat" | "title" | "codec">,
+  record: Pick<CachedStreamRecord, "url" | "compat" | "title" | "codec" | "sizeBytes">,
   known?: ReleaseCodec
 ): PlaybackSource {
   const height = heightForQuality(quality);
@@ -545,7 +572,6 @@ function toPlaybackSource(
   const safariHint = safariHintFor(record.compat, codec);
   const release = parseReleaseTitle(record.title);
   const inferredLang = inferAudioLanguageFromText(record.title);
-  const sizeBytes = parseSizeBytes(record.title);
   noteCdnLink(provider, record.url);
   return {
     id: buildSourceId(provider, imdbId, mediaType, season, episode, quality),
@@ -560,7 +586,8 @@ function toPlaybackSource(
     audioLanguage: inferredLang === "und" ? "en" : inferredLang,
     titleMatch: debridTitleMatch(mediaType, record.title),
     identityEvidence: "release_title",
-    ...(sizeBytes ? { sizeBytes } : {}),
+    ...(record.sizeBytes ? { sizeBytes: record.sizeBytes } : {}),
+    releaseTitle: record.title,
     codec,
     ...(release.audioCodec !== "unknown"
       ? { audioCodec: release.audioCodec }
@@ -599,7 +626,7 @@ function toRdPlaybackSource(
   mediaType: MediaType,
   season: number,
   episode: number,
-  record: Pick<CachedStreamRecord, "url" | "compat" | "title">,
+  record: Pick<CachedStreamRecord, "url" | "compat" | "title" | "sizeBytes">,
   codec?: ReleaseCodec,
   container?: ReleaseContainer
 ): PlaybackSource {
@@ -609,7 +636,6 @@ function toRdPlaybackSource(
   const effectiveContainer = effectiveReleaseContainer(record.url, container);
   const release = parseReleaseTitle(record.title);
   const inferredLang = inferAudioLanguageFromText(record.title);
-  const sizeBytes = parseSizeBytes(record.title);
   noteCdnLink("realdebrid", record.url);
   return {
     id: buildSourceId("realdebrid", imdbId, mediaType, season, episode, slot),
@@ -624,7 +650,8 @@ function toRdPlaybackSource(
     audioLanguage: inferredLang === "und" ? "en" : inferredLang,
     titleMatch: debridTitleMatch(mediaType, record.title),
     identityEvidence: "release_title",
-    ...(sizeBytes ? { sizeBytes } : {}),
+    ...(record.sizeBytes ? { sizeBytes: record.sizeBytes } : {}),
+    releaseTitle: record.title,
     ...(codec && codec !== "unknown" ? { codec } : {}),
     ...(effectiveContainer && effectiveContainer !== "unknown"
       ? { container: effectiveContainer }
@@ -839,13 +866,18 @@ async function resolveSlotCandidate(
       continue;
     }
 
+    // The file's own size, read from the range probe, is what a bitrate is judged by; the index's footer size is a fallback.
+    const accepted: ResolvedCandidate = {
+      ...resolved,
+      sizeBytes: validation.totalBytes ?? candidate.sizeBytes,
+    };
     const effectiveContainer = effectiveReleaseContainer(
-      resolved.directUrl,
-      resolved.container
+      accepted.directUrl,
+      accepted.container
     );
     if (
-      resolved.compat === "native" &&
-      !isDirectPlayDebridRelease(effectiveContainer, resolved.audioCodec)
+      accepted.compat === "native" &&
+      !isDirectPlayDebridRelease(effectiveContainer, accepted.audioCodec)
     ) {
       continue;
     }
@@ -871,10 +903,10 @@ async function resolveSlotCandidate(
         );
         continue;
       }
-      return { ...resolved, container: containerValidation.container };
+      return { ...accepted, container: containerValidation.container };
     }
 
-    return resolved;
+    return accepted;
   }
   return null;
 }
@@ -1079,7 +1111,7 @@ async function readCachedRdSlots(
           keyBase.mediaType,
           keyBase.season,
           keyBase.episode,
-          { ...hit, url: safeUrl },
+          { ...hit, url: safeUrl, sizeBytes: validation.totalBytes ?? hit.sizeBytes },
           hit.codec,
           hit.container
         )
@@ -1159,6 +1191,7 @@ function buildRdSource(
     compat: resolved.compat,
     ...(resolved.codec ? { codec: resolved.codec } : {}),
     ...(effectiveContainer ? { container: effectiveContainer } : {}),
+    ...(resolved.sizeBytes ? { sizeBytes: resolved.sizeBytes } : {}),
   };
   const source = toRdPlaybackSource(
     slot,
@@ -1592,7 +1625,7 @@ async function resolveFastBestNativeFromCache(req: ResolveDebridSourcesRequest):
           req.mediaType,
           season,
           episode,
-          { ...hit, url: safeUrl },
+          { ...hit, url: safeUrl, sizeBytes: validation.totalBytes ?? hit.sizeBytes },
           hit.codec,
           effectiveContainer
         ),
@@ -1632,6 +1665,12 @@ export async function resolveFastDebridSources(
       part.catch(() => [] as PlaybackSource[]),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), RD_FAST_DEADLINE_MS)),
     ]);
+  // The title's runtime and language are read alongside the tiers, under the same
+  // deadline: a slow TMDB lookup costs the picture reading of these files, never the answer.
+  const profile = Promise.race([
+    loadTitleProfile(req),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), RD_FAST_DEADLINE_MS)),
+  ]);
   const [primary, sibling] = await Promise.all([
     realDebrid ? bounded(resolveFastBestNativeFromCache(req)) : [],
     allDebrid ? bounded(resolveFastAllDebridFromCache(req)) : [],
@@ -1645,7 +1684,10 @@ export async function resolveFastDebridSources(
   // decides between the two.
   if (primary === null) return [];
   if (realDebrid && !primary.length && sibling?.length && (await isRosterInFlight(req))) return [];
-  return [...primary, ...(sibling ?? [])];
+  const sources = [...primary, ...(sibling ?? [])];
+  const title = await profile;
+  annotateDebridQuality(sources, title?.runtimeMinutes ?? null, title?.anime ?? false);
+  return sources;
 }
 
 /** True while Real-Debrid's roster for the title is still being resolved. */
@@ -1685,6 +1727,23 @@ function rankCachedTorboxForHeight(candidates: DebridCandidate[], height: 1080 |
   return candidates
     .filter((c) => c.resolutionHeight === height && Boolean(c.infoHash))
     .sort((a, b) => (a.compat === "native" ? 0 : 1) - (b.compat === "native" ? 0 : 1));
+}
+
+/**
+ * AllDebrid's order for one height: the best picture first (see
+ * `compareReleaseQuality`), and on an equal picture a codec other than HEVC,
+ * since fewer browsers play HEVC. The first cached release in this order is
+ * the one that is taken, so a native release listed first no longer wins over
+ * a sharper one.
+ */
+function rankAllDebridForHeight(candidates: DebridCandidate[], height: 1080 | 2160): DebridCandidate[] {
+  return candidates
+    .filter((c) => c.resolutionHeight === height && Boolean(c.infoHash))
+    .sort(
+      (a, b) =>
+        compareReleaseQuality(candidateQuality(a), candidateQuality(b)) ||
+        (a.codec === "hevc" ? 1 : 0) - (b.codec === "hevc" ? 1 : 0)
+    );
 }
 
 /**
@@ -1758,6 +1817,8 @@ export async function resolveDebridSources(
     const imdbId = await resolveImdbId(req.tmdbId, req.mediaType);
     if (!imdbId) return [];
     await loadTitleFacts(imdbId, req.tmdbId, req.mediaType);
+    // Read while the roster resolves; awaited only once the sources are all in hand.
+    const profile = loadTitleProfile(req);
 
     const season = req.season ?? 0;
     const episode = req.episode ?? 0;
@@ -1884,6 +1945,7 @@ export async function resolveDebridSources(
                 url: resolvedCandidate.directUrl,
                 compat: resolvedCandidate.compat,
                 codec: siblingTierCodec(resolvedCandidate.codec, resolvedCandidate.title),
+                ...(file.fileBytes > 0 ? { sizeBytes: file.fileBytes } : {}),
               };
               sources.push(
                 toPlaybackSource("torbox", quality, imdbId, req.mediaType, season, episode, record)
@@ -1921,6 +1983,8 @@ export async function resolveDebridSources(
       indexFailed,
     });
 
+    const title = await profile;
+    annotateDebridQuality(sources, title.runtimeMinutes, title.anime);
     return sources;
   } catch {
     return [];
@@ -1934,9 +1998,9 @@ export async function resolveDebridSources(
 /**
  * One cached row per height, like TorBox. Candidates come from Torrentio's
  * UN-configured list: the RD-configured list drops `[RD download]` rows, and
- * RD's DMCA'd releases are exactly the ones this tier exists for. Ranked in
- * the same streamability order as the RD roster, native before Safari-only
- * at each height. Never throws.
+ * RD's DMCA'd releases are exactly the ones this tier exists for. Ranked by
+ * picture quality, as the RD roster is (see `rankAllDebridForHeight`). Never
+ * throws.
  */
 /** One AllDebrid resolve of a title, watchable while it runs. */
 interface AllDebridRun {
@@ -2001,13 +2065,13 @@ async function resolveAllDebridTier(
   const sources = tier?.progress ?? [];
   sources.push(...hits);
 
-  const [raw, runtime] = await Promise.all([fetchRankedTorrentioCandidates(req, keyBase.imdbId, null), titleRuntimeMinutes(req)]);
+  const raw = await fetchRankedTorrentioCandidates(req, keyBase.imdbId, null);
   if (isTorrentioIndexFailure(torrentioOutcomeOf(raw))) {
     // Nothing to try. The run is marked, so it is neither settled nor reused.
     if (tier) tier.indexFailed = true;
     return sources;
   }
-  const candidates = orderForStreaming(withoutRefused(keyBase, raw), runtime);
+  const candidates = withoutRefused(keyBase, raw);
   const episodeTarget =
     req.mediaType === "tv" && req.season && req.episode
       ? { season: req.season, episode: req.episode }
@@ -2017,7 +2081,7 @@ async function resolveAllDebridTier(
   for (const quality of missing) {
     // Qualities are tried best first: past 4K, none is still to come.
     if (tier && quality !== "2160p") tier.fourKOver = true;
-    const ranked = rankCachedTorboxForHeight(candidates, heightForQuality(quality));
+    const ranked = rankAllDebridForHeight(candidates, heightForQuality(quality));
     const resolved = await resolveAllDebridFirstCached(
       ranked.map((c) => ({ infoHash: c.infoHash!, releaseTitle: c.title, fileName: c.fileName })),
       deadline,
@@ -2037,6 +2101,7 @@ async function resolveAllDebridTier(
       url: safeUrl,
       compat,
       codec: siblingTierCodec(codec, candidate.title),
+      ...(resolved.file.fileBytes > 0 ? { sizeBytes: resolved.file.fileBytes } : {}),
     };
     sources.push(
       toPlaybackSource("alldebrid", quality, keyBase.imdbId, req.mediaType, keyBase.season, keyBase.episode, record)

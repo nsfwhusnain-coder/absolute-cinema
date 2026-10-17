@@ -36,7 +36,7 @@ const ALLDEBRID_AGENT = "absolutecinema";
 const ALLDEBRID_TIMEOUT_MS = 12_000;
 export const ALLDEBRID_TOTAL_BUDGET_MS = 20_000;
 /** Candidates uploaded per quality in one batch call — the batch is the cache check. */
-export const ALLDEBRID_BATCH_SIZE = 8;
+export const ALLDEBRID_BATCH_SIZE = 16;
 
 const PLAYABLE_EXT_PATTERN = /\.(mp4|mkv|webm|m4v)$/i;
 const EPISODE_TAG_PATTERN = /s(\d{1,2})[ ._-]?e(\d{1,3})/i;

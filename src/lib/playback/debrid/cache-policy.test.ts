@@ -5,8 +5,12 @@ import { parseDebridPlaybackSourceId } from "./debrid-source-id";
 describe("debrid cache policy identity", () => {
   it("versions Real-Debrid roster slots after a ranking-policy change", () => {
     expect(storedQualityForCache("realdebrid", "native-1080-1")).toBe(
-      "rich-v5:native-1080-1"
+      "rich-v6:native-1080-1"
     );
+  });
+
+  it("versions AllDebrid rows after its pick changed to the best picture, so old first-native rows cannot survive", () => {
+    expect(storedQualityForCache("alldebrid", "1080p")).toBe("ad-v2:1080p");
   });
 
   it("does not invalidate the independent TorBox cache", () => {

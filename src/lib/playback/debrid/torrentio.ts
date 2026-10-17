@@ -19,14 +19,14 @@
  * typically has 150-224 fully cached streams, but they skew heavily toward
  * 4K HEVC/HDR remuxes (often MKV): a flat "top 8 by resolution" truncation
  * (the old behavior) can miss every browser-safe H.264 release entirely, even
- * though 14-37 usually exist per title. So candidates are now: parsed,
- * bucketed by compatibility and resolution, ranked within each class by a
- * media-type-aware, monotonically increasing size richness plus bounded
- * seeders and container confidence, then capped PER CLASS (`PER_CLASS_CAP`)
- * so the returned pool always has representation across classes instead of
- * being dominated by whichever class happens to have the most raw entries.
- * Native 720p is kept only as an availability fallback when no higher native
- * release survives.
+ * though 14-37 usually exist per title. So candidates are now: parsed, judged
+ * for picture quality by `assessRelease` (release-quality.ts) with the title's
+ * runtime, bucketed by compatibility and effective resolution (an upscaled or
+ * starved 4K is a 1080p candidate), ranked within each class by that quality,
+ * then capped PER CLASS (`PER_CLASS_CAP`) so the returned pool always has
+ * representation across classes instead of being dominated by whichever class
+ * happens to have the most raw entries. Native 720p is kept only as an
+ * availability fallback when no higher native release survives.
  *
  * CONTAINER — MKV/WebM candidates are kept in the resolved inventory. No
  * browser opens them directly (see `isBrowserPlayableContainer`), but they are
@@ -43,7 +43,8 @@ import type { TitleFacts } from "../release-identity";
 import { identify } from "./title-gate";
 import type { MediaType } from "../types";
 import { isMoviePackRelease } from "../source-facts";
-import { isCaptureRelease, releaseQualityScore } from "../release-scorer";
+import { isCaptureRelease } from "../release-scorer";
+import { assessRelease, compareReleaseQuality, type ReleaseQuality } from "../release-quality";
 import { isUnwantedRelease, parseReleaseAudio, releaseAudioKind } from "../release-language";
 import { tvQueryIndex } from "../tv-index";
 
@@ -129,6 +130,12 @@ export interface DebridCandidate extends ParsedRelease {
   severalAudio?: boolean;
   /** Nothing in its name says outright that it is the title: kept, behind the releases that do say so. */
   unverified?: boolean;
+  /**
+   * The picture this release really holds, judged from its name, size and the
+   * title's runtime (see release-quality.ts). Its `effectiveHeight` is also the
+   * `resolutionHeight` above, so an upscale competes at the height it shows.
+   */
+  quality?: ReleaseQuality;
 }
 
 interface TorrentioStreamRaw {
@@ -375,41 +382,25 @@ export function isStereoscopicRelease(text: string): boolean {
 }
 
 /**
- * Known-size floors so a 800 MB "1080p" movie cannot occupy an HD slot. TV
- * floors are sized for a 22-24 minute episode (sitcoms, anime), and HEVC/AV1
- * need about half the bytes of H.264 for the same picture.
+ * Bits per pixel below which a file holds no picture worth a resolve attempt,
+ * whatever its name claims. release-quality.ts flags a file below its own
+ * `BPP_STARVED`; this lower floor is the point where the picture is blocks.
  */
-const MIN_DEBRID_SIZE_BYTES: Record<MediaType, Record<720 | 1080 | 2160, number>> = {
-  movie: {
-    720: Math.round(0.7 * 1024 ** 3),
-    1080: 2 * 1024 ** 3,
-    2160: 6 * 1024 ** 3,
-  },
-  tv: {
-    720: Math.round(0.15 * 1024 ** 3),
-    1080: Math.round(0.35 * 1024 ** 3),
-    2160: Math.round(1.8 * 1024 ** 3),
-  },
-};
-const EFFICIENT_CODEC_SIZE_FACTOR = 0.5;
+const STARVED_FLOOR_BPP = 0.02;
 
-export function isLeanDebridSize(
-  candidate: { resolutionHeight: 720 | 1080 | 2160; sizeBytes?: number; codec?: ReleaseCodec },
-  mediaType: MediaType
-): boolean {
-  if (candidate.sizeBytes == null || candidate.sizeBytes <= 0) return false;
-  const floor = MIN_DEBRID_SIZE_BYTES[mediaType][candidate.resolutionHeight];
-  const efficient = candidate.codec === "hevc" || candidate.codec === "av1";
-  return candidate.sizeBytes < (efficient ? floor * EFFICIENT_CODEC_SIZE_FACTOR : floor);
-}
-
-export function filterLeanDebridCandidates<T extends {
-  resolutionHeight: 720 | 1080 | 2160;
-  sizeBytes?: number;
-}>(candidates: T[], mediaType: MediaType): T[] {
-  if (candidates.length <= 1) return candidates;
-  const kept = candidates.filter((candidate) => !isLeanDebridSize(candidate, mediaType));
-  return kept.length ? kept : candidates;
+/**
+ * Drops starved files whenever another release of their class is not starved.
+ * Without a runtime or a size there is no bitrate, so nothing is dropped. A
+ * class whose releases are all starved keeps them, because one of them may be
+ * the only copy of the title.
+ */
+export function filterStarvedCandidates(candidates: DebridCandidate[]): DebridCandidate[] {
+  const isStarved = (candidate: DebridCandidate) =>
+    candidate.quality?.bpp != null && candidate.quality.bpp < STARVED_FLOOR_BPP;
+  const soundClasses = new Set(
+    candidates.filter((candidate) => !isStarved(candidate)).map(candidateClass)
+  );
+  return candidates.filter((candidate) => !isStarved(candidate) || !soundClasses.has(candidateClass(candidate)));
 }
 
 /**
@@ -500,84 +491,70 @@ function compatRank(c: DebridCandidate): number {
   return c.compat === "native" ? 0 : 1;
 }
 
-/** Ranking bonus for a confidently natively-playable container over an "unknown" one — real signal used within a class; MKV/WebM simply score 0 here (no bonus, no exclusion — they still compete on resolution + seeders). */
-const MP4_CONTAINER_BONUS = 50;
-const MOV_CONTAINER_BONUS = 30;
-/** Seeders reward, capped so one outlier torrent can't entirely dominate the in-class ranking. */
-const SEEDERS_SCORE_CAP = 50;
-const SEEDERS_WEIGHT = 2;
-
-const SIZE_RICHNESS_MAX_SCORE = 400;
-const SIZE_RICHNESS_HALF_SATURATION_BYTES: Record<
-  MediaType,
-  Record<720 | 1080 | 2160, number>
-> = {
-  movie: {
-    720: Math.round(1.2 * 1024 ** 3),
-    1080: 3 * 1024 ** 3,
-    2160: 12 * 1024 ** 3,
-  },
-  tv: {
-    720: Math.round(0.5 * 1024 ** 3),
-    1080: Math.round(1.25 * 1024 ** 3),
-    2160: 4 * 1024 ** 3,
-  },
-};
-
 /**
- * Treat selected-file size as a bounded bitrate-richness proxy. Duration is
- * constant for candidates of one title/episode, so a larger file within the
- * same resolution/compatibility class is monotonically preferred. The
- * half-saturation point scales movies and episodes without making it a target:
- * scores keep increasing above it and approach, but never reach, the cap.
- * Missing size contributes nothing, preserving the neutral legacy behavior.
+ * Container order, used only as a tie-break between releases of equal picture
+ * quality. MP4 and MOV play as they are. An untagged file usually does too.
+ * An MKV or WebM needs a stream copy first, so it comes last.
  */
-function sizeRichnessScore(c: DebridCandidate, mediaType: MediaType): number {
-  if (c.sizeBytes == null) return 0;
-  const halfSaturation =
-    SIZE_RICHNESS_HALF_SATURATION_BYTES[mediaType][c.resolutionHeight];
-  return Math.round(
-    SIZE_RICHNESS_MAX_SCORE *
-      (c.sizeBytes / (c.sizeBytes + halfSaturation))
-  );
+function containerRank(c: DebridCandidate): number {
+  if (c.container === "mp4" || c.container === "mov") return 0;
+  return c.container === "mkv" || c.container === "webm" ? 2 : 1;
 }
 
 /**
- * Composite size richness + bounded popularity + container confidence + how
- * the release was mastered.
- *
- * That last term is what stops a cam rip winning a class on seeders alone —
- * and a freshly-leaked cam has excellent seeders. See release-scorer.ts for
- * why it is bounded well below size richness rather than allowed to dominate.
+ * The quality a candidate is ordered by. Every parsed candidate has one; a
+ * candidate without one is neutral: its own height, the middle tier, and the
+ * score an unknown-bitrate WEB or Blu-ray release earns (half the detail points
+ * plus its source points).
  */
-function candidateRankScore(c: DebridCandidate, mediaType: MediaType): number {
-  const seederScore = Math.min(c.seeders, SEEDERS_SCORE_CAP) * SEEDERS_WEIGHT;
-  const containerScore =
-    c.container === "mp4" ? MP4_CONTAINER_BONUS : c.container === "mov" ? MOV_CONTAINER_BONUS : 0;
+export function candidateQuality(c: DebridCandidate): ReleaseQuality {
   return (
-    c.resolutionHeight +
-    sizeRichnessScore(c, mediaType) +
-    seederScore +
-    containerScore +
-    releaseQualityScore(c)
+    c.quality ?? {
+      effectiveHeight: c.resolutionHeight,
+      tier: 3,
+      score: 260,
+      flags: [],
+      videoMbps: null,
+      bpp: null,
+      reasons: [],
+    }
   );
 }
 
-/** Native-compatible releases first, then resolution; in-class ties use bounded richness, health, container confidence, and mastering quality. */
-function sortCandidates(
-  list: DebridCandidate[],
-  mediaType: MediaType
-): DebridCandidate[] {
-  return [...list].sort((a, b) => {
-    const compatDiff = compatRank(a) - compatRank(b);
-    if (compatDiff !== 0) return compatDiff;
-    if (a.resolutionHeight !== b.resolutionHeight) return b.resolutionHeight - a.resolutionHeight;
-    const verifiedDiff = (a.unverified ? 1 : 0) - (b.unverified ? 1 : 0);
-    if (verifiedDiff !== 0) return verifiedDiff;
-    const severalDiff = (a.severalAudio ? 1 : 0) - (b.severalAudio ? 1 : 0);
-    if (severalDiff !== 0) return severalDiff;
-    return candidateRankScore(b, mediaType) - candidateRankScore(a, mediaType);
-  });
+/**
+ * Order inside one class (same compatibility and height). A release that names
+ * the title comes first, then one in the original language alone, then the
+ * better picture (see `compareReleaseQuality`). After that come MP4/MOV, then
+ * the seeders, then the bigger file.
+ */
+function compareWithinClass(a: DebridCandidate, b: DebridCandidate): number {
+  // A release that names the title comes before one kept only because
+  // nothing in its name says it is another: the second is a guess, and a
+  // wrong guess plays another film under this one's poster.
+  const verifiedDiff = (a.unverified ? 1 : 0) - (b.unverified ? 1 : 0);
+  if (verifiedDiff !== 0) return verifiedDiff;
+  // A release in the original language alone comes before one that only
+  // contains it: played directly, a multi-language file starts on
+  // whichever track its maker put first, which is usually the dub.
+  const severalDiff = (a.severalAudio ? 1 : 0) - (b.severalAudio ? 1 : 0);
+  if (severalDiff !== 0) return severalDiff;
+  const qualityDiff = compareReleaseQuality(candidateQuality(a), candidateQuality(b));
+  if (qualityDiff !== 0) return qualityDiff;
+  const containerDiff = containerRank(a) - containerRank(b);
+  if (containerDiff !== 0) return containerDiff;
+  const seederDiff = b.seeders - a.seeders;
+  if (seederDiff !== 0) return seederDiff;
+  return (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0);
+}
+
+/** Native-compatible releases first, then resolution, then `compareWithinClass`. */
+function sortCandidates(list: DebridCandidate[]): DebridCandidate[] {
+  return [...list].sort(
+    (a, b) =>
+      compatRank(a) - compatRank(b) ||
+      b.resolutionHeight - a.resolutionHeight ||
+      compareWithinClass(a, b)
+  );
 }
 
 type CandidateClass =
@@ -597,9 +574,8 @@ type CandidateClass =
  */
 const PER_CLASS_CAP: Record<CandidateClass, number> = {
   "native-2160": 5,
-  // Deep enough that lighter, smoothly streamable 4K encodes survive the
-  // size-rich ranking; the bitrate ordering (streamability.ts) then puts them
-  // first, and placeholders among them no longer exhaust the pool.
+  // Deep enough that the 4K encodes with the most picture per frame survive
+  // the quality ranking, and placeholders among them no longer exhaust the pool.
   "safari-2160": 20,
   "native-1080": 20,
   "safari-1080": 8,
@@ -618,16 +594,15 @@ function candidateClass(c: DebridCandidate): CandidateClass {
 
 /**
  * Ranks the full eligible (1080p+, MKV/WebM included — see module header)
- * pool by size richness, seeders, container, and mastering quality, then keeps
- * only the top N per class so the returned roster always has representation
- * across native/safari × 1080/2160 instead of being swamped by whichever class
- * Torrentio happens to return the most of (usually 4K HEVC/HDR remuxes, often
- * MKV).
+ * pool by picture quality, then keeps only the top N per class so the returned
+ * roster always has representation across native/safari × 1080/2160 instead
+ * of being swamped by whichever class Torrentio happens to return the most of
+ * (usually 4K HEVC/HDR remuxes, often MKV).
+ *
+ * Container no longer gates a release. An MKV plays after a stream copy, so the
+ * container only decides between releases of equal picture quality.
  */
-function selectTopPerClass(
-  candidates: DebridCandidate[],
-  mediaType: MediaType
-): DebridCandidate[] {
+function selectTopPerClass(candidates: DebridCandidate[]): DebridCandidate[] {
   const buckets = new Map<CandidateClass, DebridCandidate[]>();
   for (const c of candidates) {
     const key = candidateClass(c);
@@ -638,43 +613,13 @@ function selectTopPerClass(
   const out: DebridCandidate[] = [];
   for (const key of Object.keys(PER_CLASS_CAP) as CandidateClass[]) {
     const cap = PER_CLASS_CAP[key];
-    const ranked = (buckets.get(key) ?? []).sort((a, b) => {
-      /**
-       * Prefer the release that needs no server work.
-       *
-       * This began as a hard playability gate, back when an MKV slot was a
-       * dead row: container was only a soft +50 in `candidateRankScore`, so a
-       * better seeder count routinely handed the slot to something no browser
-       * could open. Remux changed what it means — an MKV now plays, it just
-       * costs a stream copy and a couple of seconds of startup first.
-       *
-       * So it stays ahead of the score, but as a cost preference rather than a
-       * survival gate, and it matches `compareDelivery` on the client: at equal
-       * class, direct beats remux. Same ordering, different reason.
-       */
-      // A release that names the title comes before one kept only because
-      // nothing in its name says it is another: the second is a guess, and a
-      // wrong guess plays another film under this one's poster.
-      const aUnverified = a.unverified ? 1 : 0;
-      const bUnverified = b.unverified ? 1 : 0;
-      if (aUnverified !== bUnverified) return aUnverified - bUnverified;
-      // A release in the original language alone comes before one that only
-      // contains it: played directly, a multi-language file starts on
-      // whichever track its maker put first, which is usually the dub.
-      const aSeveral = a.severalAudio ? 1 : 0;
-      const bSeveral = b.severalAudio ? 1 : 0;
-      if (aSeveral !== bSeveral) return aSeveral - bSeveral;
-      const aPlayable = isBrowserPlayableContainer(a.container) ? 1 : 0;
-      const bPlayable = isBrowserPlayableContainer(b.container) ? 1 : 0;
-      if (aPlayable !== bPlayable) return bPlayable - aPlayable;
-      return candidateRankScore(b, mediaType) - candidateRankScore(a, mediaType);
-    });
+    const ranked = (buckets.get(key) ?? []).sort(compareWithinClass);
     out.push(...ranked.slice(0, cap));
   }
-  return sortCandidates(out, mediaType);
+  return sortCandidates(out);
 }
 
-const ANIME_ORIGINAL_LANGUAGE = "ja";
+export const ANIME_ORIGINAL_LANGUAGE = "ja";
 /** Shares the cache entry content-class.ts fills for the same title. */
 const ORIGINAL_LANGUAGE_TTL_MS = 6 * 60 * 60 * 1000;
 
@@ -713,6 +658,10 @@ export interface FetchTorrentioParams {
   originalLanguage?: string | null;
   /** What the title is known as: releases of another title are dropped. Not checked when absent. */
   facts?: TitleFacts | null;
+  /** How long the title runs, in minutes: a file's bitrate is judged from it. Not judged when absent. */
+  runtimeMinutes?: number | null;
+  /** An anime title: its releases are judged against the anime release-group tables. */
+  anime?: boolean;
 }
 
 export interface FetchTorrentioNoDebridParams {
@@ -722,6 +671,10 @@ export interface FetchTorrentioNoDebridParams {
   episode?: number;
   originalLanguage?: string | null;
   facts?: TitleFacts | null;
+  /** How long the title runs, in minutes: a file's bitrate is judged from it. Not judged when absent. */
+  runtimeMinutes?: number | null;
+  /** An anime title: its releases are judged against the anime release-group tables. */
+  anime?: boolean;
 }
 
 /** Which title a response is being read for. */
@@ -888,20 +841,23 @@ function candidatesFrom(
 }
 
 /**
- * Shared parse + filter (1080p+ only) + per-class rank/bound (see
- * `selectTopPerClass`) of a raw Torrentio response. Identical for both
- * endpoints. MKV/WebM candidates are KEPT (see module header) — their
- * `container`/`codec` are carried through unchanged so downstream (RD slot
- * selection, TorBox's own candidate reuse, and ultimately the client's
- * `isSourcePlayableHere`) can present them honestly without auto-selecting
- * an incompatible release.
+ * Shared parse + filter (1080p+ only) + quality judgment + per-class rank/bound
+ * (see `selectTopPerClass`) of a raw Torrentio response. Identical for both
+ * endpoints. Each kept release is judged by `assessRelease` against the title's
+ * runtime, so the bitrate it is ordered by is the one the file really has.
+ * MKV/WebM candidates are KEPT (see module header) — their `container`/`codec`
+ * are carried through unchanged so downstream (RD slot selection, TorBox's own
+ * candidate reuse, and ultimately the client's `isSourcePlayableHere`) can
+ * present them honestly without auto-selecting an incompatible release.
  */
 function parseTorrentioStreams(
   data: TorrentioResponseRaw,
   configuredDebrid: boolean,
   mediaType: MediaType,
   originalLanguage?: string | null,
-  wanted?: WantedTitle
+  wanted?: WantedTitle,
+  runtimeMinutes: number | null = null,
+  anime = false
 ): DebridCandidate[] {
   const streams = Array.isArray(data.streams) ? data.streams : [];
   const candidates: DebridCandidate[] = [];
@@ -947,9 +903,19 @@ function parseTorrentioStreams(
       otherTitles.push(s.behaviorHints?.filename ? `${rawTitle ?? ""}  ||  ${s.behaviorHints.filename}` : (rawTitle ?? ""));
       continue;
     }
+    const quality = assessRelease({
+      releaseTitle: rawTitle ?? "",
+      fileName: s.behaviorHints?.filename,
+      height,
+      codec: parsed.codec,
+      sizeBytes,
+      runtimeMinutes,
+      anime,
+    });
     candidates.push({
       ...parsed,
-      resolutionHeight: height,
+      // An upscaled or starved 4K competes at the height its picture shows, so it never takes a 4K slot.
+      resolutionHeight: quality.effectiveHeight,
       title: rawTitle || "Unknown release",
       infoHash: s.infoHash ?? extractInfoHashFromResolveUrl(s.url),
       fileIdx: s.fileIdx,
@@ -961,6 +927,7 @@ function parseTorrentioStreams(
       ...(releaseAudioKind(parseReleaseAudio(text), originalLanguage) === "multi" ? { severalAudio: true } : {}),
       // With no names to check against, nothing is verified and nothing is ranked down for it.
       ...(identity === "unverified" && wanted?.facts ? { unverified: true } : {}),
+      quality,
     });
   }
   if (otherTitles.length) {
@@ -975,10 +942,7 @@ function parseTorrentioStreams(
     console.info(JSON.stringify({ event: "debrid_other_title_rejected", ...rejection }));
     torrentioEvents.onOtherTitleRejected?.(rejection);
   }
-  return selectTopPerClass(
-    filterLeanDebridCandidates(inOriginalLanguage(candidates), mediaType),
-    mediaType
-  ).slice(0, MAX_CANDIDATES);
+  return selectTopPerClass(filterStarvedCandidates(inOriginalLanguage(candidates))).slice(0, MAX_CANDIDATES);
 }
 
 /**
@@ -1023,7 +987,15 @@ export async function fetchTorrentioCandidates(
     const url = `${TORRENTIO_BASE}/${configSegment}/${kindPath}`;
     const answer = await askIndex(url, "configured");
     return candidatesFrom(answer, (data) =>
-      parseTorrentioStreams(data, true, params.mediaType, params.originalLanguage, wantedFrom(params))
+      parseTorrentioStreams(
+        data,
+        true,
+        params.mediaType,
+        params.originalLanguage,
+        wantedFrom(params),
+        params.runtimeMinutes ?? null,
+        params.anime === true
+      )
     );
   } catch {
     // The answer could not be read into candidates: a failed index, not one with no releases.
@@ -1042,6 +1014,7 @@ export async function fetchTorrentioKitsuCandidates(params: {
   episode: number;
   rdToken?: string;
   facts?: TitleFacts | null;
+  runtimeMinutes?: number | null;
 }): Promise<DebridCandidate[]> {
   try {
     const configSegment = params.rdToken ? `/realdebrid=${encodeURIComponent(params.rdToken)}` : "";
@@ -1051,7 +1024,15 @@ export async function fetchTorrentioKitsuCandidates(params: {
     // are numbered through the whole run, so only the show is checked.
     const wanted = params.facts === undefined ? undefined : { facts: params.facts };
     return candidatesFrom(answer, (data) =>
-      parseTorrentioStreams(data, Boolean(params.rdToken), "tv", ANIME_ORIGINAL_LANGUAGE, wanted)
+      parseTorrentioStreams(
+        data,
+        Boolean(params.rdToken),
+        "tv",
+        ANIME_ORIGINAL_LANGUAGE,
+        wanted,
+        params.runtimeMinutes ?? null,
+        true
+      )
     );
   } catch {
     // The answer could not be read into candidates: a failed index, not one with no releases.
@@ -1077,7 +1058,15 @@ export async function fetchTorrentioCandidatesNoDebrid(
     const url = `${TORRENTIO_BASE}/${buildKindPath(params)}`;
     const answer = await askIndex(url, "unconfigured");
     return candidatesFrom(answer, (data) =>
-      parseTorrentioStreams(data, false, params.mediaType, params.originalLanguage, wantedFrom(params))
+      parseTorrentioStreams(
+        data,
+        false,
+        params.mediaType,
+        params.originalLanguage,
+        wantedFrom(params),
+        params.runtimeMinutes ?? null,
+        params.anime === true
+      )
     );
   } catch {
     // The answer could not be read into candidates: a failed index, not one with no releases.
