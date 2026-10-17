@@ -35,9 +35,14 @@ describe("sessionId", () => {
 
 describe("videoBitstreamArgs", () => {
   it("rebuilds HEVC and H.264 parameter sets from the stream, and leaves other video alone", () => {
-    expect(videoBitstreamArgs("V_MPEGH/ISO/HEVC")).toEqual(["-bsf:v", "hevc_mp4toannexb,extract_extradata"]);
-    expect(videoBitstreamArgs("V_MPEG4/ISO/AVC")).toEqual(["-bsf:v", "h264_mp4toannexb,extract_extradata"]);
-    expect(videoBitstreamArgs("V_AV1")).toEqual([]);
-    expect(videoBitstreamArgs(null)).toEqual([]);
+    expect(videoBitstreamArgs("V_MPEGH/ISO/HEVC", true)).toEqual(["-bsf:v", "hevc_mp4toannexb,extract_extradata"]);
+    expect(videoBitstreamArgs("V_MPEG4/ISO/AVC", true)).toEqual(["-bsf:v", "h264_mp4toannexb,extract_extradata"]);
+    expect(videoBitstreamArgs("V_AV1", true)).toEqual([]);
+    expect(videoBitstreamArgs(null, true)).toEqual([]);
+  });
+
+  it("leaves a stream whose header has its parameter sets exactly as it is", () => {
+    expect(videoBitstreamArgs("V_MPEGH/ISO/HEVC", false)).toEqual([]);
+    expect(videoBitstreamArgs("V_MPEG4/ISO/AVC", false)).toEqual([]);
   });
 });

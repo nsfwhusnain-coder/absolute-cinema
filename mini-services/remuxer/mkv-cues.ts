@@ -79,6 +79,46 @@ const UNDECODABLE_AVC_PROFILES = new Set([110, 122, 244]);
 const UNDECODABLE_VIDEO_CODECS = /^V_(MS\/VFW\/FOURCC|MPEG2|MPEG4\/ISO\/(ASP|SP|AP)|MPEG4\/MS|REAL\/)/;
 
 /** Whether a browser cannot decode the video track, from its codec id and (for AVC) profile. */
+/**
+ * Whether a video track's header lacks the parameter sets a decoder is set up
+ * from (HEVC VPS/SPS/PPS in its hvcC, H.264 SPS/PPS in its avcC): some
+ * releases keep them only inside the stream (see videoBitstreamArgs in
+ * vod.ts). False for other codecs, and for a header that carries them.
+ */
+export function parameterSetsMissing(codecId: string, codecPrivate: Uint8Array | null): boolean {
+  if (codecId === "V_MPEGH/ISO/HEVC") {
+    // hvcC: 22 bytes of configuration, then numOfArrays and the arrays of NAL units.
+    if (!codecPrivate || codecPrivate.length < 23) return true;
+    const found = new Set<number>();
+    let at = 23;
+    for (let array = 0; array < codecPrivate[22]! && at + 3 <= codecPrivate.length; array++) {
+      const type = codecPrivate[at]! & 0x3f;
+      const count = (codecPrivate[at + 1]! << 8) | codecPrivate[at + 2]!;
+      at += 3;
+      for (let n = 0; n < count && at + 2 <= codecPrivate.length; n++) {
+        const length = (codecPrivate[at]! << 8) | codecPrivate[at + 1]!;
+        if (length > 0) found.add(type);
+        at += 2 + length;
+      }
+    }
+    // SPS (33) and PPS (34): without them nothing can be decoded.
+    return !found.has(33) || !found.has(34);
+  }
+  if (codecId === "V_MPEG4/ISO/AVC") {
+    // avcC: 5 bytes, then the SPS count (low 5 bits), the SPSs, the PPS count and the PPSs.
+    if (!codecPrivate || codecPrivate.length < 7) return true;
+    const spsCount = codecPrivate[5]! & 0x1f;
+    if (spsCount === 0) return true;
+    let at = 6;
+    for (let n = 0; n < spsCount; n++) {
+      if (at + 2 > codecPrivate.length) return true;
+      at += 2 + ((codecPrivate[at]! << 8) | codecPrivate[at + 1]!);
+    }
+    return at >= codecPrivate.length || codecPrivate[at] === 0;
+  }
+  return false;
+}
+
 export function isVideoUndecodable(codecId: string, avcProfile: number | null): boolean {
   if (codecId === "V_MPEG4/ISO/AVC") return avcProfile !== null && UNDECODABLE_AVC_PROFILES.has(avcProfile);
   return UNDECODABLE_VIDEO_CODECS.test(codecId);
@@ -213,6 +253,8 @@ export interface SegmentLayout {
   subtitleTracks: MkvSubtitleTrack[];
   /** The video is 10-bit/4:2:2/4:4:4 H.264, which no browser decodes. */
   videoUndecodable: boolean;
+  /** The video track's header carries no parameter sets: they are only inside the stream. */
+  videoParameterSetsMissing: boolean;
   /** Absolute byte offset of the Cues element, when SeekHead lists it. */
   cuesOffset: number | null;
 }
@@ -239,6 +281,7 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
     audioTracks: [],
     subtitleTracks: [],
     videoUndecodable: false,
+    videoParameterSetsMissing: false,
     cuesOffset: null,
   };
   let rawDuration: number | null = null;
@@ -279,6 +322,7 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
         let channels: number | null = null;
         let transfer: number | null = null;
         let avcProfile: number | null = null;
+        let codecPrivate: Uint8Array | null = null;
         let dolbyVision: DolbyVisionInfo | null = null;
         for (const field of children(head, entry.dataStart, entry.dataStart + entry.size)) {
           if (field.id === TRACK_NUMBER_ID) number = readUint(head, field);
@@ -289,7 +333,10 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
           else if (field.id === NAME_ID) name = readString(head, field);
           else if (field.id === FLAG_DEFAULT_ID) isDefault = readUint(head, field) === 1;
           else if (field.id === FLAG_FORCED_ID) isForced = readUint(head, field) === 1;
-          else if (field.id === CODEC_PRIVATE_ID && field.size > 1) avcProfile = head[field.dataStart + 1] ?? null;
+          else if (field.id === CODEC_PRIVATE_ID) {
+            codecPrivate = head.subarray(field.dataStart, field.dataStart + field.size);
+            if (field.size > 1) avcProfile = head[field.dataStart + 1] ?? null;
+          }
           else if (field.id === BLOCK_ADDITION_MAPPING_ID) dolbyVision = readDolbyVisionMapping(head, field) ?? dolbyVision;
           else if (field.id === VIDEO_ID) {
             for (const video of children(head, field.dataStart, field.dataStart + field.size)) {
@@ -310,6 +357,7 @@ export function parseSegmentLayout(head: Uint8Array): SegmentLayout | null {
           layout.dynamicRange = dynamicRangeFromTransfer(transfer);
           layout.dolbyVision = dolbyVision;
           layout.videoUndecodable = isVideoUndecodable(codecId, avcProfile);
+          layout.videoParameterSetsMissing = parameterSetsMissing(codecId, codecPrivate);
         }
         if (type === SUBTITLE_TRACK_TYPE) {
           layout.subtitleTracks.push({
@@ -418,6 +466,8 @@ export interface KeyframeIndex {
   audioTracks: MkvAudioTrack[];
   subtitleTracks: MkvSubtitleTrack[];
   videoUndecodable: boolean;
+  /** The video track's header carries no parameter sets (see parameterSetsMissing). */
+  videoParameterSetsMissing: boolean;
   /** Byte ranges already downloaded while indexing (head and Cues), reusable by a local cache. */
   fetched: Array<{ start: number; bytes: Uint8Array }>;
 }
@@ -572,6 +622,7 @@ export async function readMkvKeyframes(fetchRange: SizedRangeFetcher): Promise<K
     audioTracks: layout.audioTracks,
     subtitleTracks: layout.subtitleTracks,
     videoUndecodable: layout.videoUndecodable,
+    videoParameterSetsMissing: layout.videoParameterSetsMissing,
     fetched,
   };
 }

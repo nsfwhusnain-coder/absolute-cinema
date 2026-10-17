@@ -181,6 +181,8 @@ interface Session {
   audioDelivery: AudioDelivery;
   subtitles: Array<{ track: MkvSubtitleTrack; cues: Map<string, VttCue> }>;
   hevc: boolean;
+  /** The file's header carries no video parameter sets: each run rebuilds them (see videoBitstreamArgs). */
+  parameterSetsMissing: boolean;
   /** Delivered as Dolby Vision (its configuration box written, sample entry dvh1). */
   dolbyVision: boolean;
   init: Uint8Array | null;
@@ -403,6 +405,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
     audioDelivery: audioMode,
     subtitles: textSubtitles.map((track) => ({ track, cues: new Map<string, VttCue>() })),
     hevc: /HEVC/i.test(index.videoCodecId ?? ""),
+    parameterSetsMissing: index.videoParameterSetsMissing,
     dolbyVision: asDolbyVision,
     init: null,
     video: null,
@@ -449,7 +452,8 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
 }
 
 /**
- * Rebuilds the video's parameter sets into its sample description.
+ * Rebuilds the video's parameter sets into its sample description, for a
+ * release whose header left them out.
  *
  * An MP4 (and every fMP4 a browser is given) carries a video stream's
  * parameter sets (H.264 SPS/PPS, HEVC VPS/SPS/PPS) in its avcC/hvcC box, and
@@ -459,10 +463,15 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
  * (hls.js: bufferAddCodecError) and the start fails after its whole timeout.
  * Converting the stream to Annex B and extracting the parameter sets as it
  * passes gives the muxer a full configuration, with `delay_moov` holding the
- * header back until the first packets have been seen. A stream whose header
- * was complete comes out the same.
+ * header back until the first packets have been seen.
+ *
+ * Only for those releases: the round trip through Annex B is not lossless for
+ * every stream. A Dolby Vision UHD Blu-ray remux (FraMeSToR's Avengers:
+ * Infinity War) came out of it undecodable, a green mess on screen, where a
+ * plain copy of it decodes without one error.
  */
-export function videoBitstreamArgs(videoCodecId: string | null): string[] {
+export function videoBitstreamArgs(videoCodecId: string | null, parameterSetsMissing: boolean): string[] {
+  if (!parameterSetsMissing) return [];
   if (/HEVC/i.test(videoCodecId ?? "")) return ["-bsf:v", "hevc_mp4toannexb,extract_extradata"];
   if (/AVC/i.test(videoCodecId ?? "")) return ["-bsf:v", "h264_mp4toannexb,extract_extradata"];
   return [];
@@ -485,7 +494,8 @@ function ffmpegArgs(session: Session, startTime: number): string[] {
   if (session.audioIndex !== null) {
     args.push("-map", `0:a:${session.audioIndex}`, ...audioArgs(session.audioDelivery));
   }
-  args.push("-c:v", "copy", ...videoBitstreamArgs(session.info.videoCodecId));
+  const rebuild = videoBitstreamArgs(session.info.videoCodecId, session.parameterSetsMissing);
+  args.push("-c:v", "copy", ...rebuild);
   // Dolby Vision is only recognised with its configuration box, which ffmpeg
   // writes under -strict unofficial, and a dvh1 sample entry. Without them
   // the stream is treated as plain HEVC, right for a file with an HDR10
@@ -501,7 +511,7 @@ function ffmpegArgs(session: Session, startTime: number): string[] {
     // times into every fragment (the default writes run-relative times).
     // delay_moov writes the header after the first packets, once the
     // parameter sets above have been extracted from them.
-    "-movflags", "+frag_keyframe+empty_moov+default_base_moof+frag_discont+delay_moov",
+    "-movflags", `+frag_keyframe+empty_moov+default_base_moof+frag_discont${rebuild.length ? "+delay_moov" : ""}`,
     "-use_editlist", "1",
     // Also cut mid-GOP every second so the first bytes after a seek reach the
     // player without waiting for the next keyframe. Mid-GOP fragments simply

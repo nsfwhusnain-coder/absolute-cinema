@@ -33,6 +33,8 @@ import {
   parseCueTimes,
   parseSegmentLayout,
   isVideoUndecodable,
+  parameterSetsMissing,
+  CODEC_PRIVATE_ID,
   readMkvKeyframes,
   readVint,
 } from "./mkv-cues";
@@ -303,5 +305,51 @@ describe("httpRangeFetcher", () => {
     });
     await expect(httpRangeFetcher(url, 5_000)(0, 9)).rejects.toThrow("not supported");
     expect(asked).toBe(1);
+  });
+});
+
+describe("parameterSetsMissing", () => {
+  /** An hvcC: 22 bytes of configuration, then the arrays of NAL units (type, count, length-prefixed units). */
+  function hvcC(arrays: Array<[type: number, units: number[][]]>): Uint8Array {
+    const out = [1, ...new Array(21).fill(0), arrays.length];
+    for (const [type, units] of arrays) {
+      out.push(0x80 | type, units.length >> 8, units.length & 0xff);
+      for (const unit of units) out.push(unit.length >> 8, unit.length & 0xff, ...unit);
+    }
+    return new Uint8Array(out);
+  }
+  const NAL = [0x40, 0x01, 0x0c, 0x01];
+
+  it("finds HEVC parameter sets in a complete header", () => {
+    expect(parameterSetsMissing("V_MPEGH/ISO/HEVC", hvcC([[32, [NAL]], [33, [NAL]], [34, [NAL]]]))).toBe(false);
+  });
+
+  it("knows an HEVC header that left them out: empty, without a PPS, or absent", () => {
+    // The 23-byte hvcC of The Diplomat's AllDebrid 4K file: no arrays.
+    expect(parameterSetsMissing("V_MPEGH/ISO/HEVC", hvcC([]))).toBe(true);
+    expect(parameterSetsMissing("V_MPEGH/ISO/HEVC", hvcC([[32, [NAL]], [33, [NAL]]]))).toBe(true);
+    expect(parameterSetsMissing("V_MPEGH/ISO/HEVC", hvcC([[32, [NAL]], [33, [NAL]], [34, []]]))).toBe(true);
+    expect(parameterSetsMissing("V_MPEGH/ISO/HEVC", null)).toBe(true);
+  });
+
+  it("reads H.264 headers the same way", () => {
+    const sps = [0x67, 0x64, 0x00, 0x28];
+    const pps = [0x68, 0xee, 0x3c, 0x80];
+    const avcC = (spsList: number[][], ppsList: number[][]) =>
+      new Uint8Array([1, 0x64, 0, 0x28, 0xff, 0xe0 | spsList.length, ...spsList.flatMap((u) => [0, u.length, ...u]), ppsList.length, ...ppsList.flatMap((u) => [0, u.length, ...u])]);
+    expect(parameterSetsMissing("V_MPEG4/ISO/AVC", avcC([sps], [pps]))).toBe(false);
+    expect(parameterSetsMissing("V_MPEG4/ISO/AVC", avcC([], [pps]))).toBe(true);
+    expect(parameterSetsMissing("V_MPEG4/ISO/AVC", avcC([sps], []))).toBe(true);
+  });
+
+  it("never asks it of other codecs", () => {
+    expect(parameterSetsMissing("V_AV1", null)).toBe(false);
+  });
+
+  it("is read from the video track's header", () => {
+    const complete = parseSegmentLayout(buildMkv([0, 1000], el(CODEC_PRIVATE_ID, hvcC([[32, [NAL]], [33, [NAL]], [34, [NAL]]]))));
+    expect(complete?.videoParameterSetsMissing).toBe(false);
+    const empty = parseSegmentLayout(buildMkv([0, 1000], el(CODEC_PRIVATE_ID, hvcC([]))));
+    expect(empty?.videoParameterSetsMissing).toBe(true);
   });
 });
