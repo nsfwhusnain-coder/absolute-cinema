@@ -4,6 +4,7 @@ import Link from "next/link";
 import { motion } from "framer-motion";
 import { useSession } from "next-auth/react";
 import { useNavigate } from "@/hooks/use-navigate";
+import { enterPlaybackFullscreen } from "@/components/player/playback-fullscreen";
 import { Clock, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { tmdbImageUrl } from "@/lib/tmdb";
@@ -93,6 +94,7 @@ export function ContinueWatchingView() {
                     href={href}
                     className="relative block aspect-video bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                     aria-label={`Continue ${p.title}`}
+                    onClick={enterPlaybackFullscreen}
                   >
                     {img && <img src={img} alt="" className="h-full w-full object-contain" loading="lazy" />}
                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent" />

@@ -28,6 +28,7 @@ import { GenrePills } from "@/components/genre-pills";
 import { BrowseError } from "@/components/empty-states";
 import { yearOf } from "@/lib/utils";
 import { resumeSeconds, resumeTvEpisode } from "@/lib/continue-watching";
+import { enterPlaybackFullscreen } from "@/components/player/playback-fullscreen";
 
 const fadeUp = {
   hidden: { opacity: 0, y: 18 },
@@ -467,13 +468,14 @@ function DetailContent({
               <Button
                 type="button"
                 data-tv-first-focus
-                onClick={() =>
+                onClick={() => {
+                  enterPlaybackFullscreen();
                   navigate(
                     mediaType === "tv"
                       ? `/watch/tv/${id}?season=${selectedSeason}&episode=${selectedEpisode}`
                       : `/watch/movie/${id}`
-                  )
-                }
+                  );
+                }}
                 size="lg"
                 className="rounded-full border-0 bg-white px-6 font-semibold text-[#111] hover:bg-white/85"
               >

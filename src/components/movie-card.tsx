@@ -5,6 +5,7 @@ import { tmdbImageUrl, posterSrcSet, backdropSrcSet } from "@/lib/tmdb";
 import { cn, yearOf } from "@/lib/utils";
 import { Film, Play } from "lucide-react";
 import { CardOverflowMenu } from "@/components/card-overflow-menu";
+import { enterPlaybackFullscreen } from "@/components/player/playback-fullscreen";
 import {
   preresolvePlayback,
   getMemPlayback,
@@ -155,6 +156,7 @@ export function MovieCard({
               href={playHref}
               tabIndex={-1}
               aria-label={`Play ${title}`}
+              onClick={enterPlaybackFullscreen}
               className="absolute left-1/2 top-1/2 z-[6] flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-white/90 text-black opacity-0 pointer-events-none transition-opacity duration-[180ms] group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
             >
               <Play className="h-4 w-4 translate-x-0.5 fill-current" />

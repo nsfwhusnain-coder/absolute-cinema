@@ -61,8 +61,10 @@ import { usePlayerRemote } from "./use-player-remote";
 import type { RemotePanel } from "./remote-control";
 import { useSleepTimer, useSleepTimerClock } from "./use-sleep-timer";
 import { SleepChip, SleepMenu, SleepMenuValue, SleepScreen, SleepWarning } from "./sleep-timer-ui";
+import { enterPlaybackFullscreen } from "./playback-fullscreen";
 
-const CONTROLS_IDLE_MS = 3200;
+/** While playing, the controls hide this long after the last pointer move or tap. Paused, buffering or with a menu open, they stay. */
+const CONTROLS_IDLE_MS = 2200;
 const NOTICE_MS = 5000;
 /** Skip step before the profile's own choice (Settings → Playback) has loaded. */
 const DEFAULT_SEEK_STEP_S = 10;
@@ -557,8 +559,11 @@ export function Player(props: PlayerProps) {
       onClick={(e) => {
         // Only the play button pauses; a click or tap elsewhere shows or hides the controls.
         if (panel !== "none") setPanel("none");
-        // Waiting on the viewer because the browser would not start by itself: any tap is "play".
-        else if (state.autoplayBlocked) actions.togglePlay();
+        // Waiting on the viewer because the browser would not start by itself: any tap is "play",
+        // except the second click of a double click, which would pause what the first one started.
+        else if (state.autoplayBlocked) {
+          if (e.detail < 2) actions.togglePlay();
+        }
         else onTouchTap(e.clientX, lastPointer.current !== "mouse");
       }}
       onDoubleClick={() => {
@@ -615,7 +620,15 @@ export function Player(props: PlayerProps) {
       {started && state.buffering && !state.failureMessage && <BufferingSpinner />}
       {state.autoplayBlocked && !state.failureMessage && (
         <div data-remote-default className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
-          <IconButton label="Play" onClick={actions.togglePlay} className="glass-clear pointer-events-auto" size="xl">
+          <IconButton
+            label="Play"
+            onClick={() => {
+              enterPlaybackFullscreen();
+              actions.togglePlay();
+            }}
+            className="glass-clear pointer-events-auto"
+            size="xl"
+          >
             <Play className="h-7 w-7 translate-x-0.5 fill-current" />
           </IconButton>
         </div>

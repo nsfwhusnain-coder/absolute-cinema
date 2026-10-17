@@ -16,6 +16,7 @@ import { useHideAdult } from "@/hooks/use-hide-adult";
 import { Button } from "@/components/ui/button";
 import { yearOf } from "@/lib/utils";
 import { resumeTvEpisode } from "@/lib/continue-watching";
+import { enterPlaybackFullscreen } from "@/components/player/playback-fullscreen";
 
 const FILMOGRAPHY_LIMIT = 24;
 const BIO_CLAMP = 420;
@@ -278,7 +279,8 @@ export function PersonView({ id, initialPerson, initialCredits }: Props) {
                 <Button
                   type="button"
                   size="lg"
-                  onClick={() =>
+                  onClick={() => {
+                    enterPlaybackFullscreen();
                     navigate(
                       watchHref(
                         featured,
@@ -286,8 +288,8 @@ export function PersonView({ id, initialPerson, initialCredits }: Props) {
                           ? resumeTvEpisode(progressList, featured.id)
                           : null
                       )
-                    )
-                  }
+                    );
+                  }}
                   className="rounded-full border-0 bg-white px-6 font-semibold text-[#111] hover:bg-white/85"
                 >
                   <Play className="mr-1 h-4 w-4 fill-current" aria-hidden />

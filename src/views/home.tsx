@@ -9,6 +9,7 @@ import { TopTenRow } from "@/components/top-ten-row";
 import { MovieRow, RAIL_PAD_LEFT } from "@/components/movie-row";
 import { Shuffle } from "lucide-react";
 import { useNavigate } from "@/hooks/use-navigate";
+import { enterPlaybackFullscreen } from "@/components/player/playback-fullscreen";
 import { MovieCard } from "@/components/movie-card";
 import { CardOverflowMenu } from "@/components/card-overflow-menu";
 import { heroPicks, showcase, tmdbImageUrl, withoutAdultTitles } from "@/lib/tmdb";
@@ -262,7 +263,9 @@ export function HomeView() {
   const playSomething = () => {
     const pool = withoutAdultTitles(heroPool, hideAdult);
     const pick = pool[Math.floor(Math.random() * pool.length)];
-    if (pick) navigate(`/watch/${pick.media_type}/${pick.id}`);
+    if (!pick) return;
+    enterPlaybackFullscreen();
+    navigate(`/watch/${pick.media_type}/${pick.id}`);
   };
 
   const hasContinue = !continueQuery.isLoading && continueItems.length > 0;
@@ -560,6 +563,7 @@ function ContinueCard({ item }: { item: ProgressItem }) {
           href={href}
           className="absolute inset-0 z-0 block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0f]"
           aria-label={item.upNext ? `Play ${title}, season ${item.season} episode ${item.episode}` : `Continue ${title}`}
+          onClick={enterPlaybackFullscreen}
         >
           {img ? (
             <img

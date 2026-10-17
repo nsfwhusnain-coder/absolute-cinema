@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowDownUp, Check, Play } from "lucide-react";
 import type { TmdbEpisode } from "@/lib/tmdb";
 import { useNavigate } from "@/hooks/use-navigate";
+import { enterPlaybackFullscreen } from "@/components/player/playback-fullscreen";
 import { useShowProgress } from "@/hooks/use-progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EpisodeStill } from "@/components/episode-still";
@@ -102,7 +103,10 @@ export function EpisodeList({ tvId, season, seriesPosterPath, seriesBackdropPath
               <button
                 type="button"
                 disabled={upcoming}
-                onClick={() => navigate(`/watch/tv/${tvId}?season=${season}&episode=${ep.episode_number}`)}
+                onClick={() => {
+                  enterPlaybackFullscreen();
+                  navigate(`/watch/tv/${tvId}?season=${season}&episode=${ep.episode_number}`);
+                }}
                 className={cn(
                   "group flex w-full gap-4 rounded-xl p-2 text-left transition-colors sm:gap-5 sm:p-3",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",

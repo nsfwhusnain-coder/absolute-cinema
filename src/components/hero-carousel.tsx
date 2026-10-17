@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@/hooks/use-navigate";
+import { enterPlaybackFullscreen } from "@/components/player/playback-fullscreen";
 import { tmdbImageUrl, pickTitleLogoUrl, backdropSrcSet, type TmdbImages } from "@/lib/tmdb";
 import { Play, Plus, Star, Calendar, Heart, Pause } from "lucide-react";
 import { PREFERENCES_QUERY_KEY, fetchPreferences } from "@/lib/preferences-client";
@@ -429,6 +430,7 @@ export function HeroCarousel({ items }: Props) {
                 type="button"
                 data-tv-first-focus
                 onClick={() => {
+                  enterPlaybackFullscreen();
                   if (mediaType === "tv") {
                     const resume = resumeTvEpisode(progressList, current.id);
                     const s = resume?.season ?? 1;

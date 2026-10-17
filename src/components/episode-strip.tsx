@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { TmdbEpisode } from "@/lib/tmdb";
 import { useNavigate } from "@/hooks/use-navigate";
+import { enterPlaybackFullscreen } from "@/components/player/playback-fullscreen";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Select,
@@ -139,6 +140,7 @@ export function EpisodeStrip({
               aria-label={ariaLabel}
               aria-current={isCurrent ? "true" : undefined}
               onClick={() => {
+                enterPlaybackFullscreen();
                 onEpisodeSelect?.(ep.episode_number);
                 navigate(
                   `/watch/tv/${tvId}?season=${season}&episode=${ep.episode_number}`
