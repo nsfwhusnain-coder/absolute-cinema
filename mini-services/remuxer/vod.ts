@@ -1180,16 +1180,27 @@ export function stopViewerRuns(id: string, watcher: string, reason: string): num
   return stopped;
 }
 
+/** A stream reading faster than this many times its bitrate (and WARMING_FLOOR_BPS) is racing for its first minute. */
+const WARMING_FACTOR = 1.5;
+const WARMING_FLOOR_BPS = 15_000_000;
+
 /**
- * Streams building their first minute right now: a viewer asked lately, a run
- * is reading, and its file is not yet read at a pace (see paceSession). The
- * capacity governor lets no more than a couple warm up at once.
+ * Streams racing for their first minute right now: a viewer asked lately, a
+ * run is reading, its file is not yet read at a pace (see paceSession), and it
+ * is reading fast: `upstreamBps` (by session id, from the last few seconds) is
+ * well above its bitrate, or not measured yet (it has only just started). One
+ * on a slow CDN connection, short of its minute for minutes, is no burst, and
+ * holding a slot for it kept a queue waiting behind half-empty budgets.
+ * The capacity governor lets no more than a couple warm up at once.
  */
-export function vodWarmingCount(now = Date.now()): number {
+export function vodWarmingCount(upstreamBps: ReadonlyMap<string, number> = new Map(), now = Date.now()): number {
   let count = 0;
   for (const session of sessions.values()) {
     if (!session.demanded || now - session.lastRequestAt > ACTIVE_VIEWER_MS || session.source.paceBps) continue;
-    if (aliveRuns(session).some((run) => !run.paused)) count++;
+    if (!aliveRuns(session).some((run) => !run.paused)) continue;
+    const rate = upstreamBps.get(session.id);
+    const racing = rate === undefined || rate > Math.max(WARMING_FLOOR_BPS, (session.info.bitrateBps ?? 0) * WARMING_FACTOR);
+    if (racing) count++;
   }
   return count;
 }

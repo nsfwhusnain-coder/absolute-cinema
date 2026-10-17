@@ -300,7 +300,7 @@ describe("Governor levels", () => {
 
   it("calls the CPU busy when the event loop runs late", () => {
     const { governor, machine, run } = rig();
-    machine.lagMs = 450;
+    machine.lagMs = 1200;
     run(2);
     expect(governor.snapshot()).toMatchObject({ level: "busy", reasons: ["cpu"] });
   });
@@ -539,12 +539,12 @@ describe("Governor, after review", () => {
         0
       );
     };
-    once({ p95Ms: 3, maxMs: 1200, secondMs: 3 });
-    // A second's pause is nothing to a player with 30 s in hand.
-    expect(governor.currentLevel).toBe("ok");
     once({ p95Ms: 3, maxMs: 2500, secondMs: 3 });
+    // A couple of seconds' pause is nothing to a player with 30 s in hand.
+    expect(governor.currentLevel).toBe("ok");
+    once({ p95Ms: 3, maxMs: 3500, secondMs: 3 });
     expect(governor.snapshot()).toMatchObject({ level: "busy", reasons: ["cpu"] });
-    once({ p95Ms: 3, maxMs: 6000, secondMs: 3 });
+    once({ p95Ms: 3, maxMs: 9000, secondMs: 3 });
     expect(governor.currentLevel).toBe("critical");
     run(0);
   });
@@ -552,12 +552,12 @@ describe("Governor, after review", () => {
 
 describe("Governor, the remuxer's thread", () => {
   it("keeps remuxed streams within what the remuxer's one thread can move", () => {
-    // 0.0024 core per Mbit/s: a typical 4K remux (50 Mbit/s) takes 0.12 of the 0.8 planned, so six fit.
-    const { governor } = rig({ remuxerCores: 0.8 });
+    // 0.003 core per Mbit/s: a typical 4K remux (50 Mbit/s) takes 0.15 of the 0.9 planned, so six fit.
+    const { governor } = rig({ remuxerCores: 0.9 });
     for (let i = 0; i < 6; i++) expect(ask(governor, UHD, `v${i}`).status).toBe("admitted");
     expect(ask(governor, UHD, "seventh")).toMatchObject({ status: "queued", reason: "cpu" });
     // Web streams go through the web app, not the remuxer.
-    const web = rig({ remuxerCores: 0.8 });
+    const web = rig({ remuxerCores: 0.9 });
     for (let i = 0; i < 6; i++) ask(web.governor, UHD, `v${i}`);
     expect(ask(web.governor, { ...UHD, delivery: "web" }, "web").status).toBe("admitted");
   });
@@ -566,9 +566,9 @@ describe("Governor, the remuxer's thread", () => {
     let clock = 0;
     let own = 0;
     const governor = new Governor({ startsPerWindow: 1000, maxWarming: 1000, downlinkBps: 0 }, () => clock);
-    for (let i = 0; i < 90; i++) {
+    for (let i = 0; i < 120; i++) {
       clock += 1000;
-      own += 0.97;
+      own += 1;
       governor.observe(
         { at: clock, cpuSeconds: clock / 250, periods: null, throttledPeriods: null, cpuLimitCores: 8, cpuPressure: 0, memoryCommittedBytes: 2 * GB, memoryLimitBytes: 15 * GB, memoryPressure: 0, temperatureC: 50, processCpuSeconds: own },
         2,
@@ -576,7 +576,7 @@ describe("Governor, the remuxer's thread", () => {
       );
     }
     expect(governor.snapshot()).toMatchObject({ level: "busy", reasons: ["cpu"] });
-    expect(governor.snapshot().measured.remuxerCores).toBeGreaterThan(0.9);
+    expect(governor.snapshot().measured.remuxerCores).toBeGreaterThan(0.97);
   });
 });
 

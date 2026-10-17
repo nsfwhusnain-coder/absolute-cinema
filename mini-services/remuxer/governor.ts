@@ -95,8 +95,9 @@ export interface CostModel {
 export const DEFAULT_COST_MODEL: CostModel = {
   remuxCpuBase: 0.1,
   remuxCpuPerMbps: 0.006,
-  // 0.79 core at 12 x 28 Mbit/s, 0.97 at 16 (reference server, 2026-10-17): 0.0024 core per Mbit/s.
-  remuxThreadPerMbps: 0.0024,
+  // Nine real viewers with about 270 Mbit/s of streams between them kept the main thread at about 0.9 core,
+  // read-ahead included, and played without a stall (reference server, 2026-10-17): 0.003 core per Mbit/s.
+  remuxThreadPerMbps: 0.003,
   // 16 1080p streams of 6.4 Mbit/s with their TrueHD re-encoded took 3.6 cores: 0.22 each, 0.08 above the
   // bitrate's share (reference server, 2026-10-17).
   audioTranscodeCores: 0.1,
@@ -173,15 +174,16 @@ export const DEFAULT_THRESHOLDS: Thresholds = {
   busyThrottled: { enter: 0.25, leave: 0.1 },
   busyMemory: { enter: 0.88, leave: 0.82 },
   criticalMemory: { enter: 0.95, leave: 0.9 },
-  busyLagMs: { enter: 300, leave: 120 },
-  criticalLagMs: { enter: 2000, leave: 800 },
-  // A pause of a second (a garbage collection, a large fragment written) is nothing to a player with 30 s in
-  // hand; held at 0.4 s, it kept a two-viewer server "busy" for minutes (2026-10-17).
-  busyFreezeMs: { enter: 2000, leave: 800 },
-  criticalFreezeMs: { enter: 5000, leave: 2000 },
+  // A player holds 30 s: the loop pausing up to 0.8 s at nine viewers cost none of them a stall, so these lines
+  // are where slices start to arrive late, not where the loop is merely busy (2026-10-17).
+  busyLagMs: { enter: 1000, leave: 500 },
+  criticalLagMs: { enter: 3000, leave: 1500 },
+  busyFreezeMs: { enter: 3000, leave: 1500 },
+  criticalFreezeMs: { enter: 8000, leave: 3000 },
   busyStalls: { enter: 0.5, leave: 0.25 },
   busyDownlink: { enter: 0.95, leave: 0.8 },
-  busyRemuxerCores: { enter: 0.9, leave: 0.75 },
+  // Only a thread that is pegged: much of its work is read-ahead, which slows down unnoticed.
+  busyRemuxerCores: { enter: 0.97, leave: 0.9 },
 };
 
 export interface GovernorConfig {
@@ -236,7 +238,7 @@ export const DEFAULT_CONFIG: GovernorConfig = {
   // racing ahead at once (reference server, 2026-10-17): planning into 70% leaves the starts their room.
   cpuShare: 0.7,
   memoryShare: 0.85,
-  remuxerCores: 0.8,
+  remuxerCores: 0.9,
   downlinkBps: 450 * MBPS,
   uplinkBps: 0,
   idleCpuCores: 0.3,
@@ -627,7 +629,9 @@ export class Governor {
     }
     return {
       cpuCores: Math.max(held.cpuCores, this.cpuCores),
-      remuxerCores: Math.max(held.remuxerCores, this.remuxerCores),
+      // Planned from the seats alone: the thread's measured load is mostly read-ahead, which gives way to
+      // playback by slowing down. A thread that is really full shows as busy (busyRemuxerCores, the loop's lag).
+      remuxerCores: held.remuxerCores,
       memoryBytes: Math.max(held.memoryBytes, this.memoryBytes),
       downBps: Math.max(held.downBps, this.downBps),
       upBps: held.upBps,

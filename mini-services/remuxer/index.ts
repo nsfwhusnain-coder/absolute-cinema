@@ -342,7 +342,7 @@ function governorTick(): void {
   const downBps = network && networkBefore ? bitsPerSecond(networkBefore.rxBytes, network.rxBytes, (now - networkBeforeAt) / 1000) : null;
   networkBefore = network;
   networkBeforeAt = now;
-  governor.setWarming(vodWarmingCount(now));
+  governor.setWarming(vodWarmingCount(new Map([...sessionRatesNow].map(([id, rates]) => [id, rates.upstreamBps])), now));
   governor.observe(reading, typeof drill?.loopLagMs === "number" ? drill.loopLagMs : loopLag.reading(), downBps);
   if (now - liveAt >= HISTORY_EVERY_MS) {
     liveAt = now;

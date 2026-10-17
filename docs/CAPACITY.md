@@ -30,7 +30,7 @@ A seat costs what its stream is expected to take of the machine:
 
 | Delivery | CPU | Memory | Internet link |
 |---|---|---|---|
-| Remuxed here (MKV) | 0.10 core + 0.006 core per Mbit/s, of which 0.0024 per Mbit/s on the remuxer's own thread | 450 MB | download: bitrate x 1.2; upload too when the viewer is outside the home |
+| Remuxed here (MKV) | 0.10 core + 0.006 core per Mbit/s (+0.1 when its sound is re-encoded), and 0.003 core per Mbit/s of the remuxer's main thread | 450 MB | download: bitrate x 1.2; upload too when the viewer is outside the home |
 | Relayed by the web app (a web stream) | 0.03 core + 0.004 core per Mbit/s | 60 MB | the same |
 | Read by the player from its CDN | nothing | nothing | download only, when the viewer is at home (the house shares the link) |
 
@@ -57,8 +57,11 @@ of the runs is kept free for seeks (64 runs give 48 remux seats; the default of
 refusal like any other, never a broken file.
 
 **Budgets.** Streams are planned into 70% of the CPU the container may use,
-80% of the remuxer's own thread, and 85% of its memory ceiling, plus the
-internet link's budget each way (see the settings). The remuxer's thread
+90% of the remuxer's main thread, and 85% of its memory ceiling, plus the
+internet link's budget each way (see the settings). The main thread is
+planned from the seats alone: most of its measured load is read-ahead, which
+slows down without anyone noticing, and a thread that is really full shows as
+busy instead. The remuxer's thread
 matters most for heavy files: every remuxed byte passes through its one
 JavaScript thread on the way in and out, and on a Ryzen 7 4800H it carries
 about 400 Mbit/s of video before it is full, while the CPU's other cores are
@@ -85,9 +88,9 @@ readings clear, so it does not flicker:
 |---|---|---|
 | CPU temperature, 5 s average | 85 C (80) | 92 C (88) |
 | CPU quota ran out, share of periods in 10 s | 25% (10%) | |
-| The remuxer's own thread, smoothed over 20 s | 0.9 core (0.75) | |
-| Remuxer event loop, 95th percentile of 10 s (critical: its second longest stall) | 300 ms (120) | 2 s (0.8) |
-| Remuxer event loop, its longest stall in 10 s | 2 s (0.8) | 5 s (2) |
+| The remuxer's main thread, smoothed over 20 s | 0.97 core (0.9) | |
+| Remuxer event loop, 95th percentile of 10 s (critical: its second longest stall) | 1 s (0.5) | 3 s (1.5) |
+| Remuxer event loop, its longest stall in 10 s | 3 s (1.5) | 8 s (3) |
 | Memory held, share of the ceiling | 88% (82%) | 95% (90%) |
 | Internet download, share of the budget | 95% (80%) | |
 | Viewers playing who stalled in the last minute (with 4 or more playing) | 50% (25%) | |
@@ -147,7 +150,7 @@ All in the site's `.env`; anything unset keeps its default.
 | `CAPACITY_GATE` | `1` | `0` lets everyone in and stops nothing (the readings are still taken, for the metrics). |
 | `CAPACITY_CPU_SHARE` | `0.7` | Share of the container's CPU that streams are planned into (the rest is the starts' room to race ahead). |
 | `CAPACITY_MEMORY_SHARE` | `0.85` | Share of its memory ceiling. |
-| `CAPACITY_REMUXER_CORES` | `0.8` | Of the remuxer's own thread (1 is all of it). |
+| `CAPACITY_REMUXER_CORES` | `0.9` | Of the remuxer's main thread (1 is all of it). |
 | `CAPACITY_DOWNLINK_MBPS` | `450` | The internet download budget for streams. `0` for no limit. |
 | `CAPACITY_UPLINK_MBPS` | `0` (no limit) | The upload budget, for viewers outside the home. Set it before opening the site to the internet. |
 | `CAPACITY_BUSY_TEMP_C` | `85` | CPU temperature that stops new viewers (left 5 below). |
