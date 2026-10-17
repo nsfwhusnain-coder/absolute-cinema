@@ -2,7 +2,7 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [2.9.1] - 2026-10-18
 
 ### Added
 - **Feedback from testers**: "Report a problem" in the player's settings menu,
@@ -11,6 +11,10 @@ All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](ht
   carries the film, the moment it happened, the quality and the server it came
   from. The admin reads them in Settings → Server → Feedback from viewers and
   deletes them there. Each profile may send ten an hour.
+
+### Fixed
+- The sign-in form called the PIN optional ("only if the profile is locked")
+  on a server where every profile has one.
 
 ## [2.9.0] - 2026-10-18
 
