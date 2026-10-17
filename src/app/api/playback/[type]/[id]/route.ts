@@ -39,6 +39,9 @@ import { rememberPlaybackRoster } from "@/lib/playback/source-url-cache";
 import { resolvePlayableTitle } from "@/lib/catalog/title-alias.server";
 import { PlaybackTracker } from "@/lib/playback/playback-observability";
 import { parseRouteId } from "@/lib/route-params";
+import { logEvent, viewerTag } from "@/lib/event-log";
+import { recordPlaybackAnswer } from "@/lib/telemetry/playback-answers";
+import { isDiscoveryFinal, noteDiscovery } from "@/lib/telemetry/discovery";
 
 // A title's full answer now goes out as soon as its start is decided and is
 // asked for again until the rest has come in: a handful of asks per title
@@ -194,6 +197,7 @@ export async function GET(
     remuxHasCapacity(),
   ]);
   const qualityHint = profilePreferences.playbackQuality;
+  const want4k = qualityHint === "auto" || (typeof qualityHint === "number" && qualityHint >= 2160);
   const decideOptions = {
     preferredHeight: qualityHint,
     fourKStartup: "fast",
@@ -254,6 +258,18 @@ export async function GET(
         provider: "cache",
       });
       tracker.logSummary("info");
+      recordPlaybackAnswer({ fast, cacheHit: true, status: healthAware.status, totalMs: tracker.getSummary().totalDurationMs });
+      if (!fast && isDiscoveryFinal(healthAware)) {
+        const summary = noteDiscovery({
+          title: { mediaType, tmdbId, season, episode },
+          sources: healthAware.sources ?? [],
+          want4k,
+          qualityHint: qualityHint ?? null,
+          cache: true,
+        });
+        // The viewer goes in as its tag: logEvent prints its fields to the console, and an account id must not reach it.
+        if (summary) logEvent("discovery_summary", { viewer: viewerTag(userId), ...summary });
+      }
 
       return NextResponse.json({
         ...healthAware,
@@ -273,7 +289,6 @@ export async function GET(
   tracker.mark("cache_miss_dispatched");
   const provider = await getProvider();
 
-  const want4k = qualityHint === "auto" || (typeof qualityHint === "number" && qualityHint >= 2160);
   const debridPromise = fast
     ? resolveFastDebridSourcesSafely({
         tmdbId,
@@ -291,7 +306,10 @@ export async function GET(
       });
 
   const providerRequest = { tmdbId, mediaType, season, episode, userId, fast, noCache, qualityHint, contentClass };
+  const providersStartedAt = Date.now();
   const providerPromise = provider.resolve(providerRequest);
+  // How long the web providers took, once they have: only a full answer that waited for them records it.
+  let providersMs: number | undefined;
 
   let result: PlaybackResponse;
   if (fast) {
@@ -320,7 +338,10 @@ export async function GET(
     }
   } else {
     const providers = { done: false };
-    void providerPromise.then(() => void (providers.done = true), () => undefined);
+    void providerPromise.then(() => {
+      providers.done = true;
+      providersMs = Date.now() - providersStartedAt;
+    }, () => undefined);
     const resolvedDebridSources = await debridPromise;
     const outlook = await debridOutlookSafely(resolvedDebridSources);
     // Once the debrid services have decided what a 4K viewer starts on, the
@@ -378,6 +399,18 @@ export async function GET(
     provider: healthAwareResult.providerId || "scraped",
   });
   tracker.logSummary("info");
+  recordPlaybackAnswer({ fast, cacheHit: false, status: healthAwareResult.status, totalMs: tracker.getSummary().totalDurationMs });
+  if (!fast && isDiscoveryFinal(healthAwareResult)) {
+    const summary = noteDiscovery({
+      title: { mediaType, tmdbId, season, episode },
+      sources: healthAwareResult.sources ?? [],
+      want4k,
+      qualityHint: qualityHint ?? null,
+      cache: false,
+      providersMs,
+    });
+    if (summary) logEvent("discovery_summary", { viewer: viewerTag(userId), ...summary });
+  }
 
   return NextResponse.json({
     ...healthAwareResult,

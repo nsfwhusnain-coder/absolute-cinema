@@ -7,6 +7,7 @@ import { resolveRemuxSourceUrl } from "@/lib/playback/remux-source";
 import { rememberRemuxSession } from "@/lib/playback/remux-sessions";
 import { REMUXER_URL, UNUSABLE_HEADER, watcherOf } from "@/lib/playback/remuxer";
 import { titleRuntimeMinutes, type RuntimeQuestion } from "@/lib/playback/title-runtime";
+import { recordVodOpen, vodOpenOutcome, type VodOpenAnswer } from "@/lib/telemetry/vod-open";
 
 export const dynamic = "force-dynamic";
 
@@ -59,10 +60,17 @@ export async function GET(req: NextRequest) {
     return params.get(name) && Number.isFinite(value) ? value : undefined;
   };
   const title: RuntimeQuestion = { mediaType: type, tmdbId, season: optionalInt("season"), episode: optionalInt("episode") };
+  const prewarm = params.get("prewarm") === "1";
   const url = await resolveRemuxSourceUrl({ ...title, userId, sourceId, ticket: params.get("ticket") });
-  if (!url) return NextResponse.json({ error: "Source expired" }, { status: 409 });
+  if (!url) {
+    recordVodOpen(vodOpenOutcome({ status: 409 }), prewarm);
+    return NextResponse.json({ error: "Source expired" }, { status: 409 });
+  }
   // An answer given before the file was found out still offers it.
-  if (isRefusedLink(url)) return NextResponse.json({ error: "Source does not play" }, { status: 415 });
+  if (isRefusedLink(url)) {
+    recordVodOpen(vodOpenOutcome({ status: 415 }), prewarm);
+    return NextResponse.json({ error: "Source does not play" }, { status: 415 });
+  }
 
   const worker = new URLSearchParams({ u: url, startAt: String(Math.max(0, optionalInt("startAt") ?? 0)) });
   worker.set("w", watcherOf(userId));
@@ -89,13 +97,15 @@ export async function GET(req: NextRequest) {
 
   const asked = Date.now();
   /** How long the open took and how it ended: the largest part of a start that is not the search. */
-  const opened = (outcome: string, session?: string) =>
+  const opened = (outcome: string, answer: VodOpenAnswer, session?: string) => {
     recordEvent("web", "vod_open", { userId, ...title, sourceId, prewarm: worker.has("prewarm"), startAt: Number(worker.get("startAt")), tookMs: Date.now() - asked, outcome, session });
+    recordVodOpen(vodOpenOutcome(answer), prewarm, (Date.now() - asked) / 1000);
+  };
   const res = await fetch(`${REMUXER_URL}/vod/open?${worker}`, { signal: AbortSignal.timeout(OPEN_TIMEOUT_MS) }).catch(
     () => null
   );
   if (!res) {
-    opened("remuxer unavailable");
+    opened("remuxer unavailable", { status: null });
     return NextResponse.json({ error: "Remuxer unavailable" }, { status: 502 });
   }
   const body = (await res.json().catch(() => ({}))) as {
@@ -114,14 +124,14 @@ export async function GET(req: NextRequest) {
   if (!res.ok || !body.id) {
     // Found out since it was last opened (by a prewarm, or a player that had stopped waiting).
     if (res.headers.has(UNUSABLE_HEADER)) await refuseSource(sourceId, title);
-    opened(body.error ?? `remuxer ${res.status}`);
+    opened(body.error ?? `remuxer ${res.status}`, { status: res.status, unusable: res.headers.has(UNUSABLE_HEADER) });
     return NextResponse.json({ error: body.error ?? `remuxer ${res.status}` }, { status: res.status === 415 ? 415 : 502 });
   }
   if (await isAnotherLength(title, sourceId, body.durationS)) {
-    opened("another length");
+    opened("another length", { status: 415, opened: true });
     return NextResponse.json({ error: "Not the length of the title asked for" }, { status: 415 });
   }
-  opened("ok", body.id);
+  opened("ok", { status: 200, opened: true }, body.id);
   rememberRemuxSession(body.id, { sourceId, title });
   return NextResponse.json(
     {

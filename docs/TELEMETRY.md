@@ -28,8 +28,11 @@ rollups and prints the answers (see "Reading it" below).
 `GET /api/metrics` returns every process's metrics in Prometheus' text
 format: the web app's own, then the remuxer's and the scraper's, which it
 fetches from their ports inside the container. It needs
-`Authorization: Bearer $METRICS_TOKEN` (or comes from the machine itself):
-it says how busy the site is, which is nobody else's business.
+`Authorization: Bearer $METRICS_TOKEN`, the token the server was given: it
+says how busy the site is, which is nobody else's business. With no
+`METRICS_TOKEN` set the endpoint answers 404; with the wrong token, 401. A
+process that does not answer within 2 s is left out of that scrape, and
+`ac_web_metrics_source_up{source="remuxer"|"scraper"}` reads 0 for it.
 
 Labels come only from small fixed sets (a service, a quality bucket, a
 device class, a reason class), never a title, a viewer or a link: every
@@ -45,13 +48,13 @@ Devices: `desktop`, `tablet`, `phone`, `tv`, `other`. Deliveries: `remux`
 
 | Metric | Type | Labels | Counted when |
 |---|---|---|---|
-| `ac_web_playback_answers_total` | counter | mode, cache, status | every answer to "what can play this" |
+| `ac_web_playback_answers_total` | counter | mode, cache, status (available, requestable, external, not_configured, error, empty, other) | every answer to "what can play this" |
 | `ac_web_playback_answer_seconds` | histogram | mode, cache | same |
 | `ac_web_discovery_outcomes_total` | counter | media, outcome (2160/1080/720/sd/web_only/nothing) | once per title, when its search has settled |
 | `ac_web_discovery_sources_total` | counter | provider, origin, quality | same: every file and stream it found |
-| `ac_web_discovery_judged_total` | counter | provider, verdict (tier3/tier2/tier1, upscaled, starved, hardsub, ...) | same: what the release judge said of each debrid file |
-| `ac_web_debrid_resolve_seconds` | histogram | service, stage (first1080/first2160/total) | every debrid search |
-| `ac_web_vod_opens_total`, `ac_web_vod_open_seconds` | counter, histogram | outcome, prewarm | every remux open |
+| `ac_web_discovery_judged_total` | counter | provider, verdict (tier3/tier2/tier1, upscaled, starved, hardsub, interpolated, dvOnly) | same: what the release judge said of each debrid file |
+| `ac_web_debrid_resolve_seconds` | histogram | service (realdebrid/alldebrid/torbox), stage (first1080/first2160/total) | every debrid search |
+| `ac_web_vod_opens_total`, `ac_web_vod_open_seconds` | counter, histogram | outcome (ok, expired, refused, remuxer_unavailable, error), prewarm | every remux open |
 | `ac_web_player_first_frame_seconds` | histogram | device, delivery, service, quality | a player's first picture (from choosing the file) |
 | `ac_web_player_open_to_frame_seconds` | histogram | device, delivery, quality | same (from opening the title: the viewer's wait) |
 | `ac_web_player_start_failures_total` | counter | device, delivery, service, reason | a start that failed |
@@ -63,7 +66,8 @@ Devices: `desktop`, `tablet`, `phone`, `tv`, `other`. Deliveries: `remux`
 | `ac_web_player_buffer_ahead_seconds` | histogram | device, delivery | each heartbeat |
 | `ac_web_player_dropped_frames_total`, `..._decoded_frames_total` | counter | device, quality | each heartbeat |
 | `ac_web_player_active_sessions` | gauge | device, delivery | players heard from in the last minute |
-| `ac_web_cdn_rate_bits`, `ac_web_cdn_measurements_total` | gauge, counter | service, outcome | each CDN speed measurement (cdn-rate.ts) |
+| `ac_web_cdn_rate_bits`, `ac_web_cdn_measurements_total` | gauge, counter | service, outcome (ok/failed) | each CDN speed measurement (cdn-rate.ts) |
+| `ac_web_metrics_source_up` | gauge | source (remuxer, scraper) | each scrape of `/api/metrics`: 1 when that process was read, 0 when it was left out |
 
 ### Remuxer (`mini-services/remuxer/remux-metrics.ts`)
 
@@ -117,13 +121,13 @@ answered), at most once per title every ten minutes.
 | `mediaType`, `tmdbId`, `season`, `episode` | the title |
 | `viewer` | who asked |
 | `want4k`, `qualityHint` | what the viewer's quality setting asked for |
-| `outcome` | `2160`, `1080`, `720`, `sd` (the best debrid file's real height), `web_only`, `nothing` |
-| `found` | per service: count of files/streams per quality bucket, e.g. `{"realdebrid":{"2160":2,"1080":4},"alldebrid":{"2160":1},"vixsrc":{"1080":1}}` |
-| `best` | the best debrid file: `provider`, `height`, `effectiveHeight`, `tier`, `score`, `flags`, `bitrateBps`, `sizeBytes`, `codec`, `container`, `releaseTitle` (a release name is not a link) |
-| `judged` | per service: count of debrid files per verdict (`tier3`, `tier2`, `tier1`, `upscaled`, `starved`, `hardsub`, `interpolated`, `dvOnly`) |
+| `outcome` | `2160`, `1080`, `720`, `sd`: the best debrid file's effective height (a 4K judged upscaled or starved is 1080; a 1440 reads as 1080; a file with no known height reads as sd), then `web_only` (web streams and no debrid file), `nothing` |
+| `found` | per service: count of files/streams per quality bucket of their effective height, e.g. `{"realdebrid":{"2160":2,"1080":4},"alldebrid":{"2160":1},"vixsrc":{"1080":1}}`. A flagged 4K is counted as the 1080 it shows (its `judged` upscaled count says so) |
+| `best` | the best debrid file, ranked by effective height, then tier, then score: `provider`, `height` (the height its release name claims), `effectiveHeight`, `tier`, `score`, `flags`, `bitrateBps` (the file's average bit rate), `sizeBytes`, `codec`, `container`, `releaseTitle` (a release name is not a link: a name that holds one is left out) |
+| `judged` | per service: count of debrid files per verdict (`tier3`, `tier2`, `tier1`, then one each for `upscaled`, `starved`, `hardsub`, `interpolated`, and `dvOnly` for a file flagged `dv-only`) |
 | `cache` | whether the answer came from the cache |
-| `indexFailed` | the torrent index did not answer |
-| `timings` | `realDebridMs`, `allDebridMs`, `first1080Ms`, `first2160Ms`, `providersMs` |
+| `indexFailed` | the torrent index did not answer. Always false in a written summary for now: a search whose index failed never settles, so it is not written (the `torrentio_fetch` events record the failure) |
+| `timings` | `realDebridMs` (the Real-Debrid roster's time; when it was cut short, the time it was given up), `allDebridMs`, `first1080Ms`, `first2160Ms`, `providersMs` (the web providers' time, when the answer waited for them). A time that was not reached is left out |
 
 ### `web` / `player_feedback`, new `feedbackEvent` values
 

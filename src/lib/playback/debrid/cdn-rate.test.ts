@@ -1,7 +1,8 @@
 /// <reference types="bun-types" />
 import { describe, expect, it } from "bun:test";
 import type { PlaybackSource } from "../types";
-import { cdnRate, measureCdnRate, recordCdnRate, withCdnRates } from "./cdn-rate";
+import { metrics } from "../../metrics";
+import { __resetCdnRatesForTests, cdnRate, measureCdnRate, recordCdnRate, settleCdnMeasurement, withCdnRates } from "./cdn-rate";
 
 const MB = 1024 * 1024;
 
@@ -65,5 +66,37 @@ describe("withCdnRates", () => {
     expect(slow?.cdnBytesPerSec).toBe(600_000);
     expect(unmeasured?.cdnBytesPerSec).toBeUndefined();
     expect(web?.cdnBytesPerSec).toBeUndefined();
+  });
+});
+
+/** The value of one series in the live metrics text, or 0 while it has not been seen. */
+function sample(series: string): number {
+  const row = metrics().render().split("\n").find((line) => line.startsWith(`${series} `));
+  return row === undefined ? 0 : Number(row.slice(series.length + 1));
+}
+
+describe("settleCdnMeasurement", () => {
+  it("counts each measurement by its outcome, and keeps the rate gauge at the service's best, in bits per second", () => {
+    __resetCdnRatesForTests();
+    const now = 3_000_000_000;
+    const ok = 'ac_web_cdn_measurements_total{service="torbox",outcome="ok"}';
+    const failed = 'ac_web_cdn_measurements_total{service="torbox",outcome="failed"}';
+    const gauge = 'ac_web_cdn_rate_bits{service="torbox"}';
+    const okBefore = sample(ok);
+    const failedBefore = sample(failed);
+
+    settleCdnMeasurement("torbox", null, now);
+    expect(sample(failed) - failedBefore).toBe(1);
+    expect(sample(ok) - okBefore).toBe(0);
+
+    settleCdnMeasurement("torbox", 5 * MB, now);
+    expect(sample(ok) - okBefore).toBe(1);
+    expect(sample(gauge)).toBe(5 * MB * 8);
+
+    // A slower reading later does not pull the gauge down: the best of the last half hour stands.
+    settleCdnMeasurement("torbox", 2 * MB, now + 60_000);
+    expect(sample(ok) - okBefore).toBe(2);
+    expect(sample(gauge)).toBe(5 * MB * 8);
+    expect(sample(failed) - failedBefore).toBe(1);
   });
 });

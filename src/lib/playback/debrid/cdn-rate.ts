@@ -13,6 +13,7 @@
 import type { PlaybackSource } from "../types";
 import type { DebridProvider } from "./cached-stream";
 import { parseDebridPlaybackSourceId } from "./debrid-source-id";
+import { cdnMeasurements, cdnRateBits } from "../../telemetry/web-metrics";
 
 /** How often a service in use is measured again. */
 const MEASURE_EVERY_MS = 10 * 60 * 1000;
@@ -25,6 +26,7 @@ const MEASURE_MAX_BYTES = 64 * 1024 * 1024;
 /** Read from a little way in: past the header every other reader of the file is asking for. */
 const MEASURE_FROM_BYTE = 32 * 1024 * 1024;
 const MS_PER_SECOND = 1000;
+const BITS_PER_BYTE = 8;
 /** Nothing is read off a CDN under test. */
 const MEASURES = process.env.NODE_ENV !== "test";
 
@@ -80,6 +82,23 @@ export function recordCdnRate(provider: DebridProvider, bytesPerSec: number, now
   readings.set(provider, [...kept, { bytesPerSec, at: now }]);
 }
 
+/**
+ * Counts one finished measurement, and keeps the live rate gauge at the
+ * service's best rate now, in bits per second. A measurement that failed
+ * counts as failed and leaves the rate as it was. Never throws.
+ */
+export function settleCdnMeasurement(provider: DebridProvider, bytesPerSec: number | null, now = Date.now()): void {
+  try {
+    cdnMeasurements.inc({ service: provider, outcome: bytesPerSec === null ? "failed" : "ok" });
+    if (bytesPerSec === null) return;
+    recordCdnRate(provider, bytesPerSec, now);
+    const best = cdnRate(provider, now);
+    if (best !== null) cdnRateBits.set({ service: provider }, best * BITS_PER_BYTE);
+  } catch {
+    // A failed count never breaks the measurement.
+  }
+}
+
 /** The rate a service's CDN has shown it can deliver, in bytes per second. Null when it has not been measured lately. */
 export function cdnRate(provider: DebridProvider, now = Date.now()): number | null {
   const recent = (readings.get(provider) ?? []).filter((reading) => now - reading.at < BEST_OF_MS);
@@ -108,8 +127,8 @@ export function noteCdnLink(provider: DebridProvider, url: string, now = Date.no
   if (!MEASURES || now - (lastStarted.get(provider) ?? 0) < MEASURE_EVERY_MS) return;
   lastStarted.set(provider, now);
   void measureCdnRate(url).then((rate) => {
-    if (rate !== null) recordCdnRate(provider, rate);
+    settleCdnMeasurement(provider, rate);
     // A link that would not be read says nothing of the CDN: the next roster tries again with another.
-    else lastStarted.delete(provider);
+    if (rate === null) lastStarted.delete(provider);
   });
 }

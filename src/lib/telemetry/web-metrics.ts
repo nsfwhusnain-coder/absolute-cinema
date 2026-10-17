@@ -69,6 +69,9 @@ export const playerActiveSessions = registry.gauge("ac_web_player_active_session
 export const cdnRateBits = registry.gauge("ac_web_cdn_rate_bits", "A debrid service's CDN as last measured, in bits per second over one connection.", ["service"]);
 export const cdnMeasurements = registry.counter("ac_web_cdn_measurements_total", "CDN speed measurements made.", ["service", "outcome"]);
 
+// Whether each process's metrics were read for this scrape of /api/metrics (1) or left out (0).
+export const metricsSourceUp = registry.gauge("ac_web_metrics_source_up", "Whether a process's metrics could be read for this scrape: 1 yes, 0 no.", ["source"]);
+
 /** A device class as metrics are labelled: the player's own class, or "other". */
 export function deviceLabel(deviceClass: unknown): string {
   return typeof deviceClass === "string" && /^(desktop|tablet|phone|tv)$/.test(deviceClass) ? deviceClass : "other";

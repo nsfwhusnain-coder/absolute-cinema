@@ -76,7 +76,10 @@ import {
 } from "./providers/stream-mime";
 import { isDebugEnabled, recordDebugCapture, flushDebugDump } from "./debug-dump";
 import { raceWithHardTimeout } from "./enrich-timeout";
-import { raceProviderArms } from "./provider-race";
+import { raceProviderArms, type ProviderRaceOutcome } from "./provider-race";
+import { metrics } from "../../src/lib/metrics";
+import { providerLabel, streamQualityBucket } from "../../src/lib/telemetry/scraper-labels";
+import { browserScrapes, providerResults, providerSeconds, providerStreams, scrapeRequests } from "./scraper-metrics";
 import { filterHighQualitySources } from "./quality-floor";
 import {
   effectiveMaxHeight as rankEffectiveMaxHeight,
@@ -2605,8 +2608,10 @@ async function resolveFastApiSources(
       firstHitGraceMs: FAST_FIRST_GRACE_MS,
       maxWaitMs: FAST_MAX_WAIT_MS,
       onLateEntries: (_provider, entries) => options.onLateSources?.(entries),
+      onEntries: (provider, entries) => countProviderStreams(provider, entries),
       onOutcome: (outcome) => {
         recordEvent("scraper", "provider_result", { ...outcome, mode: "fast" });
+        countProviderOutcome(outcome, "fast");
         logAt(
           outcome.status === "error" ? "warn" : "info",
           `[provider] fast request provider=${outcome.provider} status=${outcome.status} count=${outcome.count} ms=${outcome.ms} late=${outcome.late}${outcome.error ? ` error=${outcome.error}` : ""}`
@@ -2627,6 +2632,45 @@ async function resolveFastApiSources(
     `[scrape] fast race → ${race.entries.length} source(s) in ${race.totalMs}ms (first@${race.firstHitMs ?? "—"}ms)`
   );
   return [...race.entries];
+}
+
+/*
+ * The scraper's live counts (docs/TELEMETRY.md). Each one is wrapped: a count
+ * that fails must never fail the scrape it describes.
+ */
+function countProviderOutcome(outcome: ProviderRaceOutcome, mode: "fast" | "full"): void {
+  try {
+    const provider = providerLabel(outcome.provider);
+    providerResults.inc({ provider, status: outcome.status, mode });
+    providerSeconds.observe({ provider, mode }, outcome.ms / 1000);
+  } catch {
+    // Telemetry never fails a scrape.
+  }
+}
+
+function countProviderStreams(provider: string, entries: readonly SourceEntry[]): void {
+  try {
+    const label = providerLabel(provider);
+    for (const entry of entries) providerStreams.inc({ provider: label, quality: streamQualityBucket(entry) });
+  } catch {
+    // Telemetry never fails a scrape.
+  }
+}
+
+function countScrapeRequest(mode: "fast" | "full", cacheHit: boolean): void {
+  try {
+    scrapeRequests.inc({ mode, cache: cacheHit ? "hit" : "miss" });
+  } catch {
+    // Telemetry never fails a scrape.
+  }
+}
+
+function countBrowserScrape(outcome: "hit" | "empty" | "timeout" | "error"): void {
+  try {
+    browserScrapes.inc({ outcome });
+  } catch {
+    // Telemetry never fails a scrape.
+  }
 }
 
 function countUniqueSources(entries: SourceEntry[]): number {
@@ -2807,6 +2851,8 @@ async function playwrightFallback(
     // Empty embeds for a title is not a Playwright outage — do not trip the circuit
     // (was recordFailure("no_embed_streams") → circuit open → skip all future embeds).
     recordSuccess("playwright", ms);
+    // Nothing found with the wave's whole budget spent is a timeout, not a site with nothing to give.
+    countBrowserScrape(snapshot.length ? "hit" : ms >= waveBudgetMs ? "timeout" : "empty");
     if (!snapshot.length) {
       logAt(
         "info",
@@ -2822,6 +2868,7 @@ async function playwrightFallback(
     cancelAllInFlight();
     const message = e instanceof Error ? e.message : String(e);
     recordFailure("playwright", ms, message);
+    countBrowserScrape(collected.length ? "hit" : "error");
     const debugPath = await flushDebugDump();
     if (debugPath) logAt("info", `[debug] scraper dump written (after error): ${debugPath}`);
     return collected.slice();
@@ -3307,7 +3354,8 @@ async function scrapeStream(
   mediaType: "movie" | "tv",
   season?: number,
   episode?: number,
-  options: { fast?: boolean; noCache?: boolean } = {}
+  /** `servedFromCache` is set on the way out, when the answer came from the result cache. */
+  options: { fast?: boolean; noCache?: boolean; servedFromCache?: boolean } = {}
 ): Promise<ScrapeResult> {
   if (mediaType === "tv" && (season == null || episode == null)) {
     return { streamUrl: null, sources: [], error: "TV requires season and episode." };
@@ -3332,6 +3380,7 @@ async function scrapeStream(
   const bypassCache = options.noCache && cached != null;
 
   if (cached && !bypassCache) {
+    options.servedFromCache = true;
     logAt("info", `[cache] hit for ${key} (${cached.sources.length} source(s))`);
     const anyAuto =
       cached.sources.some((s) => s.verified !== false && s.probe?.ok !== false);
@@ -3524,7 +3573,8 @@ async function executeUnresolvedScrape(
       maxWaitMs: FULL_API_MAX_WAIT_MS,
       // Share each hit with the fast cache right away: the player re-asks the
       // fast endpoint while this resolve is still settling and probing.
-      onEntries: (_provider, entries) => {
+      onEntries: (provider, entries) => {
+        countProviderStreams(provider, entries);
         const fastKey = siblingFastKey(key);
         if (fastKey) mergeIntoCache(fastKey, entries);
       },
@@ -3539,6 +3589,7 @@ async function executeUnresolvedScrape(
       },
       onOutcome: (outcome) => {
         recordEvent("scraper", "provider_result", { ...outcome, mode: "full", request: key });
+        countProviderOutcome(outcome, "full");
         logAt(
           outcome.status === "error" ? "warn" : "info",
           `[provider] request=${key} provider=${outcome.provider} status=${outcome.status} count=${outcome.count} ms=${outcome.ms} late=${outcome.late}${outcome.error ? ` error=${outcome.error}` : ""}`
@@ -3749,6 +3800,13 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // Read by the web app's /api/metrics, which passes it on to Prometheus.
+  if (url.pathname === "/metrics") {
+    res.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+    res.end(metrics().render());
+    return;
+  }
+
   if (url.pathname === "/scrape" || url.pathname === "/prefetch") {
     const tmdbId = Number(url.searchParams.get("tmdbId"));
     const mediaType = (url.searchParams.get("mediaType") || "movie") as "movie" | "tv";
@@ -3780,15 +3838,18 @@ const server = createServer(async (req, res) => {
 
     // Scoped to this request's async context — see `qualityHintStore`. No
     // reset needed (and no reset RACE): the value dies with the context.
+    const scrape: { fast: boolean; noCache: boolean; servedFromCache?: boolean } = { fast, noCache };
     await qualityHintStore.run(qualityHintHeight, () =>
       contentClassStore.run(contentClass, async () => {
         try {
-          const result = await scrapeStream(tmdbId, mediaType, season, episode, { fast, noCache });
+          const result = await scrapeStream(tmdbId, mediaType, season, episode, scrape);
           res.end(JSON.stringify(result));
         } catch (e: unknown) {
           res.statusCode = 500;
           const message = e instanceof Error ? e.message : String(e);
           res.end(JSON.stringify({ streamUrl: null, sources: [], error: message }));
+        } finally {
+          countScrapeRequest(fast ? "fast" : "full", scrape.servedFromCache === true);
         }
       })
     );

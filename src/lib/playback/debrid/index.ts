@@ -73,6 +73,7 @@
  * completely unaffected until the owner opts into at least one.
  */
 import { logEvent, recordEvent } from "@/lib/event-log";
+import { recordDebridResolveTiming } from "@/lib/telemetry/debrid-timing";
 import type { MediaType, PlaybackSource } from "../types";
 import { inferAudioLanguageFromText } from "../source-facts";
 import { tmdb } from "../../tmdb";
@@ -1982,6 +1983,7 @@ export async function resolveDebridSources(
       settled,
       indexFailed,
     });
+    recordDebridResolveTiming({ mediaType: req.mediaType, tmdbId: req.tmdbId, season, episode }, took, indexFailed);
 
     const title = await profile;
     annotateDebridQuality(sources, title.runtimeMinutes, title.anime);
