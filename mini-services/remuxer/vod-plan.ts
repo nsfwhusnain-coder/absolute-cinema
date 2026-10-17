@@ -61,6 +61,23 @@ export function averageBitrateBps(totalSizeBytes: number, durationS: number): nu
   return Math.round((totalSizeBytes * 8) / durationS);
 }
 
+/**
+ * The longest stretch between keyframes, in seconds (the last one runs to the
+ * end of the file). A player trimming what it has played must keep at least
+ * this much behind the playhead: media is removed up to the next keyframe, so
+ * a shorter margin can take the picture group being shown. Null with fewer
+ * than two keyframes.
+ */
+export function maxKeyframeGapS(keyframes: readonly number[], durationS: number): number | null {
+  if (keyframes.length < 2) return null;
+  let longest = 0;
+  for (let i = 1; i < keyframes.length; i++) longest = Math.max(longest, keyframes[i]! - keyframes[i - 1]!);
+  if (Number.isFinite(durationS) && durationS > keyframes[keyframes.length - 1]!) {
+    longest = Math.max(longest, durationS - keyframes[keyframes.length - 1]!);
+  }
+  return Math.round(longest * 10) / 10;
+}
+
 /** Nominal length of the slices a segment is cut into for players that can start between keyframes. */
 export const TARGET_SLICE_S = 2;
 /** URI prefix of a slice, beside the segments' bare numbers. */

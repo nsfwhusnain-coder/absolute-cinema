@@ -160,8 +160,8 @@ describe("mediaPlatformFor", () => {
 describe("bufferProfileFor", () => {
   it("gives Chromium the desktop budget", () => {
     expect(bufferProfileFor("chromium")).toEqual({
-      forwardBytes: 90_000_000,
-      backBytes: 20_000_000,
+      forwardBytes: 105_000_000,
+      backBytes: 25_000_000,
       forwardMaxS: 120,
       backMaxS: 30,
       fallbackForwardS: 30,
@@ -172,7 +172,7 @@ describe("bufferProfileFor", () => {
 
   it("keeps each desktop budget under the cap of its browser", () => {
     // Chrome refuses appends at about 150 MB, Firefox at about 100 MB, and Safari evicts at about 290 MB.
-    expect(bufferProfileFor("chromium").forwardBytes).toBeLessThan(150_000_000);
+    expect(bufferProfileFor("chromium").forwardBytes + bufferProfileFor("chromium").backBytes).toBeLessThan(150_000_000);
     expect(bufferProfileFor("firefox").forwardBytes).toBeLessThan(100_000_000);
     expect(bufferProfileFor("safari").forwardBytes).toBeLessThan(290_000_000);
   });

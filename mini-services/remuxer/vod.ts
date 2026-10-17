@@ -32,6 +32,7 @@ import {
   SLICE_PREFIX,
   averageBitrateBps,
   buildVodPlaylist,
+  maxKeyframeGapS,
   computeSegmentBounds,
   computeSlicePlan,
   fragmentsInWindow,
@@ -189,6 +190,8 @@ export interface VodSessionInfo {
   durationS: number;
   /** The file's average bitrate in bits per second, or null when its size or length is not known. */
   bitrateBps: number | null;
+  /** The longest gap between keyframes in seconds: what a player must keep behind the playhead. Null when unknown. */
+  maxKeyframeGapS: number | null;
   segments: number;
   /** Where each segment starts: the times playback can begin from. */
   seekPoints: number[];
@@ -380,6 +383,7 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
       id,
       durationS: index.durationS,
       bitrateBps: averageBitrateBps(totalSize, index.durationS),
+      maxKeyframeGapS: maxKeyframeGapS(index.keyframes, index.durationS),
       segments: bounds.length - 1,
       seekPoints: bounds.slice(0, -1).map((t) => Number(t.toFixed(SEEK_POINT_DECIMALS))),
       videoCodecId: index.videoCodecId,

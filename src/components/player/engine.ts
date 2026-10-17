@@ -35,6 +35,8 @@ export interface Playable {
   withCredentials?: boolean;
   /** The file's average bitrate in bits per second, when the server knows it (a remux does). */
   declaredBitrateBps?: number;
+  /** The file's longest gap between keyframes in seconds, when the server knows it (a remux does). */
+  keyframeGapS?: number;
 }
 
 export interface QualityLevel {
@@ -148,7 +150,7 @@ export class MediaEngine {
       startAt = seekPointAtOrBefore(this.seekPoints, startAt);
     }
     const profile = activeBufferProfile();
-    const budget = new BufferBudget(profile, playable.declaredBitrateBps);
+    const budget = new BufferBudget(profile, playable.declaredBitrateBps, playable.keyframeGapS);
     const initial = budget.lengths();
     const hls = new Hls({
       enableWorker: hlsWorkerSupportedHere(),

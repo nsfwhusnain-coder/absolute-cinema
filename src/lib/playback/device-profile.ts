@@ -50,8 +50,8 @@ const MB = 1_000_000;
  */
 const PROFILES: Record<MediaPlatform, MediaBufferProfile> = {
   chromium: {
-    forwardBytes: 90 * MB,
-    backBytes: 20 * MB,
+    forwardBytes: 105 * MB,
+    backBytes: 25 * MB,
     forwardMaxS: 120,
     backMaxS: 30,
     fallbackForwardS: 30,

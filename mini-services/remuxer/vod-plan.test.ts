@@ -7,6 +7,7 @@ import {
   computeSlicePlan,
   fragmentsForSegment,
   fragmentsInWindow,
+  maxKeyframeGapS,
   segmentForTime,
   sliceWindow,
   type FragmentRecord,
@@ -175,5 +176,17 @@ describe("Fmp4StreamSplitter", () => {
     expect(out[0]!.bytes.length).toBe(stream[0]!.length + stream[1]!.length);
     expect(out[1]!.bytes.length).toBe(stream[2]!.length + stream[3]!.length);
     expect(out[2]!.bytes[out[2]!.bytes.length - 1]).toBe(9);
+  });
+});
+
+describe("maxKeyframeGapS", () => {
+  it("is the longest stretch between keyframes, the last one running to the end", () => {
+    expect(maxKeyframeGapS([0, 2, 12.4, 14], 15)).toBeCloseTo(10.4, 6);
+    expect(maxKeyframeGapS([0, 2, 4], 20)).toBe(16);
+  });
+
+  it("is unknown with fewer than two keyframes", () => {
+    expect(maxKeyframeGapS([0], 100)).toBeNull();
+    expect(maxKeyframeGapS([], 100)).toBeNull();
   });
 });

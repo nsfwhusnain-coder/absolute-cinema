@@ -15,8 +15,28 @@ import type { MediaBufferProfile } from "./device-profile";
 
 /** Never ask for less forward buffer than this: below it any hiccup is a stall. */
 const MIN_FORWARD_S = 6;
-/** Never keep less behind the playhead than this: it is what a small rewind lands on. */
-const MIN_BACK_S = 2;
+/**
+ * What is kept behind the playhead beyond the file's longest keyframe gap.
+ *
+ * hls.js trims the back buffer by time alone (to a multiple of the playlist's
+ * target duration, 3 s for a remux, before the playhead), and a browser that
+ * removes media also removes everything after it up to the next keyframe.
+ * With less kept behind than a keyframe gap, a trim reaches through the
+ * picture group being played: its frames vanish and playback freezes with
+ * seconds of media still buffered (seen on a 4K remux at 37 Mbit/s with 4 s
+ * kept behind and keyframes 10 s apart). One target duration and a second
+ * of margin on top of the gap keep every trim behind the current group.
+ */
+const KEYFRAME_GAP_MARGIN_S = 4;
+/**
+ * Kept behind when the keyframe gaps are not known: a web stream's segments
+ * each open on a keyframe, and hls.js trims to a segment boundary a whole
+ * segment back, so its trims never reach the group being played. This covers
+ * segments of up to eight seconds. A remux always reports its gaps.
+ */
+const UNKNOWN_KEYFRAME_BACK_S = 8;
+/** However long a file's keyframe gaps, never more than this is kept behind. */
+const MAX_KEYFRAME_BACK_S = 40;
 /** Weight of the newest segment in the running bitrate. */
 const BITRATE_SMOOTHING = 0.3;
 /**
@@ -46,13 +66,20 @@ export class BufferBudget {
   /** A rendition's bytes per second from the manifest, used until a segment has been measured. */
   private seededBytesPerSecond = 0;
   private scale = 1;
+  /** Seconds that must stay behind the playhead so a trim never reaches the picture group being played. */
+  private readonly minBackS: number;
 
-  /** `declaredBitrateBps` is the file's average bitrate in bits per second, when the server knows it. */
+  /**
+   * `declaredBitrateBps` is the file's average bitrate in bits per second, and
+   * `keyframeGapS` its longest gap between keyframes, when the server knows them.
+   */
   constructor(
     private readonly profile: MediaBufferProfile,
-    declaredBitrateBps?: number
+    declaredBitrateBps?: number,
+    keyframeGapS?: number
   ) {
     this.declaredBytesPerSecond = toBytesPerSecond(declaredBitrateBps ?? 0);
+    this.minBackS = minimumBackSeconds(keyframeGapS);
   }
 
   /**
@@ -80,22 +107,31 @@ export class BufferBudget {
   }
 
   lengths(): BufferLengths {
-    const { profile, scale } = this;
+    const { profile, scale, minBackS } = this;
     const forwardBytes = profile.forwardBytes * scale;
     const rate = this.bytesPerSecond();
     // Before any rate is known the conservative seconds stand in. They shrink
     // with the budget too, so a refusal still has an effect.
-    const forward = rate
-      ? clamp(forwardBytes / rate, MIN_FORWARD_S, profile.forwardMaxS)
-      : clamp(profile.fallbackForwardS * scale, MIN_FORWARD_S, profile.forwardMaxS);
-    const back = rate
-      ? clamp((profile.backBytes * scale) / rate, MIN_BACK_S, profile.backMaxS)
-      : clamp(profile.fallbackBackS * scale, MIN_BACK_S, profile.backMaxS);
+    if (!rate) {
+      return {
+        maxBufferLengthS: clamp(profile.fallbackForwardS * scale, MIN_FORWARD_S, profile.forwardMaxS),
+        maxMaxBufferLengthS: clamp(profile.fallbackForwardS * scale, MIN_FORWARD_S, profile.forwardMaxS),
+        backBufferLengthS: Math.max(minBackS, Math.min(profile.fallbackBackS * scale, profile.backMaxS)),
+        maxBufferSize: forwardBytes,
+      };
+    }
+    // The back buffer is the budget's share, but never less than the keyframe
+    // gap needs; what it takes beyond its share comes out of the forward part,
+    // so the two together stay inside what the browser holds.
+    const back = Math.max(minBackS, Math.min((profile.backBytes * scale) / rate, profile.backMaxS));
+    const totalBytes = (profile.forwardBytes + profile.backBytes) * scale;
+    const forwardRoom = Math.min(forwardBytes, totalBytes - back * rate);
+    const forward = clamp(forwardRoom / rate, MIN_FORWARD_S, profile.forwardMaxS);
     return {
       maxBufferLengthS: forward,
       maxMaxBufferLengthS: forward,
       backBufferLengthS: back,
-      maxBufferSize: forwardBytes,
+      maxBufferSize: Math.max(0, forwardRoom),
     };
   }
 
@@ -105,6 +141,12 @@ export class BufferBudget {
     if (!this.declaredBytesPerSecond) return this.measuredBytesPerSecond;
     return Math.max(this.measuredBytesPerSecond, DECLARED_FLOOR * this.declaredBytesPerSecond);
   }
+}
+
+/** Seconds to keep behind the playhead for a file whose longest keyframe gap is `keyframeGapS` (unknown when absent). */
+export function minimumBackSeconds(keyframeGapS?: number): number {
+  if (!(keyframeGapS !== undefined && Number.isFinite(keyframeGapS) && keyframeGapS > 0)) return UNKNOWN_KEYFRAME_BACK_S;
+  return Math.min(MAX_KEYFRAME_BACK_S, keyframeGapS + KEYFRAME_GAP_MARGIN_S);
 }
 
 /** Bits per second to bytes per second, or 0 when the figure is not usable. */

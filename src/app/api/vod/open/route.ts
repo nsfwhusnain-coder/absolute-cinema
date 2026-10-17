@@ -95,6 +95,7 @@ export async function GET(req: NextRequest) {
     id?: string;
     durationS?: number;
     bitrateBps?: number | null;
+    maxKeyframeGapS?: number | null;
     seekPoints?: number[];
     dynamicRange?: string;
     audio?: unknown;
@@ -125,6 +126,8 @@ export async function GET(req: NextRequest) {
       durationS: body.durationS,
       // The file's average bitrate: the player sizes its buffer's seconds from it.
       bitrateBps: body.bitrateBps ?? null,
+      // Its longest keyframe gap: the player keeps at least that much behind the playhead.
+      maxKeyframeGapS: body.maxKeyframeGapS ?? null,
       dynamicRange: body.dynamicRange ?? "SDR",
       audio: body.audio ?? null,
       audioIndex: body.audioIndex ?? null,
