@@ -2,6 +2,48 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.9.0] - 2026-10-18
+
+### Added
+- **Invite links**, to share the site with testers without opening it to
+  everyone. Settings → Server → Profiles makes a link good for one person or
+  a few, for a day, a week, a month or until you switch it off; it opens the
+  sign-up form (`/join/abcd-efgh-jkmn`) even while sign-ups are closed. Used
+  up, expired or switched off, the link says so; one that cannot be checked
+  just then offers another try. Copied links carry the site's public address
+  when it has one, so a link made on the machine itself still works outside.
+  Each link takes at most 20 sign-up attempts an hour, so it cannot fill the
+  server in a burst or be used to find out which names exist.
+- **New profiles need a PIN**: a switch beside the other two, so on a server
+  shared outside the home no profile opens for anyone who knows its name. When
+  it is on, the first profile (the admin) needs one too.
+- **A public instance** (`PUBLIC_INSTANCE=1`), a second copy of the site for
+  people outside the home behind a tunnel, beside your own, which stays as it
+  is. Its door starts locked (sign-ups closed, no profile list, a PIN on every
+  profile); every viewer counts against the upload in the capacity gate;
+  debrid links never reach a browser (debrid files play only through the
+  server, remuxed; the player is sent a stand-in for the link; MP4 files, which
+  only a browser could play, are not offered), so the debrid services still
+  see one home address; and downloads are off. `SIGNUPS_OPEN_DEFAULT`,
+  `PROFILE_PICKER_DEFAULT` and `REQUIRE_PIN_DEFAULT` set other starting points
+  for the switches. docs/SHARING.md explains how to run one behind Tailscale
+  Funnel.
+- **Playback caps**: `PLAYBACK_MAX_HEIGHT` and `PLAYBACK_MAX_MBPS` offer only
+  files a narrow connection carries, and web streams list no rendition above
+  the height cap; with a cap below 4K no 4K is looked for and the player does
+  not wait for one.
+
+### Fixed
+- **The sign-in screen showed "Who's watching?" for a moment** on a server
+  that hides its profiles, before switching to the name and PIN form. It
+  waits for the server's answer now, and does not jump back to a screen the
+  visitor has left when the window comes to the front again.
+- **A remux ticket's key could be worked out** on a server started without a
+  session secret (the Docker entrypoint always makes one). Such a server keys
+  its tickets with a random secret of its own now.
+- Two sign-ups racing for an invite's last use: the one that loses is told it
+  is used up, instead of "Registration failed".
+
 ## [2.8.1] - 2026-10-17
 
 ### Fixed
