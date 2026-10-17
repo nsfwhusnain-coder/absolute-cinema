@@ -370,6 +370,7 @@ async function probeTotalSize(url: string): Promise<number | null> {
 }
 
 async function createSession(cacheRoot: string, id: string, url: string, audio: VodAudioRequest, viewer: VodViewer, sizeHint?: number): Promise<Session> {
+  const indexStarted = Date.now();
   const fetcher = httpRangeFetcher(url, RANGE_TIMEOUT_MS, sizeHint);
   const index = await readMkvKeyframes(fetcher).catch((err: unknown) => {
     throw new VodError(`index read failed: ${err instanceof Error ? err.message : String(err)}`, 502);
@@ -442,7 +443,8 @@ async function createSession(cacheRoot: string, id: string, url: string, audio: 
   };
   sessions.set(id, session);
   const range = index.dolbyVision ? `Dolby Vision profile ${index.dolbyVision.profile} as ${session.info.dynamicRange}` : session.info.dynamicRange;
-  log(`open ${id}: ${index.durationS.toFixed(0)}s, ${bounds.length - 1} segments, ${index.keyframes.length} keyframes, audio #${session.audioIndex} (${audioMode}), ${range}`);
+  const indexed = `indexed in ${Date.now() - indexStarted} ms over ${fetcher.requests()} reads${sizeHint ? "" : ", size unknown"}`;
+  log(`open ${id}: ${index.durationS.toFixed(0)}s, ${bounds.length - 1} segments, ${index.keyframes.length} keyframes, audio #${session.audioIndex} (${audioMode}), ${range}; ${indexed}`);
   return session;
 }
 

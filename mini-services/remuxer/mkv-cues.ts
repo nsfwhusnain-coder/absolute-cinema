@@ -600,8 +600,9 @@ class RangeRequestError extends Error {
   }
 }
 
-export function httpRangeFetcher(url: string, timeoutMs: number, sizeHint?: number): SizedRangeFetcher & { size(): number | null } {
+export function httpRangeFetcher(url: string, timeoutMs: number, sizeHint?: number): SizedRangeFetcher & { size(): number | null; requests(): number } {
   let totalSize: number | null = null;
+  let requests = 0;
   let sized: (total: number) => void = () => {};
   // A size the caller already knew (the debrid service's, for its file) lets the
   // tail and the rest of the head be asked for alongside the first request
@@ -613,6 +614,7 @@ export function httpRangeFetcher(url: string, timeoutMs: number, sizeHint?: numb
       : new Promise<number>((resolve) => (sized = resolve));
   const request = async (start: number, end: number) => {
     await linkTurn(url);
+    requests++;
     const res = await fetch(url, {
       headers: { Range: `bytes=${start}-${end}` },
       signal: AbortSignal.timeout(timeoutMs),
@@ -650,5 +652,5 @@ export function httpRangeFetcher(url: string, timeoutMs: number, sizeHint?: numb
     }
     return new Uint8Array(await res.arrayBuffer());
   };
-  return Object.assign(fetcher, { size: () => totalSize, whenSized });
+  return Object.assign(fetcher, { size: () => totalSize, requests: () => requests, whenSized });
 }
