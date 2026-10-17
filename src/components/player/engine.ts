@@ -86,6 +86,14 @@ export interface LoadOptions {
  * cannot carry this is handled by moving to another server instead.
  */
 const MIN_AUTO_BITRATE_BPS = 1_200_000;
+/**
+ * Automatic quality keeps to renditions this tall when the stream has one: the
+ * owner's rule is nothing under 1080p unless the title has nothing better. A
+ * web stream's ladder (Vixsrc's runs 427p to 1080p) was let fall to 427p by a
+ * bandwidth estimate dragged down by slow first bytes; a connection that truly
+ * cannot carry 1080p stalls and moves to another source instead.
+ */
+const AUTO_FLOOR_HEIGHT = 1080;
 const FRAG_TIMEOUT_MS = 30_000;
 
 export type EngineKind = "hlsjs" | "native_hls" | "native_file";
@@ -199,6 +207,8 @@ export class MediaEngine {
       const start = openingLevel(data.levels, startHeight);
       if (start >= 0) hls.startLevel = start;
       if (start >= 0 && options.lockLevel) hls.nextLevel = start;
+      // Automatic quality may not fall below 1080p (or the best the stream has, when that is less).
+      hls.config.minAutoBitrate = autoFloorBitrate(data.levels, MIN_AUTO_BITRATE_BPS);
       // A web stream's manifest states its opening rendition's bitrate, which the budget uses until a segment is measured.
       if (start >= 0) budget.seed(data.levels[start]!.bitrate);
       applyBudget();
@@ -385,6 +395,21 @@ function isBuffered(video: HTMLVideoElement, time: number): boolean {
 }
 
 /** Index of the highest rendition at or below `height` (the lowest one if none are). */
+/**
+ * The least bitrate automatic quality may choose (hls.js's minAutoBitrate,
+ * matched against each rendition's peak): that of the smallest rendition at
+ * least AUTO_FLOOR_HEIGHT tall, or of the tallest when none is. Never below
+ * `least`. Renditions of unknown height are left out of the reckoning.
+ */
+export function autoFloorBitrate(levels: readonly { height: number; maxBitrate: number }[], least: number): number {
+  const sized = levels.filter((level) => level.height > 0 && level.maxBitrate > 0);
+  if (!sized.length) return least;
+  const tallest = Math.max(...sized.map((level) => level.height));
+  const floorHeight = Math.min(AUTO_FLOOR_HEIGHT, tallest);
+  const floor = Math.min(...sized.filter((level) => level.height >= floorHeight).map((level) => level.maxBitrate));
+  return Math.max(least, floor);
+}
+
 export function openingLevel(levels: readonly { height: number }[], height: number): number {
   let best = -1;
   levels.forEach((level, index) => {
