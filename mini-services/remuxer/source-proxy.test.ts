@@ -404,17 +404,20 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     expect(source.lanes).toBeGreaterThan(1);
   });
 
-  it("starts a parallel read with small pieces that grow by equal steps, so they arrive in order", async () => {
-    const total = 2 * 1024 * KB;
+  it("shares the first seconds out evenly, then grows the pieces by equal steps, so they arrive in order", async () => {
+    const total = 4 * 1024 * KB;
     const tuning: LaneTuning = { probeBytes: 256 * KB, chunkBytes: 256 * KB, firstChunkBytes: 32 * KB, earlyDecisionMs: 60_000 };
     const up = await upstream(total, SLOW);
-    const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: BUSY_BPS, lanes: 8, laneBps: 125_000 };
+    // 128 KB/s of file: four seconds of it is 512 KB, 64 KB for each of eight connections.
+    const source: ProxySource = { url: up.url, totalSize: total, cached: [], targetBps: 1_024_000, lanes: 8, laneBps: 125_000 };
     const port = await proxy(source, WINDOW, tuning);
     const res = await fetch(`http://127.0.0.1:${port}/src`, { headers: { Range: "bytes=0-" } });
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(slice(0, total - 1));
-    const sizes = up.asked.slice(0, 9).map(([start, end]) => end - start + 1);
-    // Eight connections: the steady 256 KiB is reached in eight steps of 32 KiB.
-    expect(sizes).toEqual([32, 64, 96, 128, 160, 192, 224, 256, 256].map((kb) => kb * KB));
+    // In the order of the file: pieces started together reach the upstream in any order.
+    const sizes = [...up.asked].sort((a, b) => a[0] - b[0]).slice(0, 17).map(([start, end]) => end - start + 1);
+    expect(sizes.slice(0, 8)).toEqual(new Array(8).fill(64_000));
+    // Then the steady 256 KiB in eight steps of 32 KiB.
+    expect(sizes.slice(8)).toEqual([32, 64, 96, 128, 160, 192, 224, 256, 256].map((kb) => kb * KB));
   });
 
   it("waits out a link's 204 refusals and delivers every byte, on as many connections", async () => {
@@ -501,10 +504,13 @@ describe("serveRange remembers a CDN's speed and decides early", () => {
     const steady = steadyPieceBytes(source, 128 * 1024 * KB, tuning);
     expect(steady).toBe(3_906_250);
     expect(12 / (steady / 312_500)).toBeLessThanOrEqual(1.2 * 0.8 + 1e-9);
-    // The first round grows to it in twelve equal steps.
-    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 1)).toBe(325_521);
-    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 6)).toBe(1_953_125);
-    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 12)).toBe(steady);
+    // The second round grows to it in twelve equal steps.
+    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 13)).toBe(325_521);
+    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 18)).toBe(1_953_125);
+    expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 24)).toBe(steady);
     expect(rampedPieceBytes(source, 128 * 1024 * KB, tuning, 40)).toBe(steady);
+    // The first round: four seconds of a 16 Mbit/s file across the twelve, 666,667 bytes each.
+    expect(rampedPieceBytes({ ...source, targetBps: 16_000_000 }, 128 * 1024 * KB, tuning, 1)).toBe(666_667);
+    expect(rampedPieceBytes({ ...source, targetBps: 16_000_000 }, 128 * 1024 * KB, tuning, 12)).toBe(666_667);
   });
 });

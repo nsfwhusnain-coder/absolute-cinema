@@ -109,6 +109,15 @@ const LANE_WEIGHT = 0.3;
 const LANE_WEIGHT_DOWN = 0.6;
 /** Seconds of one connection's reading that a parallel piece grows to. */
 const PIECE_SECONDS = 8;
+/** Seconds of the file the first round of parallel pieces covers: a picture group, for most releases. */
+const FIRST_ROUND_SECONDS = 4;
+/**
+ * A probe may decide after this much reading past its settle when the
+ * connection is plainly far too slow: needing this many connections or more.
+ * A CDN giving 2.5 Mbit/s a connection is plain in a fraction of a second.
+ */
+const PLAINLY_SLOW_MS = 300;
+const PLAINLY_SLOW_LANES = 4;
 /** The share of a link's paced rate that a parallel read plans to ask for, leaving room for its index reads and retries. */
 const PACING_SHARE = 0.8;
 /** After a 429 or 503 halves a file's connections, they are not raised again for this long. */
@@ -474,10 +483,11 @@ async function streamUpstream(
           if (begunAt < settleMs) return;
           settledBytes += bytes;
           settledWaitMs += waitedMs;
-          if (source.lanes !== undefined || settledWaitMs < tuning.earlyDecisionMs) return;
+          if (source.lanes !== undefined || settledWaitMs < Math.min(PLAINLY_SLOW_MS, tuning.earlyDecisionMs)) return;
           // Long enough to tell: a connection this slow goes parallel now, mid-probe.
           const laneBps = bytesPerSecond({ bytes: settledBytes, ms: settledWaitMs });
-          if (lanesFor({ targetBps: source.targetBps, laneBps, maxLanes: MAX_LANES }) < 2) return;
+          const wanted = lanesFor({ targetBps: source.targetBps, laneBps, maxLanes: MAX_LANES });
+          if (wanted < 2 || (settledWaitMs < tuning.earlyDecisionMs && wanted < PLAINLY_SLOW_LANES)) return;
           source.laneBps = laneBps;
           rememberDomainSpeed(source, laneBps);
           decide(source, laneBps);
@@ -554,18 +564,30 @@ export function steadyPieceBytes(source: ProxySource, windowBytes: number, tunin
 }
 
 /**
- * The size of the `nth` piece (from 1) of one parallel read. Over the first
- * round of connections the pieces grow by equal steps to the steady size, so
- * they arrive one after another, in the order the reader needs them, and keep
- * doing so: the first in about a second, and none of the later ones holding
- * up the bytes behind it while the rest wait. Pieces that all started at once
- * and grew no further would arrive together and then leave the reader waiting
- * on the next round, a whole piece's time on a slow connection.
+ * The size of the `nth` piece (from 1) of one parallel read.
+ *
+ * The first round, one piece per connection, shares out the first
+ * FIRST_ROUND_SECONDS of the file evenly: ffmpeg makes the first picture only
+ * once it has a whole picture group, and pieces of one size all arrive in a
+ * connection's time to first byte and a second or so. Pieces that grew from
+ * small instead had the group in only after four or five seconds.
+ *
+ * The second round grows by equal steps to the steady size, so its pieces
+ * come in one after another, in the order they are played, and the rounds
+ * after keep that order. Had the second round been all of the steady size, it
+ * would have arrived together, a whole piece's time later (eight seconds on a
+ * slow connection), with playback waiting on it.
  */
 export function rampedPieceBytes(source: ProxySource, windowBytes: number, tuning: LaneTuning, nth: number): number {
   const steady = steadyPieceBytes(source, windowBytes, tuning);
-  const step = steady / slotsFor(source, windowBytes, tuning);
-  return Math.min(steady, Math.max(tuning.firstChunkBytes, Math.round(nth * step)));
+  const slots = slotsFor(source, windowBytes, tuning);
+  if (nth <= slots) {
+    const fileBps = source.targetBps && source.targetBps > 0 ? source.targetBps : MIN_TARGET_BPS;
+    const firstRound = ((fileBps / 8) * FIRST_ROUND_SECONDS) / slots;
+    return Math.min(steady, Math.max(tuning.firstChunkBytes, Math.round(firstRound)));
+  }
+  const step = steady / slots;
+  return Math.min(steady, Math.max(tuning.firstChunkBytes, Math.round((nth - slots) * step)));
 }
 
 /**
