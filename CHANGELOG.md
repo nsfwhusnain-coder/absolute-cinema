@@ -2,6 +2,63 @@
 
 All notable changes to Absolute Cinema. Versions follow [Semantic Versioning](https://semver.org).
 
+## [2.8.0] - 2026-10-17
+
+### Added
+- **A crowd can no longer overheat the server or bring it down.** Every
+  stream now holds a seat, and a seat costs what its stream takes of the
+  machine: a 4K remux about twice a 1080p one, and the internet link is
+  counted too. Past what fits, new viewers wait in a queue ("We've reached our
+  limit. You're number 2 in the queue.") and their film starts by itself as
+  soon as someone finishes; when the queue is full they are asked to try again
+  later. The owner's profiles go to the front of the queue. docs/CAPACITY.md
+  explains it all.
+  - **The server watches itself every second:** its CPU (and whether its
+    quota runs out), its memory, the CPU's temperature, how late the remuxer
+    runs, and whether viewers are buffering. When any of them says it is at
+    its limit, nobody new is let in, whatever the estimates said.
+  - **In real danger it stops streams one at a time** (too hot, out of
+    memory, the remuxer starved), newest and heaviest first and the owner's
+    last, and those viewers see "You've been disconnected" with their place
+    in the film saved and a button to rejoin the queue. Long before the
+    machine's own emergency reboot.
+  - Waiting for 4K while a 1080p stream would fit now, the queue offers
+    "Start now in 1080p".
+  - A refusal for capacity never counts against a source: the player tries no
+    other server behind it, and nothing is refused or cooled down for it.
+  - Settings (`CAPACITY_*` in `.env`) for the budgets, temperatures and queue,
+    and a drill file to try the queue and the stops on purpose.
+  - Metrics, events and a Grafana row for all of it (docs/TELEMETRY.md).
+  - The remuxer's main thread is a budget of its own: every remuxed byte
+    passes through its one JavaScript thread, which fills long before the
+    CPU's other cores are busy. It is read on its own (the process's figure
+    counts its networking and garbage-collection threads too).
+  - At most two streams warm up at once: a queue let in faster than that
+    raced every new stream for its first minute together and filled the
+    internet link.
+- **A live dashboard at `/hub`** for the owner: everyone watching right now,
+  with the poster and title, who it is, the device, the quality (4K, HDR,
+  Dolby Vision), the source, how far in they are, the buffer and stalls, and
+  what their stream costs the server; the server's CPU, the remuxer's thread,
+  temperature, memory, download and upload; charts of the last hour; the
+  queue; and a feed of who started, stopped, waited or was disconnected.
+  Open it signed in as an owner profile, or with its key (`HUB_KEY`) on a
+  screen that is not, such as a CasaOS tile. docs/HUB.md explains it.
+
+### Changed
+- **A stream reads its file at twice its bitrate once it is a minute ahead of
+  its viewer**, instead of as fast as the CDN goes. The first minute is still
+  made at full speed (a start, a seek, a viewer who fell behind), and the
+  stream still rests four minutes ahead, as before; only the race between is
+  calmer. Three viewers starting together used to read 260 Mbit/s from their
+  CDNs to serve 70, which took the remuxer's thread and the internet link from
+  everyone else, and made a seek wait behind the read-ahead.
+- The remuxer's run limit (`VOD_MAX_RUNS`) refusing a stream is a capacity
+  refusal now: the player shows the queue instead of trying another server.
+
+### Fixed
+- `ac_remux_runs_ended_total`'s help named every reason but `session_ended`.
+
 ## [2.7.0] - 2026-10-17
 
 ### Added
